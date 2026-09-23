@@ -143,6 +143,10 @@ class ToolIntegrationTests(unittest.TestCase):
         with GraphQuery(self.database) as query:
             return query.find_related_code(document, **kwargs)
 
+    def task_context(self, symbol: str) -> dict:
+        with GraphQuery(self.database) as query:
+            return query.task_context(symbol)
+
     def multi_target_document(self) -> str:
         write(self.root / "docs" / "multi.md", """# Multi Target
 
@@ -489,6 +493,10 @@ class DiscoverySurfaceTests(unittest.TestCase):
     def tearDown(self) -> None:
         ToolIntegrationTests.tearDown(self)
 
+    def task_context(self, symbol: str) -> dict:
+        with GraphQuery(self.database) as query:
+            return query.task_context(symbol)
+
     def test_d9_b3_analysis_help_is_shared_and_generic(self) -> None:
         help_by_command = {
             command: command_help(command)
@@ -512,6 +520,45 @@ class DiscoverySurfaceTests(unittest.TestCase):
             "explain-symbol", "find-related-documents", "find-related-code"))
         for forbidden in ("D8", "A1", "A2", "B1", "B2", "C1", "C2", "pipeline"):
             self.assertNotIn(forbidden, combined)
+
+    def test_d9_c3_task_context_is_deterministic_and_evidence_backed(self) -> None:
+        first = self.task_context("src.main.dispatch")
+        second = self.task_context("src.main.dispatch")
+        self.assertEqual(first, second)
+        self.assertEqual(first["version"], "task-context-v0")
+        self.assertEqual(first["status"], "available")
+        self.assertLessEqual(len(first["primary_targets"]), 2)
+        self.assertLessEqual(len(first["relations"]), 12)
+        self.assertLessEqual(len(first["candidates"]), 6)
+        self.assertLessEqual(len(first["source_spans"]), 4)
+        for section in ("primary_targets", "relations", "candidates", "source_spans"):
+            for fact in first[section]:
+                self.assertTrue(fact["fact_id"])
+                self.assertTrue(fact["evidence_ids"])
+
+    def test_d9_c3_task_context_limit_and_cli_statuses(self) -> None:
+        value = {"primary_targets": [{"fact_id": "symbol:x"}, {"fact_id": "symbol:y"}],
+                 "relations": [{"x": "z" * 3000}], "candidates": [],
+                 "source_spans": [{"content": "z" * 3000}]}
+        trimmed = GraphQuery._task_context_trim(value)
+        self.assertLessEqual(len(json.dumps(trimmed, ensure_ascii=False,
+                                           separators=(",", ":")).encode("utf-8")), 6000)
+        self.assertTrue(trimmed["truncation"]["truncated"])
+        from provenlattice.cli import build_parser, run
+        missing = run(build_parser().parse_args([
+            "task-context", "missing", "--database", str(self.root / "none.db"), "--json"]))
+        self.assertEqual(missing["status"], "not_built")
+        corrupt_path = self.root / "corrupt.db"
+        corrupt_path.write_text("not sqlite", encoding="utf-8")
+        corrupt = run(build_parser().parse_args([
+            "task-context", "missing", "--database", str(corrupt_path), "--json"]))
+        self.assertEqual(corrupt["status"], "corrupt")
+        available = run(build_parser().parse_args([
+            "task-context", "src.main.dispatch", "--database", str(self.database), "--json"]))
+        stale = run(build_parser().parse_args([
+            "task-context", "src.main.dispatch", "--database", str(self.database), "--expected-base-commit", "wrong", "--json"]))
+        self.assertEqual(available["status"], "available")
+        self.assertEqual(stale["status"], "stale")
 
 
 if __name__ == "__main__":

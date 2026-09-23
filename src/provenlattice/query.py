@@ -581,6 +581,103 @@ class GraphQuery:
             "error": {"code": code, "message": message},
         }
 
+    def _task_context_span(self, node: dict, evidence_id: str, commit: str) -> dict | None:
+        path = self._source_path(node)
+        repository = decode_row(self.storage.repository()) if self.storage.repository() else {}
+        root = Path(repository.get("root_path") or "")
+        if not path or not root:
+            return None
+        try:
+            lines = (root / path).read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            return None
+        start = max(int(node.get("start_line") or 1), 1)
+        end = min(max(int(node.get("end_line") or start), start), len(lines))
+        # Keep the target line in a bounded, complete source range.
+        end = min(end, start + 19)
+        before = "\n".join(lines[:start - 1])
+        text = "\n".join(lines[start - 1:end])
+        start_byte = len((before + ("\n" if before else "")).encode("utf-8"))
+        end_byte = start_byte + len(text.encode("utf-8"))
+        return {"fact_id": f"span:{commit}:{path}:{start_byte}:{end_byte}",
+                "kind": "span", "file": path, "start_line": start, "end_line": end,
+                "start_byte": start_byte, "end_byte": end_byte, "content": text,
+                "evidence_ids": [evidence_id]}
+
+    @staticmethod
+    def _task_context_trim(value: dict) -> dict:
+        """Apply the frozen 6,000-byte response cap without partial facts."""
+        omitted = {"primary_targets": 0, "relations": 0, "candidates": 0, "source_spans": 0}
+        def encoded() -> int:
+            return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        # Lowest-ranked items are at the tail of these already deterministic lists.
+        for name in ("source_spans", "candidates", "relations", "primary_targets"):
+            minimum = 1 if name == "primary_targets" else 0
+            while encoded() > 6000 and len(value[name]) > minimum:
+                value[name].pop()
+                omitted[name] += 1
+        value["truncation"] = {"truncated": any(omitted.values()), "omitted": omitted,
+                               "max_serialized_chars": 6000}
+        return value
+
+    def task_context(self, symbol: str) -> dict:
+        """Frozen D9-C2 V0 compact context view for one explicit code symbol."""
+        definition = self.get_definition(symbol)
+        anchor = definition["data"]
+        if not anchor:
+            return {"version": "task-context-v0", "status": "not_found", "anchor": symbol,
+                    "primary_targets": [], "relations": [], "candidates": [], "source_spans": [],
+                    "expansion_handles": [], "truncation": {"truncated": False, "omitted": {},
+                    "max_serialized_chars": 6000}}
+        repository, commit = self._context()
+        anchor_evidence = self._node_evidence(anchor)
+        callers, callees, references = (self.get_callers(anchor["id"]),
+                                        self.get_callees(anchor["id"]),
+                                        self.get_references(anchor["id"]))
+        relation_evidence = [*callers["evidence"], *callees["evidence"], *references["evidence"]][:12]
+        relations = [{"fact_id": f"relation:{item['relation']}:{item['source_id']}:{item['target_id']}",
+                      "kind": "relation", "relation": item["relation"],
+                      "source_symbol_id": item["source_id"], "target_symbol_id": item["target_id"],
+                      "evidence_ids": [item["evidence_id"]]} for item in relation_evidence]
+        related = [*callers["data"], *callees["data"], *references["data"]]
+        primary = [{"fact_id": f"symbol:{anchor['id']}", "kind": "symbol",
+                    "symbol_id": anchor["id"], "qualified_name": anchor.get("qualified_name"),
+                    "file": self._source_path(anchor), "start_line": anchor.get("start_line"),
+                    "end_line": anchor.get("end_line"), "evidence_ids": [anchor_evidence.evidence_id]}]
+        if related:
+            node = related[0]
+            primary.append({"fact_id": f"symbol:{node['id']}", "kind": "symbol", "symbol_id": node["id"],
+                            "qualified_name": node.get("qualified_name"), "file": self._source_path(node),
+                            "start_line": node.get("start_line"), "end_line": node.get("end_line"),
+                            "evidence_ids": [self._node_evidence(node).evidence_id]})
+        raw = self.get_raw_references(owner_symbol_id=anchor["id"])["data"]
+        candidates = []
+        for row in raw:
+            if row.get("status") == "resolved":
+                continue
+            reference_id = row["id"]
+            symbols = row.get("candidate_symbols") or []
+            if symbols:
+                for candidate in symbols:
+                    candidates.append({"fact_id": f"candidate:{reference_id}:{candidate}", "kind": "candidate",
+                                       "reference_id": reference_id, "symbol_id": candidate,
+                                       "status": row.get("status"), "evidence_ids": [self._raw_reference_evidence(row).evidence_id]})
+            else:
+                candidates.append({"fact_id": f"unresolved:{reference_id}", "kind": "unresolved",
+                                   "reference_id": reference_id, "status": row.get("status"),
+                                   "evidence_ids": [self._raw_reference_evidence(row).evidence_id]})
+        candidates = candidates[:6]
+        spans = [self._task_context_span(anchor, anchor_evidence.evidence_id, commit)]
+        spans.extend(self._task_context_span(node, self._node_evidence(node).evidence_id, commit)
+                     for node in related[:3])
+        value = {"version": "task-context-v0", "status": "available", "anchor": symbol,
+                 "repository": repository, "base_commit": commit, "primary_targets": primary[:2],
+                 "relations": relations, "candidates": candidates, "source_spans": [item for item in spans if item],
+                 "expansion_handles": [{"symbol_id": item["symbol_id"], "command": "explain-symbol"}
+                                       for item in primary], "truncation": {"truncated": False, "omitted": {},
+                                       "max_serialized_chars": 6000}}
+        return self._task_context_trim(value)
+
     def explain_symbol(self, symbol: str, *, max_evidence: int = 20, max_symbols: int = 8,
                        max_edges: int = 12, max_sections: int = 6,
                        max_primary: int | None = None, max_supporting: int | None = None,

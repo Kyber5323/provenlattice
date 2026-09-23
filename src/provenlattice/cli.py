@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 from pathlib import Path
 from pprint import pprint
 
@@ -126,6 +127,9 @@ def build_parser() -> argparse.ArgumentParser:
         "find-related-documents", ["find_related_documents"])
     _add_analysis_options(find_related_documents_cmd, multi_target=False)
     evidence_command("trace-evidence", ["trace_evidence"])
+    task_context = command("task-context")
+    task_context.add_argument("symbol")
+    task_context.add_argument("--expected-base-commit")
     return parser
 
 
@@ -168,6 +172,19 @@ def run(args: argparse.Namespace) -> dict:
                 "feature": args.feature,
                 "selector": {"symbol_id": args.symbol_id, "file_path": args.file_path},
             }
+    if args.command == "task-context":
+        if not database.exists():
+            return {"version": "task-context-v0", "status": "not_built", "anchor": args.symbol}
+        try:
+            with GraphQuery(database) as query:
+                result = query.task_context(args.symbol)
+        except sqlite3.DatabaseError:
+            return {"version": "task-context-v0", "status": "corrupt", "anchor": args.symbol}
+        expected = args.expected_base_commit
+        if expected and result.get("status") == "available" and result.get("base_commit") != expected:
+            return {"version": "task-context-v0", "status": "stale", "anchor": args.symbol,
+                    "expected_base_commit": expected, "actual_base_commit": result.get("base_commit")}
+        return result
     with GraphQuery(database) as query:
         if args.command == "status":
             return query.status()

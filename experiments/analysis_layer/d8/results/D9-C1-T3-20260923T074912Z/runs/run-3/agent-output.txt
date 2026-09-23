@@ -1,0 +1,3 @@
+Symbol: `pipeline.promote.promote`
+File path: `pipeline/promote.py` (lines 1–5)
+Fact: It is a public Python function with signature `(req)` that calls two same-file functions — `pipeline.promote.cleanup` and `pipeline.promote.rollback`.

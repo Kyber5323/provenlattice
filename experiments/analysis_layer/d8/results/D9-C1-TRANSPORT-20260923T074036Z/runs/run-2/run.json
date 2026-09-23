@@ -1,0 +1,22 @@
+{
+  "sequence": 2,
+  "run_id": "D9-C1-TRANSPORT-2-4f292cbb",
+  "task_id": "D8-A1",
+  "gate_status": "NO_REAL_PL_INVOCATION",
+  "passed": false,
+  "actual_model": "deepseek-v4-flash",
+  "backend_model": "deepseek-v4-flash",
+  "gateway_identity": {
+    "transport": "Claude Code CLI stream-json",
+    "served_backend_model": "deepseek-v4-flash",
+    "requested_model": "deepseek-v4-flash",
+    "cli_version": "2.1.280",
+    "endpoint": "not exposed by Claude stream-json"
+  },
+  "exit_reason": "completed",
+  "error": null,
+  "tool_calls_total": 13,
+  "pl_tool_calls": 0,
+  "tool_result_receipt": null,
+  "agent_continued_after_result": false
+}

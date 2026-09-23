@@ -1,0 +1,42 @@
+## 证据
+
+**文件：`pipeline/scan.py`（全文 18 行，`scan()` 位于第 1–6 行）**
+
+```python
+1  def scan(rows):
+2      for row in rows:
+3          if corrupt(row):
+4              break
+5          check(row)
+6      commit()
+```
+
+关键辅助函数（`pipeline/scan.py:9-18`）：
+
+```python
+9  def corrupt(row):
+10     return row is None
+...
+17 def commit():
+18     return True
+```
+
+## 分析
+
+**1. corrupt 分支用的是 `break`，不是 `return`。** 这是决定性的一点。在 Python 中 `break` 只终止最内层 `for` 循环，之后控制流从循环后第一条语句继续 —— 即第 6 行的 `commit()`。`scan()` 函数体内**没有任何 `return`**（用 grep 验证：`scan.py` 中 `return` 只出现在第 10、14、18 行，均属于 `corrupt`/`check`/`commit` 自身，不在 `scan` 里）。因此不存在任何“提前返回”路径能跳过 `commit()`。
+
+**2. `commit()` 实际在以下所有可达路径上执行：**
+- `rows` 为空 → 循环体一次不执行 → 直接 `commit()`；
+- 无 corrupt 行 → 循环正常耗尽 → `commit()`；
+- 遇到第一个 corrupt 行 → `break` → **仍然** `commit()`。
+
+**3. 存在 corrupt 行时会发生什么：**
+- 该 corrupt 行本身被 `break` 拦下，第 5 行 `check(row)` **不执行**（不会对 `None` 行调用 `check`）；
+- 该行**之后的所有行**根本不会被迭代，即**静默截断**——不抛异常、不返回错误码、无任何失败信号；
+- 但控制流仍落到第 6 行，**`commit()` 照常执行**。语义上就是"扫描中途放弃，却仍然提交"。
+
+**4. 唯一能跳过 `commit()` 的情形是异常路径**（`rows` 不可迭代导致 `for` 抛 `TypeError`、`corrupt(row)` 或 `check(row)` 抛异常），因为第 6 行没有 `try/finally` 保护。这不是控制流分支，而是异常展开。
+
+**5. 对照证据：** 同目录的 `pipeline/process.py:1-7` 使用了相反的写法 `return False`（第 4 行），那才是真正会跳过 `finalize()` 的写法；而 `scan.py` 用 `break`，因此不跳过。仓库自带的 `README.md:12` 也记录了这一事实（"commit runs even when a row triggers `break` (break exits the loop, not the function)"），与代码逐行核对一致。`python -m provenlattice explain-symbol pipeline.scan.scan --json` 仅给出调用边 `scan → {corrupt, check, commit}`，**不能**表达"commit 在 break 路径上仍执行"这一控制流事实——这正是该 fixture 的隐藏事实所在。
+
+ANSWER: 是——`commit()` 在 `scan()` 的正常调用路径上总会执行：`pipeline/scan.py:4` 用的是 `break`（只退出 `for` 循环，不是退出函数），`scan()` 函数体内没有任何 `return`，所以无论是空 `rows`、无 corrupt 行、还是遇到 corrupt 行 `break`，控制流都会落到第 6 行执行 `commit()`；唯一跳过它的方式是异常从循环中展开（无 `try/finally`）。当 `rows` 中存在 corrupt 行（`corrupt(row)` 即 `row is None`）时，第 5 行 `check(row)` 对该行不执行、其后所有行也不再被迭代（静默截断、无错误信号），但 `commit()` 仍然执行——即"扫描提前中止却照常提交"。

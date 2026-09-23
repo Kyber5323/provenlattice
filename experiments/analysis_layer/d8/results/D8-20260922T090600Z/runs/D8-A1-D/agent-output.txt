@@ -1,0 +1,42 @@
+已收集到充分证据。以下是调查结果。
+
+## 结论：不可能。`rollback()` 与 `cleanup()` 在一次 `promote()` 调用中互斥，最多只会执行其中一个。
+
+### 证据 1：源码结构（`pipeline/promote.py`，全文 14 行）
+
+```python
+def promote(req):            # line 1
+    if req.failed:           # line 2
+        rollback(req)        # line 3
+    else:                    # line 4
+        cleanup(req)         # line 5
+
+def rollback(req):           # line 8
+    return req               # line 9
+
+def cleanup(req):            # line 12
+    return req               # line 13
+```
+
+`promote()` 的函数体是一个 `if/else`，两个分支各自调用一个函数，函数体内再无其它调用或循环（lines 1–5）。Python 语义下 `if/else` 分支互斥：`req.failed` 求值为真时只走 line 3，为假时只走 line 5。即使 `req.failed` 是带副作用的 property，该表达式也只被求值一次、分支只被选择一次；若求值抛异常，则两个分支都不执行。
+
+### 证据 2：无间接调用 / 无别名遮蔽
+
+- `pipeline/` 下所有文件（promote.py、deploy.py、gate.py、process.py、scan.py、handle.py）均无任何 `import` 语句（grep `^import|^from ` 无匹配），因此 `rollback`/`cleanup` 在 promote.py 中解析为同文件 lines 8–13 的本地定义，不存在被导入或别名替换的可能。
+- 两个被调函数体均为 `return req`，不具备触发对方调用的代码路径。
+- 全仓库 grep `promote|rollback|cleanup` 仅命中 promote.py 与 deploy.py。deploy.py 中的 `cleanup` 是另一模块中的独立同名函数（deploy.py:16，被 `deploy()` 在第 5 行调用），与 `promote()` 的调用链无关。
+
+### 证据 3：CFG 分析输出（`python -m provenlattice explain-symbol pipeline.promote.promote --analysis cfg --json`）
+
+输出给出的 6 节点 / 6 边与源码完全对应：
+
+- 条件节点 `cnode:7078580d…`，`structural_role: "if_condition"`，路径 `.../if_statement[0]/attribute[0]`，字节 25–35（即 `req.failed`）；
+- `kind: "true"` 边 → 调用点 `cnode:9eed60ed…`，路径 `.../if_statement[0]/block[1]/expression_statement[0]/call[0]`，字节 45–58（即 line 3 的 `rollback(req)`）；
+- `kind: "false"` 边 → 调用点 `cnode:6e868183…`，路径 `.../if_statement[0]/else_clause[2]/block[0]/expression_statement[0]/call[0]`，字节 77–89（即 line 5 的 `cleanup(req)`）；
+- 两个调用点各自的唯一出边均为 `kind: "next"`，分别指向合并节点 `cnode:d5d93d1c…`（`branch_merge`）→ 出口。**不存在**从 rollback 调用点到 cleanup 调用点的任何边，即无路径使二者在一次调用内先后执行。
+
+### 证据 4：仓库自述
+
+README.md:9 亦明确记载该模块的设计事实：`| promote.py | promote | rollback / cleanup sit in mutually exclusive if/else branches |`（这是 D8 观察夹具中“基础符号/调用图无法表达”的控制流事实之一）。
+
+ANSWER: 不可能。在 `pipeline/promote.py` 中，`promote()`（lines 1–5）通过 `if req.failed: rollback(req) else: cleanup(req)` 使二者处于互斥分支，且 `rollback`/`cleanup`（lines 8–13）是仅 `return req` 的本地函数、无任何间接调用与导入别名；CFG 分析同样显示 condition 节点的 true 边只到 `rollback` 调用点、false 边只到 `cleanup` 调用点，两个调用点各自仅经 merge 汇入 exit，彼此之间无边相连——因此一次 `promote()` 调用最多执行其中之一的（`req.failed` 求值抛异常时则两者都不执行）。

@@ -1,0 +1,46 @@
+已收集到全部证据。仓库只有 6 个模块，`promote.py` 全文 13 行，证据是决定性的。
+
+## 结论：不会 —— 在一次 `promote()` 调用中，`rollback()` 和 `cleanup()` 互斥
+
+### 代码证据
+
+**1. `pipeline/promote.py:1-5` — 严格的 if/else 二选一**
+
+```python
+def promote(req):
+    if req.failed:
+        rollback(req)
+    else:
+        cleanup(req)
+```
+
+`rollback(req)` 只出现在 `if` 分支体内，`cleanup(req)` 只出现在 `else` 分支体内；`if/else` 之后没有任何后续语句（函数直接结束），因此不存在两条分支都执行、也不存在分支后的共同代码路径。每次调用 `req.failed` 只求值一次，恰好执行其中一个分支。
+
+**2. `pipeline/promote.py:8-13` — 两个被调函数无交叉调用、无重入**
+
+```python
+def rollback(req):
+    return req
+
+
+def cleanup(req):
+    return req
+```
+
+二者均为平凡函数：不互相调用、不回调 `promote`，因此不存在"`rollback` 内部再触发 `cleanup`"的重入路径。文件内也没有 `try/finally` 或异常处理（整个文件无任何 import）。
+
+**3. 符号唯一性（Grep 全仓）**
+
+- `def promote` 全仓仅 1 处：`pipeline/promote.py:1`；`def rollback` 仅 1 处：`promote.py:8`；`def cleanup` 有 2 处，但另一处是 `pipeline/deploy.py:16` 的独立函数，`promote.py` 未导入它，因此 `promote` 内的调用不可能解析到 deploy 的 `cleanup`。
+- 查询 CLI 也确认了这一点：`explain-symbol pipeline.promote.promote --json` 中两条 CALLS 边的 `resolution` 均为 `same_file_resolution`（`promote.py:8` 的 `rollback` 与 `promote.py:12` 的 `cleanup`），不存在跨模块或动态解析。
+
+**4. 歧义的来源（为何值得一问）**
+
+基础符号图只记录了 `promote CALLS rollback` 和 `promote CALLS cleanup` 两条边，不携带分支信息——单看调用图会以为两者都可能被调。但源码显示它们位于互斥的 if/else 分支。本次查询的库中 CFG 层未构建（`--analysis cfg` 返回 `"reason": "analysis_not_built"`），故分支事实以源码确认为准；本仓库 `README.md` 也把该模块的目标事实标注为 "rollback / cleanup sit in mutually exclusive if/else branches"。
+
+### 边界说明
+
+- 仅限**同一次调用**：跨多次调用时，`req.failed` 为真值调用一次只走 `rollback`，为假值只走 `cleanup`，多次调用合计当然可以两者都执行过。
+- 唯一理论反例是 `req.failed` 具有会重入 `promote` 的 `__bool__` 副作用，但该代码中不存在任何此类钩子；若 `req.failed` 求值时抛异常，则两个函数都不执行。
+
+ANSWER: 不会。在单次 promote() 调用中，rollback() 与 cleanup() 是 `pipeline/promote.py:1-5` 中严格互斥的 if/else 分支，每次调用恰好执行其一；两个被调函数（promote.py:8-13）互不调用、无重入路径，且模块无 import、无 try/finally，不存在让两者在同一次调用中都执行的控制流。

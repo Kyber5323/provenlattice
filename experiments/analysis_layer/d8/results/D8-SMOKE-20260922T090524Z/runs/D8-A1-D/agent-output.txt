@@ -1,0 +1,32 @@
+我读了 `pipeline/promote.py` 全文，并用 `python -m provenlattice explain-symbol pipeline.promote.promote --json` 交叉验证了调用边。
+
+**代码证据**
+
+`pipeline/promote.py`（整个文件仅 14 行，无 import、无装饰器、无 try/finally）：
+
+```python
+def promote(req):
+    if req.failed:
+        rollback(req)     # 行 3
+    else:
+        cleanup(req)      # 行 5
+
+def rollback(req):        # 行 8
+    return req
+
+def cleanup(req):         # 行 12
+    return req
+```
+
+**控制流分析**
+
+- 行 2–5 是单个 `if / else` 语句：`rollback(req)` 在 then 分支，`cleanup(req)` 在 else 分支。二者互斥且穷尽——`req.failed` 在一次调用中只被求值一次，为真则只走 `rollback`，为假则只走 `cleanup`。不存在"两个独立 if"或 fallthrough 结构。
+- `rollback`（行 8–9）与 `cleanup`（行 12–13）都是纯函数，只 `return req`，不会回调/重入 `promote`，因此也不存在递归重入导致第二次分支执行的可能。
+- 唯一能让"二者都不执行"的情形是异常传播（`req.failed` 求值本身抛异常，或选中的那个函数抛异常），但没有任何路径能让二者在同一次调用中都执行。
+
+**佐证与旁证**
+
+- 仓库自带的 fixture 说明 `README.md:9` 明确标注了该事实："rollback / cleanup sit in mutually exclusive if/else branches"。
+- provenlattice CLI 的输出只给出两条并列的调用边（`E-CALL-...`：`pipeline.promote.promote CALLS pipeline.promote.cleanup` 和 `... CALLS pipeline.promote.rollback`），无法表达分支互斥性——这正是该 fixture 设计的"隐藏事实"：基础 symbol/call graph 本身无法区分互斥分支与顺序执行，需依赖控制流（CFG/分支）分析才能得出下面结论。
+
+ANSWER: 不能。在 `promote()`（pipeline/promote.py:1-5）的一次调用中，`rollback(req)` 与 `cleanup(req)` 位于同一个 `if req.failed: ... else: ...` 的互斥分支中，`req.failed` 只求值一次，因此正常情况下恰好有且只有一个被执行，二者绝不可能在同一次调用中都被执行（除非有外部重入，而本仓库中不存在这种调用路径）。

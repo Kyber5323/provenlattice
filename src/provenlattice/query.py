@@ -6,7 +6,9 @@ import subprocess
 import time
 from pathlib import Path
 
+from .analysis_query import ANALYSIS_RESPONSE_NODE_LIMIT, query_analysis
 from .evidence import Evidence, EvidenceBundle, QueryBudget, evidence_id, rank_evidence
+from .orchestrator import AnalysisRequestError as _AnalysisRequestError
 from .overlay import GraphView
 from .storage import decode_row
 
@@ -14,6 +16,41 @@ from .storage import decode_row
 SYMBOL_KINDS = ("Namespace", "Class", "Struct", "Interface", "Function", "Method", "Type")
 CROSS_RELATIONS = {"DESCRIBES", "CONSTRAINS", "IMPLEMENTED_BY", "VERIFIED_BY",
                    "BELONGS_TO", "DOCUMENTS"}
+
+
+def _parse_analysis_request(analysis):
+    if analysis is None:
+        return None
+    if isinstance(analysis, str):
+        names = [item.strip() for item in analysis.split(",") if item.strip()]
+    else:
+        names = [str(item).strip() for item in analysis if str(item).strip()]
+    names = [name for name in names if name != "none"]
+    if not names:
+        return None
+    unique: list[str] = []
+    for name in names:
+        if name not in unique:
+            unique.append(name)
+    return unique
+
+
+def _count_tree(node) -> int:
+    return 1 + sum(_count_tree(child) for child in node.get("children", []))
+
+
+def _prune_tree(node, limit: int) -> tuple[dict, int]:
+    kept = 1
+    emitted = dict(node)
+    children = []
+    for child in node.get("children", []):
+        if kept >= limit:
+            break
+        pruned, child_kept = _prune_tree(child, limit - kept)
+        children.append(pruned)
+        kept += child_kept
+    emitted["children"] = children
+    return emitted, kept
 
 
 class GraphQuery:
@@ -470,11 +507,85 @@ class GraphQuery:
                 "returned_evidence_count": value["returned_evidence_count"],
                 "bundle_size": len(json.dumps(value, ensure_ascii=False)), "bundle": value}
 
+    def _analysis_sections(self, anchor_id: str, features) -> dict:
+        repository = self.storage.repository()
+        root_path = repository["root_path"] if repository else None
+        sections = {}
+        for feature in features:
+            try:
+                result = query_analysis(root_path, feature, symbol_id=anchor_id,
+                                        database=self.storage.path)
+            except _AnalysisRequestError as error:
+                sections[feature] = {"status": "unavailable", "reason": error.code,
+                                     "coverage": {"type": "none"},
+                                     "nodes": [], "edges": []}
+                continue
+            section = {"status": result["status"], "reason": result["reason"],
+                       "coverage": result["coverage"],
+                       "nodes": [], "edges": []}
+            if result["status"] == "available":
+                nodes = result.get("nodes", [])
+                edges = result.get("edges", [])
+                total_nodes, total_edges = len(nodes), len(edges)
+                truncated = False
+                if len(nodes) > ANALYSIS_RESPONSE_NODE_LIMIT:
+                    truncated = True
+                    kept = {node["analysis_node_id"]
+                            for node in nodes[:ANALYSIS_RESPONSE_NODE_LIMIT]}
+                    nodes = nodes[:ANALYSIS_RESPONSE_NODE_LIMIT]
+                    edges = [edge for edge in edges
+                             if edge["src_id"] in kept and edge["dst_id"] in kept]
+                section["nodes"] = nodes
+                section["edges"] = edges
+                section["truncated"] = truncated
+                section["returned_nodes"] = len(nodes)
+                section["total_nodes"] = total_nodes
+                section["returned_edges"] = len(edges)
+                section["total_edges"] = total_edges
+                if result.get("entry_id") is not None:
+                    section["entry_id"] = result["entry_id"]
+                    section["exit_id"] = result["exit_id"]
+                root = result.get("root")
+                if root is not None:
+                    total_nodes = _count_tree(root)
+                    if total_nodes > ANALYSIS_RESPONSE_NODE_LIMIT:
+                        truncated = True
+                        root, returned = _prune_tree(root, ANALYSIS_RESPONSE_NODE_LIMIT)
+                        section["returned_nodes"] = returned
+                    else:
+                        section["returned_nodes"] = total_nodes
+                    section["total_nodes"] = total_nodes
+                    section["truncated"] = truncated
+                    section["root"] = root
+            sections[feature] = section
+        return sections
+
+    def _analysis_v1(self, anchor: dict, features) -> dict:
+        requested_features = sorted(features)
+        return {
+            "version": "analysis-v1",
+            "requested_features": requested_features,
+            "targets": [{
+                "symbol_id": anchor["id"],
+                "qualified_name": anchor["qualified_name"],
+                "features": self._analysis_sections(anchor["id"], requested_features),
+            }],
+        }
+
+    @staticmethod
+    def _analysis_v1_error(features, code: str, message: str) -> dict:
+        return {
+            "version": "analysis-v1",
+            "requested_features": sorted(features),
+            "targets": [],
+            "error": {"code": code, "message": message},
+        }
+
     def explain_symbol(self, symbol: str, *, max_evidence: int = 20, max_symbols: int = 8,
                        max_edges: int = 12, max_sections: int = 6,
                        max_primary: int | None = None, max_supporting: int | None = None,
                        max_total: int | None = None, bundle_profile: str = "generic",
-                       focus_terms: tuple[str, ...] = ()) -> dict:
+                       focus_terms: tuple[str, ...] = (), analysis=None) -> dict:
         started = time.perf_counter()
         budget = self._budget(max_evidence, max_symbols, max_edges, max_sections,
                               max_primary, max_supporting, max_total)
@@ -487,7 +598,15 @@ class GraphQuery:
                 uncertainties=["unresolved symbol anchor"], generation=self.graph_generation,
                 budget=budget, profile=bundle_profile, focus_terms=focus_terms,
             )
-            return self._bundle_result(bundle, started)
+            result = self._bundle_result(bundle, started)
+            features = _parse_analysis_request(analysis)
+            if features:
+                result["analysis"] = {
+                    feature: {"status": "not_available", "reason": "symbol_not_found",
+                              "coverage": {"type": "none"}}
+                    for feature in features
+                }
+            return result
         callers, callees = self.get_callers(anchor["id"]), self.get_callees(anchor["id"])
         references = self.get_references(anchor["id"])
         documents = self._cross_layer_neighbors(anchor["id"], CROSS_RELATIONS, True)
@@ -524,7 +643,11 @@ class GraphQuery:
             related_entities=related, uncertainties=[], generation=self.graph_generation,
             budget=budget, profile=bundle_profile, focus_terms=focus_terms,
         )
-        return self._bundle_result(bundle, started)
+        result = self._bundle_result(bundle, started)
+        features = _parse_analysis_request(analysis)
+        if features:
+            result["analysis"] = self._analysis_sections(anchor["id"], features)
+        return result
 
     def _resolve_document(self, document: str) -> dict | None:
         value = document.casefold()
@@ -547,7 +670,8 @@ class GraphQuery:
                           max_symbols: int = 8, max_edges: int = 12,
                           max_sections: int = 6, bundle_profile: str = "generic",
                           focus_terms: tuple[str, ...] = (), max_primary: int | None = None,
-                          max_supporting: int | None = None, max_total: int | None = None) -> dict:
+                          max_supporting: int | None = None, max_total: int | None = None,
+                          analysis=None, analysis_symbol_id: str | None = None) -> dict:
         started = time.perf_counter()
         budget = self._budget(max_evidence, max_symbols, max_edges, max_sections,
                               max_primary, max_supporting, max_total)
@@ -593,13 +717,39 @@ class GraphQuery:
             generation=self.graph_generation, budget=budget,
             profile=bundle_profile, focus_terms=focus_terms,
         )
-        return self._bundle_result(bundle, started)
+        result = self._bundle_result(bundle, started)
+        features = _parse_analysis_request(analysis)
+        if not features:
+            return result
+        selectable = {
+            item["id"]: item for item in result["bundle"]["related_entities"]
+            if item.get("kind") in SYMBOL_KINDS
+        }
+        if not selectable:
+            result["analysis"] = self._analysis_v1_error(
+                features, "ANALYSIS_NO_SELECTABLE_SYMBOL",
+                "analysis requires a code symbol returned by this evidence bundle",
+            )
+        elif analysis_symbol_id is None:
+            result["analysis"] = self._analysis_v1_error(
+                features, "ANALYSIS_SYMBOL_ID_REQUIRED",
+                "analysis-symbol-id must select one returned code symbol",
+            )
+        elif analysis_symbol_id not in selectable:
+            result["analysis"] = self._analysis_v1_error(
+                features, "ANALYSIS_SYMBOL_ID_NOT_RETURNED",
+                "analysis-symbol-id is not a code symbol returned by this evidence bundle",
+            )
+        else:
+            result["analysis"] = self._analysis_v1(selectable[analysis_symbol_id], features)
+        return result
 
     def find_related_documents(self, symbol: str, *, max_evidence: int = 20,
                                max_symbols: int = 8, max_edges: int = 12,
                                max_sections: int = 6, bundle_profile: str = "generic",
                                focus_terms: tuple[str, ...] = (), max_primary: int | None = None,
-                               max_supporting: int | None = None, max_total: int | None = None) -> dict:
+                               max_supporting: int | None = None, max_total: int | None = None,
+                               analysis=None) -> dict:
         started = time.perf_counter()
         budget = self._budget(max_evidence, max_symbols, max_edges, max_sections,
                               max_primary, max_supporting, max_total)
@@ -636,7 +786,11 @@ class GraphQuery:
             generation=self.graph_generation, budget=budget,
             profile=bundle_profile, focus_terms=focus_terms,
         )
-        return self._bundle_result(bundle, started)
+        result = self._bundle_result(bundle, started)
+        features = _parse_analysis_request(analysis)
+        if features:
+            result["analysis"] = self._analysis_v1(anchor, features)
+        return result
 
     def explain_module(self, module: str, *, max_evidence: int = 20,
                        max_symbols: int = 8, max_edges: int = 12,

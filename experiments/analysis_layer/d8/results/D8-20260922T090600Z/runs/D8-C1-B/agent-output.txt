@@ -1,0 +1,21 @@
+Bash execution was denied, so I'll base the conclusion on the source, which is unambiguous here. The full file (pipeline/handle.py, all 16 lines) and the grep across the repo show these are the only definitions — no shadowing, imports, or monkeypatching exists elsewhere in the repo.
+
+**Code evidence — `pipeline/handle.py:1-4`:**
+```python
+def handle(x):
+    if validate(x):
+        persist(x)
+    notify(x)
+```
+
+**Conclusion 1 — persist() depends on validate()'s return value: YES.**
+`persist(x)` (line 3) is indented inside the body of `if validate(x):` (line 2), so it is reachable only when `validate(x)` returns a truthy value. Note also `validate` itself (`pipeline/handle.py:7-8`) is `return x`, so in this fixture it is the truthiness of the argument that gates `persist`.
+
+**Conclusion 2 — notify() depends on validate()'s return value: NO.**
+`notify(x)` (line 4) has the same indentation level as the `if` statement on line 2 — it sits *after* the if-block, not inside it. Python control flow therefore executes it on every invocation of `handle(x)`, whether `validate(x)` returns truthy or falsy. Its execution is not reachable-conditioned on validate's result in any way.
+
+This matches the fixture's documented intent in `README.md:13`: "handle.py | handle | notify is unconditional (after merge); persist is conditional".
+
+I attempted to confirm behaviorally with a runtime trace of which functions `handle(0)` vs `handle(1)` calls, but Bash execution was denied in this session; the static control-flow evidence above is conclusive on its own.
+
+ANSWER: In `pipeline/handle.py`, `persist()` executes only if `validate(x)` returns truthy (it is inside the `if` body, line 3), so persist DOES depend on validate's return; `notify()` executes unconditionally on every `handle()` call (line 4 is outside the `if` block), so notify does NOT depend on validate's return.

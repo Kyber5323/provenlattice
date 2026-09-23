@@ -1,0 +1,29 @@
+调查完成。仓库共 6 个 pipeline 模块（无任何 `import`，无 monkeypatch 或动态重绑定），问题所涉及的代码全部在 `pipeline/promote.py` 中。
+
+**代码证据** — `pipeline/promote.py:1-13`：
+
+```python
+def promote(req):
+    if req.failed:
+        rollback(req)
+    else:
+        cleanup(req)
+
+
+def rollback(req):   # line 8
+    return req
+
+
+def cleanup(req):    # line 12
+    return req
+```
+
+**分析：**
+
+1. `promote()` 的控制流是标准的 `if/else`：`req.failed` 的布尔值在每次调用中只求值一次，两个分支在 Python 语义上互斥——条件为真只执行 `rollback(req)`（line 3），为假只执行 `cleanup(req)`（line 5），不存在两者都执行的路径。
+2. 两个被调函数体均为平凡返回（`return req`），没有互相调用，也不存在异常处理（无 `try/finally`）能让二者串联。
+3. 全仓库无 `import` 语句，因此不存在运行时把 `cleanup` 重绑定到其他模块（如 `pipeline/deploy.py:16` 的同名 `cleanup`）的机制。
+4. 唯一的边角情况：若真值求值 `if req.failed` 本身抛出异常，则两个函数都不执行——但这不是"都执行"。
+5. 值得注意的是，`python -m provenlattice explain-symbol pipeline.promote.promote --json` 返回的调用图同时列出 `promote → rollback` 和 `promote → cleanup` 两条 CALLS 边，但调用图边不具备分支互斥语义；README.md:9 也明确记载这是该 fixture 的"hidden fact"：*"rollback / cleanup sit in mutually exclusive if/else branches"*——即基础调用图无法表达的事实。
+
+ANSWER: 不可能。`pipeline/promote.py:1-5` 中 `promote()` 是 `if req.failed: rollback(req) else: cleanup(req)` 的互斥分支；每次调用只执行二者之一（条件求值异常时二者都不执行），且仓库无任何重绑定/跨调用机制，因此一次 `promote()` 调用中 `rollback()` 和 `cleanup()` 不会被同时执行。

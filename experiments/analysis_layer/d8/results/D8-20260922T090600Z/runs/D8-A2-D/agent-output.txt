@@ -1,0 +1,29 @@
+已确认。证据来自源码本身和 provenlattice 的 CFG 分析（`--analysis cfg`），两者一致。
+
+**1. 源码（`pipeline/gate.py:1-6`）**
+
+```python
+def gate(mode):
+    if mode == "fast":
+        skip_tests(mode)      # 行3：if 分支内
+    else:
+        run_tests(mode)       # 行5：else 分支内
+    publish(mode)             # 行6：与 if 同级，缩进 4 空格
+```
+
+`publish(mode)` 在 `if/else` 合并之后、与 `if_statement` 同级（未缩进到任何分支内），因此无条件执行；而 `skip_tests`/`run_tests` 位于互斥分支。
+
+**2. 扁平调用图无法回答此问题** —— `explain-symbol pipeline.gate.gate`（默认 profile）只给出 3 条并列的 `CALLS` 边：`gate → skip_tests`、`gate → run_tests`、`gate → publish`，没有顺序/互斥信息。
+
+**3. CFG 分析（`--analysis cfg`）给出路径级证据**，`pipeline.gate.gate` 共 7 节点 7 边：
+
+- `condition`（`mode == "fast"`）—**true**→ `callsite`(bytes 47–63 = 第3行 `skip_tests`)；—**false**→ `callsite`(bytes 82–97 = 第5行 `run_tests`)。节点 `structural_path` 分别为 `.../block[2]/if_statement[0]/block[1]/...` 与 `.../if_statement[0]/else_clause[2]/block[0]/...`，即同一 `if_statement` 的两个互斥分支。
+- 两个 callsite 节点各有一条 `next` 边，**汇合到同一 merge 节点** `cnode:9aee9883...`：
+  - `"kind": "next"`, `src_id: cnode:06debaab…(skip_tests)`, `dst_id: cnode:9aee9883…`
+  - `"kind": "next"`, `src_id: cnode:00873a72…(run_tests)`, `dst_id: cnode:9aee9883…`
+- merge 节点再 `next` 到 publish callsite（bytes 102–115 = 第6行），其 `structural_path` 为 `.../block[2]/expression_statement[1]/call[0]` —— **不含任何 `if_statement` 层级**，是函数体块中 `if_statement` 的兄弟语句；`resolved_symbol_id` = `symbol:4ec3e0ae…`（`pipeline.gate.publish`）。
+- publish callsite 是通往 `exit`（`cnode:a43ad2…`）的唯一 `next` 边，即 publish 是出口前必经节点。
+
+**结论**：两问答案都是"是"。`mode == "fast"` 时 skip_tests 与 publish 依次都执行；`mode != "fast"` 时 run_tests 与 publish 依次都执行。绝不共存的组合是 skip_tests 与 run_tests（互斥分支）；publish 不存在被跳过的路径。
+
+ANSWER: 都会执行——`publish(mode)` 位于 `if/else` 合并之后（gate.py:6，CFG 中两个分支的 callsite 都经 merge 节点汇入该 publish 节点，且它是通往 exit 的唯一前驱），所以 `mode == "fast"` 时 skip_tests+publish 都执行，`mode != "fast"` 时 run_tests+publish 都执行；互斥的只有 skip_tests 与 run_tests。

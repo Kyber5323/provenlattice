@@ -1,0 +1,47 @@
+I now have both the source and the CFG evidence. Here's the analysis.
+
+## Source
+
+`pipeline/handle.py:1-4` (the whole function body):
+
+```python
+def handle(x):
+    if validate(x):
+        persist(x)
+    notify(x)
+```
+
+The indentation is decisive: `persist(x)` sits at 8 spaces (inside the `if` body), while `notify(x)` sits at 4 spaces — a sibling of the `if` statement, dedented past the block.
+
+## CFG evidence (`explain-symbol pipeline.handle.handle --analysis cfg --json`)
+
+The tool emits 6 nodes / 6 edges, and the byte offsets let us map each node to an exact line:
+
+| CFG node | kind | `structural_path` | bytes | maps to |
+|---|---|---|---|---|
+| `cnode:498e3e75…` | `condition` (`if_condition`) | `…/block[2]/if_statement[0]/call[0]` | 22–33 | `validate(x)` (line 2) |
+| `cnode:1181d727…` | `callsite` → `symbol:7e522b5a…` = `pipeline.handle.persist` | `…/if_statement[0]/block[1]/expression_statement[0]/call[0]` | 43–53 | `persist(x)` (line 3) |
+| `cnode:cbebc7a4…` | `merge` (`branch_merge`) | `…/block[2]/if_statement[0]` | — | the if's join point |
+| `cnode:f87cef3f…` | `callsite` → `symbol:ea9330e4…` = `pipeline.handle.notify` | `…/block[2]/expression_statement[1]/call[0]` | 58–67 | `notify(x)` (line 4) |
+
+Byte offsets cross-check against the file: `validate(x)` at 22–33, `persist(x)` at 43–53, `notify(x)` at 58–67 — matching lines 2, 3, 4 exactly.
+
+The edges form:
+
+```
+entry ──next──> condition(validate)
+condition ──true──>  persist_callsite ──next──> merge
+condition ──false─────────────────────────────> merge
+                                    merge ──next──> notify_callsite ──next──> exit
+```
+
+So the `false` edge from the `validate(x)` condition goes straight to the merge node — bypassing `persist` — and the merge's only successor is the `notify` callsite. `notify` is therefore reachable on **both** branch outcomes.
+
+## Conclusions
+
+- **`persist()` — YES, depends on `validate()`'s return.** Its callsite lives inside `if_statement[0]/block[1]` and is reachable only through the condition's `true` edge. If `validate(x)` returns falsy, `persist` is never called. (Since local `validate` at line 7-8 is `return x`, persist runs iff `x` is truthy.)
+- **`notify()` — NO, does not depend on `validate()`'s return.** It is dedented past the `if` block and is the successor of the branch-merge node, so it executes unconditionally on every path through `handle`, whether `validate()` returned truthy or falsy. (The only way it's skipped is an exception propagating out of `validate()`/`persist()`, not the return value.)
+
+This matches the fixture's own README claim (`README.md:13`: "notify is unconditional (after merge); persist is conditional"), and the grep confirms no other module imports or redefines these symbols, so there's no shadowing or alternate caller.
+
+ANSWER: In `pipeline/handle.py:1-4`, `persist(x)` is inside the `if validate(x):` body (CFG: reachable only via the condition's `true` edge), so its execution **does** depend on `validate()`'s return value; `notify(x)` is dedented to line 4 and is the successor of the CFG `branch_merge` node that both the `true` and `false` edges lead into, so its execution does **not** depend on `validate()`'s return value — it runs unconditionally on every path.

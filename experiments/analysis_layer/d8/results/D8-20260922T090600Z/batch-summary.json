@@ -1,0 +1,171 @@
+{
+  "experiment": "PL-DA-D8 Real Agent Deep-Analysis Utility Observation",
+  "batch_dir": "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\analysis_layer\\d8\\results\\D8-20260922T090600Z",
+  "rows": [
+    {
+      "task_id": "D8-A1",
+      "B_success": true,
+      "B_run_id": "D8-D8-A1-B-6de4fb",
+      "B_tokens": {
+        "input": 24626,
+        "output": 3554,
+        "cache_read": 118912,
+        "cache_creation": 0,
+        "total": 147092
+      },
+      "D_success": true,
+      "AST/CFG used": false,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "ADOPTION_GAP",
+        "detail": "analysis available but never requested"
+      },
+      "D_run_id": "D8-D8-A1-D-ba3565",
+      "D_tokens": {
+        "input": 29013,
+        "output": 4564,
+        "cache_read": 192128,
+        "cache_creation": 0,
+        "total": 225705
+      }
+    },
+    {
+      "task_id": "D8-A2",
+      "B_success": true,
+      "B_run_id": "D8-D8-A2-B-2091e9",
+      "B_tokens": {
+        "input": 23619,
+        "output": 4266,
+        "cache_read": 163840,
+        "cache_creation": 0,
+        "total": 191725
+      },
+      "D_success": true,
+      "AST/CFG used": false,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "ADOPTION_GAP",
+        "detail": "analysis available but never requested"
+      },
+      "D_run_id": "D8-D8-A2-D-b88d69",
+      "D_tokens": {
+        "input": 37764,
+        "output": 7816,
+        "cache_read": 180096,
+        "cache_creation": 0,
+        "total": 225676
+      }
+    },
+    {
+      "task_id": "D8-B1",
+      "B_success": true,
+      "B_run_id": "D8-D8-B1-B-ab9bb2",
+      "B_tokens": {
+        "input": 36494,
+        "output": 6826,
+        "cache_read": 367232,
+        "cache_creation": 0,
+        "total": 410552
+      },
+      "D_success": true,
+      "AST/CFG used": false,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "ADOPTION_GAP",
+        "detail": "analysis available but never requested"
+      },
+      "D_run_id": "D8-D8-B1-D-089f8b",
+      "D_tokens": {
+        "input": 36110,
+        "output": 9588,
+        "cache_read": 512256,
+        "cache_creation": 0,
+        "total": 557954
+      }
+    },
+    {
+      "task_id": "D8-B2",
+      "B_success": true,
+      "B_run_id": "D8-D8-B2-B-1e6cda",
+      "B_tokens": {
+        "input": 28525,
+        "output": 3233,
+        "cache_read": 113920,
+        "cache_creation": 0,
+        "total": 145678
+      },
+      "D_success": true,
+      "AST/CFG used": false,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "ADOPTION_GAP",
+        "detail": "analysis available but never requested"
+      },
+      "D_run_id": "D8-D8-B2-D-d76947",
+      "D_tokens": {
+        "input": 23590,
+        "output": 2425,
+        "cache_read": 90112,
+        "cache_creation": 0,
+        "total": 116127
+      }
+    },
+    {
+      "task_id": "D8-C1",
+      "B_success": true,
+      "B_run_id": "D8-D8-C1-B-cf5f9b",
+      "B_tokens": {
+        "input": 23168,
+        "output": 2841,
+        "cache_read": 136064,
+        "cache_creation": 0,
+        "total": 162073
+      },
+      "D_success": true,
+      "AST/CFG used": false,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "ADOPTION_GAP",
+        "detail": "analysis available but never requested"
+      },
+      "D_run_id": "D8-D8-C1-D-3f984d",
+      "D_tokens": {
+        "input": 36359,
+        "output": 3972,
+        "cache_read": 145408,
+        "cache_creation": 0,
+        "total": 185739
+      }
+    },
+    {
+      "task_id": "D8-C2",
+      "B_success": true,
+      "B_run_id": "D8-D8-C2-B-3bdf32",
+      "B_tokens": {
+        "input": 26614,
+        "output": 3443,
+        "cache_read": 242176,
+        "cache_creation": 0,
+        "total": 272233
+      },
+      "D_success": true,
+      "AST/CFG used": false,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "ADOPTION_GAP",
+        "detail": "analysis available but never requested"
+      },
+      "D_run_id": "D8-D8-C2-D-36640c",
+      "D_tokens": {
+        "input": 22855,
+        "output": 2126,
+        "cache_read": 88192,
+        "cache_creation": 0,
+        "total": 113173
+      }
+    }
+  ],
+  "verdict_counts": {
+    "ADOPTION_GAP": 6
+  }
+}

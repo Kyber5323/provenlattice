@@ -1,0 +1,106 @@
+{
+  "experiment": "PL-DA-D8 Real Agent Deep-Analysis Utility Observation",
+  "batch_dir": "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\analysis_layer\\d8\\results\\D8-20260923T061603Z",
+  "rows": [
+    {
+      "task_id": "D8-A1",
+      "B_success": false,
+      "B_run_id": "D8-D8-A1-B-eef1d8",
+      "B_tokens": {},
+      "D_success": false,
+      "AST/CFG used": false,
+      "Incremental fact": false,
+      "verdict_detail": {
+        "verdict": "INFRA_EXCLUDED",
+        "detail": "agent_nonzero_exit"
+      },
+      "D_run_id": "D8-D8-A1-D-d30db0",
+      "D_tokens": {},
+      "replayed_requests": []
+    },
+    {
+      "task_id": "D8-A2",
+      "B_success": false,
+      "B_run_id": "D8-D8-A2-B-8fda0b",
+      "B_tokens": {},
+      "D_success": false,
+      "AST/CFG used": false,
+      "Incremental fact": false,
+      "verdict_detail": {
+        "verdict": "INFRA_EXCLUDED",
+        "detail": "agent_nonzero_exit"
+      },
+      "D_run_id": "D8-D8-A2-D-8a3ee8",
+      "D_tokens": {},
+      "replayed_requests": []
+    },
+    {
+      "task_id": "D8-B1",
+      "B_success": false,
+      "B_run_id": "D8-D8-B1-B-c0c4c3",
+      "B_tokens": {},
+      "D_success": false,
+      "AST/CFG used": false,
+      "Incremental fact": false,
+      "verdict_detail": {
+        "verdict": "INFRA_EXCLUDED",
+        "detail": "agent_nonzero_exit"
+      },
+      "D_run_id": "D8-D8-B1-D-a1d298",
+      "D_tokens": {},
+      "replayed_requests": []
+    },
+    {
+      "task_id": "D8-B2",
+      "B_success": false,
+      "B_run_id": "D8-D8-B2-B-b1e5bc",
+      "B_tokens": {},
+      "D_success": false,
+      "AST/CFG used": false,
+      "Incremental fact": false,
+      "verdict_detail": {
+        "verdict": "INFRA_EXCLUDED",
+        "detail": "agent_nonzero_exit"
+      },
+      "D_run_id": "D8-D8-B2-D-404c5c",
+      "D_tokens": {},
+      "replayed_requests": []
+    },
+    {
+      "task_id": "D8-C1",
+      "B_success": false,
+      "B_run_id": "D8-D8-C1-B-72b2cc",
+      "B_tokens": {},
+      "D_success": false,
+      "AST/CFG used": false,
+      "Incremental fact": false,
+      "verdict_detail": {
+        "verdict": "INFRA_EXCLUDED",
+        "detail": "agent_nonzero_exit"
+      },
+      "D_run_id": "D8-D8-C1-D-1b6894",
+      "D_tokens": {},
+      "replayed_requests": []
+    },
+    {
+      "task_id": "D8-C2",
+      "B_success": false,
+      "B_run_id": "D8-D8-C2-B-f7001f",
+      "B_tokens": {},
+      "D_success": false,
+      "AST/CFG used": false,
+      "Incremental fact": false,
+      "verdict_detail": {
+        "verdict": "INFRA_EXCLUDED",
+        "detail": "agent_nonzero_exit"
+      },
+      "D_run_id": "D8-D8-C2-D-aea813",
+      "D_tokens": {},
+      "replayed_requests": []
+    }
+  ],
+  "verdict_counts": {
+    "INFRA_EXCLUDED": 6
+  },
+  "attribution_note": "replayed: each recorded explain-symbol --analysis call was re-evaluated against the same static derived store (D6 API) because the Agent's own shell pipelines truncated the JSON envelope"
+}

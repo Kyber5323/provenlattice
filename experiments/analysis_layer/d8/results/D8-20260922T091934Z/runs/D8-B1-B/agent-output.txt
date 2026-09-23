@@ -1,0 +1,43 @@
+I have all the evidence needed. The file is a 19-line, self-contained module, and the tool's bundle confirms the call edges but no control-flow reachability fact (which is exactly the fixture's premise).
+
+## 代码基线
+
+`pipeline/process.py`（全文 19 行，无 import、无装饰器、无模块级代码、无 `try/finally`）：
+
+```python
+1  def process(items):
+2      for item in items:
+3          if invalid(item):
+4              return False
+5          save(item)
+6      finalize()
+7      return True
+```
+
+`finalize()` 在整个仓库中只被调用一次（第 6 行），且 `invalid`(line 10) / `save`(line 14) / `finalize`(line 18) 都是纯平凡函数（`return item is None` / `return item` / `return True`）。控制流只有两个退出点：第 4 行的 `return False` 和第 7 行的 `return True`；循环里没有 `break`/`continue`。
+
+## finalize() 不会执行的情况
+
+1. **早退路径（module 内唯一显式路径）**：任一 `item is None` 时 `invalid(item)` 为 True，第 4 行 `return False` 直接离开函数，跳过第 6 行。注意此时**之前已 `save` 的 item 副作用已经生效**，但不会被 finalize。
+2. **异常展开路径**：第 6 行不在 `try/finally` 中，因此第 6 行之前抛出的任何异常都会绕过 `finalize()`：
+   - `items` 不可迭代（如 `process(None)`）→ 第 2 行 `TypeError`，一次循环都没进；
+   - `items` 是生成器/自定义迭代器且 `__next__` 抛异常（正常耗尽 StopIteration 不算）；
+   - `save(item)` 抛异常——不过在**本文件/本仓库**中 `save` 是 `return item`（process.py:14-15），对任意对象都不会抛，所以此路径在当前代码下不可达；`invalid` 的 `item is None`（process.py:10-11）同样不会抛；
+   - `KeyboardInterrupt`/`SystemExit` 同理（属异常，无 finally 拦截）。
+3. **循环不终止**：`items` 为无限迭代器时永远到不了第 6 行（严格说不是"跳过"而是"未到达"）。
+4. 进程级终止（SIGKILL、`os._exit`）——语言语义之外，仅作完整性提及。
+
+## finalize() 一定会执行的情况
+
+**当且仅当 `for` 循环以"迭代器耗尽"的方式正常结束**时，第 6 行必然执行，且恰好执行一次，位置在所有 `save` 之后、`return True` 之前。具体保证性场景：
+
+- 迭代对象有限、正常耗尽，且**没有任何 item 是 `None`**（第 3 行条件始终为假，循环自然落入第 6 行）——例如普通 `list`/`tuple` 输入且不含 `None`；
+- **`items` 为空迭代对象**：循环体一次都不执行，没有机会走第 4 行，因此直接落到第 6 行，`finalize()` 照样执行。这是最容易被误判的边界：**"没有 item"不等于"不 finalize"**。
+
+反向也需要明确：**不存在对任意输入都保证执行的路径**——只要有 `None` 元素，或迭代过程抛异常，第 6 行就会被跳过。
+
+## 与文档/对照模块的关系
+
+README.md:11 声称 "finalize is skipped only by the early `return False` inside the loop"。该说法在"良构的有限可迭代对象 + `save`/`invalid` 不会抛异常"的前提下成立；严格地讲它遗漏了异常展开路径（无 `try/finally`，process.py:1-7）。对照 fixture 中的 `pipeline/scan.py`：那里的 `break`（scan.py:4）是**循环级**退出，所以 `commit()`（scan.py:6）在正常返回时总执行；而 `process.py` 的 `return False` 是**函数级**退出，这正是本模块"finalize 可被跳过"的设计点。
+
+ANSWER: `finalize()`（pipeline/process.py:6）只在 `for` 循环正常耗尽时必然执行且仅执行一次——包括 `items` 为空的情况；不会执行的情况是：(1) 任一 `item is None` 触发 process.py:3-4 的早退 `return False`（此时其前已 `save` 的元素副作用保留但未 finalize）；(2) 任何发生在第 6 行之前的异常，因为第 6 行不在 `try/finally` 中（`items` 不可迭代的 TypeError、迭代器 `__next__` 抛异常、`KeyboardInterrupt` 等；本仓库内 `save`/`invalid` 自身不会抛异常）；(3) 迭代器永不终止时永远到达不了第 6 行。不存在对任意输入都保证执行的路径，README 的"仅由早退跳过"说法应补充异常展开这一条。

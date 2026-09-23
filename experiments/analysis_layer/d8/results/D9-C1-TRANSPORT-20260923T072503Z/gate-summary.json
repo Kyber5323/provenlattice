@@ -1,0 +1,30 @@
+{
+  "gate": "D9-C1 Agent Transport Recovery Gate",
+  "runs_required": 3,
+  "runs_attempted": 1,
+  "rows": [
+    {
+      "sequence": 1,
+      "run_id": "D9-C1-TRANSPORT-1-9c7f2295",
+      "task_id": "D8-A1",
+      "gate_status": "AGENT_TRANSPORT_OR_PRE_TOOL_FAILURE",
+      "passed": false,
+      "actual_model": null,
+      "backend_model": null,
+      "gateway_identity": {
+        "transport": "Claude Code CLI stream-json",
+        "served_backend_model": null,
+        "requested_model": null,
+        "cli_version": null,
+        "endpoint": "not exposed by Claude stream-json"
+      },
+      "exit_reason": "adapter_error",
+      "error": "[WinError 2] 系统找不到指定的文件。",
+      "tool_calls_total": 0,
+      "pl_tool_calls": 0,
+      "tool_result_receipt": null,
+      "agent_continued_after_result": false
+    }
+  ],
+  "final_status": "BLOCKED_BY_AGENT_TRANSPORT"
+}

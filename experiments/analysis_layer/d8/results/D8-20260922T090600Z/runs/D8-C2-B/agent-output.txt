@@ -1,0 +1,37 @@
+## Evidence
+
+**File:** `pipeline/deploy.py` (18 lines, read in full — the whole module is the evidence)
+
+```python
+1  def deploy(build):
+2      if build.ok:
+3          register(build)
+4      announce(build)
+5      cleanup(build)
+6
+7
+8  def register(build):
+9      return build
+10
+11
+12 def announce(build):
+13     return build
+14
+15
+16 def cleanup(build):
+17     return build
+```
+
+**Control-flow reading of `deploy` (pipeline/deploy.py:1-5):**
+
+- `register(build)` sits at line 3, **inside the `if build.ok:` guard** (line 2). It is therefore *not* executed on every call — when `build.ok` is falsy the branch is skipped and `register` never runs.
+- `announce(build)` (line 4) and `cleanup(build)` (line 5) are at the function body's top indentation level, **outside any conditional**, so both run unconditionally on every call.
+- Ordering: as plain sequential statements, line 4 executes before line 5 — `announce()` **precedes** `cleanup()`. Within a call the full order is: `register` (conditional) → `announce` → `cleanup`. Note this is *not* a `try/finally`, so a raise from `announce()` would skip `cleanup()`; in this fixture the helpers are identity stubs (lines 8-17, each just `return build`) so neither can actually raise.
+
+**Corroboration from the symbol graph** (`python -m provenlattice explain-symbol pipeline.deploy.deploy --json`): `deploy` is defined at lines 1-5, with three resolved `CALL_RELATION` / `relation: "CALLS"` edges (`metadata.direct: true`, `resolution: "same_file_resolution"`, `scope: "internal"`) originating from `deploy`'s range and targeting `register` (lines 8-9), `announce` (12-13) and `cleanup` (16-17). The graph confirms the three calls exist but does not itself encode conditionality or ordering — that comes from the source above.
+
+**Corroboration from README.md:14:** the fixture documents its own hidden fact as *"register is conditional; announce precedes cleanup unconditionally"*, matching the source.
+
+No other call sites of `deploy` exist in the repo (grep for `deploy` returns only the definition at pipeline/deploy.py:1 and the README rows), and there is no `pipeline/__init__.py` re-export.
+
+ANSWER: No, not all three run on every call. `register()` is executed only when `build.ok` is truthy (it is the guarded body of `if build.ok:` at pipeline/deploy.py:2-3) and is skipped otherwise; `announce()` (line 4) and `cleanup()` (line 5) are unconditional on every call. Their order is fixed: `announce()` runs before `cleanup()`, with the full sequence per call being `register` (conditional) → `announce` → `cleanup` (plain sequential statements, not a try/finally).

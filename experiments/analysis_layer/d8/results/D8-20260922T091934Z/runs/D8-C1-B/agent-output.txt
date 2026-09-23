@@ -1,0 +1,36 @@
+调查完成。代码极短，证据完整。
+
+## 代码证据
+
+**文件：`pipeline/handle.py`（全文 17 行）**
+
+```python
+1  def handle(x):
+2      if validate(x):
+3          persist(x)
+4      notify(x)
+```
+
+**1. `notify()` 是否依赖 `validate()` 的返回结果？—— 不依赖**
+
+第 4 行 `notify(x)` 的缩进层级与第 2 行 `if` 语句**平级**，位于 `if` 语句块的**外部**（相对 `def handle` 主体缩进 4 空格，而 `persist(x)` 缩进 8 空格，在 `if` 体内）。因此无论 `validate(x)` 返回真值还是假值，`notify(x)` 都会在第 4 行被执行。`validate` 定义在第 7-8 行 `return x`，其返回值只被第 2 行的 `if` 条件消费，与第 4 行无任何数据流或控制流关联。
+
+**2. `persist()` 是否依赖 `validate()` 的返回结果？—— 依赖**
+
+第 3 行 `persist(x)` 缩进在 `if validate(x):` 之内，其执行以 `validate(x)` 返回值的真值性为**唯一前置谓词**：`validate(x)` 返回假值（如 `x = 0`、`None`、`False`）时 `persist` 被跳过。由于 `validate` 恰好返回 `x` 本身（第 8 行），其触发条件等价于 `if x:`。
+
+**交叉验证：仓库索引工具的返回**
+
+`python -m provenlattice explain-symbol pipeline.handle.handle --json` 仅产出三条平铺的调用边，无法表达条件性：
+
+```
+"summary": "pipeline.handle.handle CALLS pipeline.handle.notify"
+"summary": "pipeline.handle.handle CALLS pipeline.handle.validate"
+"summary": "pipeline.handle.handle CALLS pipeline.handle.persist"
+```
+
+三条边的 `source_range` 均为 `start_line 1, end_line 4`（即整个 `handle` 函数定义体），粒度停留在函数级，无法区分「条件调用」与「无条件调用」——这与仓库 `README.md:13` 自述的隐藏事实一致（"notify is unconditional (after merge); persist is conditional"），该自述与源码逐行核对后成立。调用图中也不存在其他 `handle`/`validate`/`persist`/`notify` 定义（全仓库仅 `pipeline/handle.py` 一处），无遮蔽或重载干扰。
+
+**一处精确性补充**：`notify` 不依赖 `validate` 的*返回值*，但仍依赖 `validate` *不抛异常*——若 `validate(x)` 在第 2 行求值时抛出未捕获异常，第 4 行的 `notify` 亦不会执行。这是异常传播所致，而非对其返回值的分支判断。
+
+ANSWER: 在 `pipeline/handle.py` 的 `handle` 中，`notify(x)`（第 4 行）位于 `if validate(x):` 语句块之外，无条件执行，**不依赖** `validate()` 的返回结果（仅受 `validate` 是否抛出异常影响）；`persist(x)`（第 3 行）位于 `if` 块体内，**依赖** `validate()` 返回值的真值性，为假时被跳过。

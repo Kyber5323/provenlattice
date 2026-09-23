@@ -1,0 +1,48 @@
+CFG 分析直接给出了答案。证据齐备。
+
+## 结论
+
+**`notify()` 的执行不依赖 `validate()` 的返回值；`persist()` 的执行依赖 `validate()` 的返回值（真值）。**
+
+## 证据 1：源码（`pipeline/handle.py`，`handle` 函数，第 1–4 行）
+
+```python
+def handle(x):
+    if validate(x):      # 第 2 行：条件表达式即 validate 的返回值
+        persist(x)       # 第 3 行：位于 if 语句的 then 分支内
+    notify(x)            # 第 4 行：位于 if 语句之外、分支合并之后
+```
+
+`persist(x)` 缩进在 `if` 块内 → 仅当 `validate(x)` 为真值时执行。`notify(x)` 与 `if` 平级、在其后 → 无论条件真假都会执行。
+
+## 证据 2：控制流图（`python -m provenlattice explain-symbol pipeline.handle.handle --json --analysis cfg`）
+
+该查询返回 6 个 CFG 节点和 6 条边，全部 `owner_symbol_id = symbol:887c70fa...`（即 `pipeline.handle.handle`）。按字节偏移（`start_byte`/`end_byte`）与 `structural_path` 可把它映射回源码：
+
+| CFG 节点 | kind / structural_role | 字节区间 | 对应源码 |
+|---|---|---|---|
+| `cnode:c4ab9151...` | `entry` | — | 函数入口 |
+| `cnode:27659815...` | `condition` / `if_condition` | 22–33 | `validate(x)`（第 2 行条件） |
+| `cnode:442a8374...` | `callsite`，`resolved_symbol_id = symbol:8447bb1f...` (= `persist`) | 43–53 | `persist(x)`，路径含 `if_statement[0]/block[1]` |
+| `cnode:ca778d06...` | `merge` / `branch_merge` | — | `if_statement[0]` 的汇合点 |
+| `cnode:b3e85953...` | `callsite`，`resolved_symbol_id = symbol:fc6f87aa...` (= `notify`) | 58–67 | `notify(x)`，路径含 `block[2]/expression_statement[1]` |
+| `cnode:46ab5057...` | `exit` | — | 函数出口 |
+
+边（关键三条）：
+
+```
+condition (27659815, validate(x))
+   ├─ kind: "true"  → callsite 442a8374  (persist)     ← 仅真分支可达
+   └─ kind: "false" → merge   ca778d06
+callsite 442a8374 (persist) --next--> merge ca778d06
+merge ca778d06 --next--> callsite b3e85953 (notify)    ← 真/假两条路径汇合后才到 notify
+callsite b3e85953 (notify) --next--> exit 46ab5057
+```
+
+从 `entry` 到 `exit` 的**全部路径**都经过 `notify` 节点（真分支经 `persist`→merge，假分支直接到 merge）；而 `persist` 节点只被 `condition` 节点的 `"true"` 边到达，假分支边绕过它直达 merge。
+
+## 补充说明（严格语义）
+
+`validate(x)` 在顺序上总先于两者被调用（第 2 行），因此“不依赖”指的是**不由其返回值做分支门控**：`validate` 返回假值/空值时 `notify` 照常执行。仓库自带的 fixture 说明（`README.md`）也与此一致：“handle.py | handle | **notify is unconditional (after merge); persist is conditional**”。
+
+ANSWER: 在 `pipeline/handle.py` 的 `handle()` 中，`persist()` 位于 `if validate(x):` 的 then 分支内，**依赖** `validate()` 的返回真值；`notify()` 位于该 if 语句之后（分支合并点之后），在真/假两条路径上都会执行，**不依赖** `validate()` 的返回结果。CFG 证据：`explain-symbol pipeline.handle.handle --analysis cfg` 中 condition 节点（`if_condition`，字节 22–33 即 `validate(x)`）的 `"true"` 边唯一通向 persist callsite（字节 43–53，`resolved_symbol_id`=persist），`"false"` 边直连 merge；persist 与 false 边在 merge 汇合后由 `merge --next-->` 到达 notify callsite（字节 58–67，`resolved_symbol_id`=notify），故 notify 覆盖 entry→exit 的所有路径。

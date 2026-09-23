@@ -1,0 +1,35 @@
+调查完成。仓库是一个微小的 fixture(`pipeline/promote.py` 共 14 行),我已核对了全部 6 个模块和 README。
+
+**代码证据**
+
+`pipeline/promote.py:1-13`:
+
+```python
+def promote(req):
+    if req.failed:
+        rollback(req)
+    else:
+        cleanup(req)
+
+
+def rollback(req):
+    return req
+
+
+def cleanup(req):
+    return req
+```
+
+关键事实:
+
+1. **严格互斥的 if/else 分支**(promote.py:2-5):`rollback(req)` 在 `if req.failed:` 分支内,`cleanup(req)` 在 `else:` 分支内。一次调用中 `req.failed` 只被求值一次(单次属性读取,无副作用逻辑,该 fixture 中 `req` 为普通对象),因此控制流只会进入其中一个分支。
+
+2. **无任何导入或其他调用点**:全仓库 6 个 `.py` 文件中没有一条 `import` 语句(全文 grep `import|promote` 仅命中 `promote.py:1` 的 `def promote`),也没有其他地方引用 `promote`、`rollback` 或 `cleanup`(grep 仅命中 `promote.py` 和 `deploy.py`)。因此不存在装饰器包装、模块级名字重绑定或 monkeypatching 改变 `promote` 内部 `rollback`/`cleanup` 解析结果的可能。
+
+3. **`deploy.py` 中的同名函数无关**:`pipeline/deploy.py:16` 另有一个独立的 `cleanup(build)`,属于 `deploy` 模块自己的命名空间,`promote.py` 并未导入它;其 `deploy()` 中 `register` 条件执行、`announce`/`cleanup` 无条件执行,但那是另一个函数的语义。
+
+4. **README 佐证**:`README.md:9` 将该模块的"hidden fact"明确记载为 "rollback / cleanup sit in mutually exclusive if/else branches",与代码一致。
+
+另外,由于函数体内没有任何 `try/finally` 或异常处理,也不存在"先走 else 分支的 cleanup 再因异常触发 rollback"之类的路径。
+
+ANSWER: 不可能。在 `pipeline/promote.py:1-5` 中,`rollback()` 与 `cleanup()` 位于由 `req.failed` 控制的互斥 `if/else` 分支中,单次 `promote()` 调用只会执行其中恰好一个(`req.failed` 为真时执行 `rollback`,否则执行 `cleanup`);且仓库中无任何 import、调用方或装饰器可改变该控制流。

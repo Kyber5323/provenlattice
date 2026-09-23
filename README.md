@@ -109,11 +109,32 @@ RQ2       Systems + Scale Qualification V1                     ✅ QUALIFIED（2
 SQI-V1    Structured Query Interface Qualification             ✅ QUALIFIED（2026-09-17）
 SQI-V1.1  Evaluation Hardening                                 ✅ PASS（2026-09-17）
 SQI-V1.2  Cost Optimization Qualification                      ✅ QUALIFIED / RELEASE READY（2026-09-20）
+Analysis Layer D0–D8（feature/analysis-layer）                 ✅（见下）
+V1.3     Optional Function Analysis Layer qualification       next
+V1.4     Def-Use / Local Data Flow / Finding Enrichment       not started
+V1.5     Taint / Security Analysis                            not started
 Overlay V1.1                                                   next candidate
 S3+ scale bands / concurrency                                  not started
 第四个 benchmark 仓库 / 跨仓统一索引 / 向量索引                  not started
 MCP / Plugin / SDK                                             evidence-driven decision
 ```
+
+## Current Goal: Optional Function Analysis Layer
+
+当前最终目标：在 V1.2 Foundation Graph 契约不变的前提下，引入**可选的函数内分析层**（AST / CFG / 后续 Def-Use、Data Flow、安全分析），面向代码检测、安全分析与高级 Agent 任务。目标设计全文见
+[docs/design-optional-analysis-layer-vision.md](docs/design-optional-analysis-layer-vision.md)。
+
+分支 `feature/analysis-layer` 上已按 D0–D8 完成实证交付（报告见 `docs/design-analysis-layer-d*.md`）：
+
+- **Base Graph 默认 OFF 承诺**：analysis 表惰性创建、基础源码零修改、index/update 行为不变（每阶段零影响测试 + 全量回归 137/137）；
+- **D1–D3**：`file × analyzer` 派生缓存（`ast:python` / `cfg:python`）、fail-closed freshness、payload 硬上限；
+- **D2/D4**：第一条真实能力链——Python AST（函数体全量层级）与 intraprocedural CFG（真回边、return/break/continue 无 fallthrough、callsite 不跨函数）；
+- **D5**：`provenlattice analyze <repo> --scope <dir> --features ast,cfg`（orchestrator，feature/scope 校验先于 mutation，CFG→AST 依赖编排）；
+- **D6**：只读查询层 `analysis`（六态契约 available/not_built/stale/unsupported/not_available/corrupt，查询永不隐式 analyze）；
+- **D7**：Agent 消费——`explain-symbol --analysis ast,cfg`（默认调用零变化 + size guard + 六态透传）；
+- **D8**：真实 Agent 任务观察——UTILITY_OBSERVED=4 / ADOPTION_GAP=2 / CAPABILITY_GAP=0（无 DFG 需求信号）。
+
+下一步：V1.3 契约对外口径收敛 + 正式 qualification；DFG 等真实需求信号出现再启动。
 
 接口路线：SQI 契约已冻结（byte-identical envelope + citation closure），
 当前优先稳定 CLI / Python Query API；是否引入 MCP、Plugin 或 SDK 由后续

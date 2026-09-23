@@ -1,0 +1,49 @@
+## 代码全貌
+
+`pipeline/process.py` 全文只有 19 行，`finalize()` 在 `process()` 里只有一处调用：
+
+```python
+# pipeline/process.py:1-7
+def process(items):
+    for item in items:
+        if invalid(item):
+            return False          # line 4 — 唯一的提前退出
+        save(item)
+    finalize()                    # line 6 — 循环之后
+    return True
+```
+```python
+# pipeline/process.py:10-19
+def invalid(item):
+    return item is None
+def save(item):
+    return item
+def finalize():
+    return True
+```
+
+全文件没有任何 `try`/`except`/`finally`，循环体内也没有其他 `break`/`continue`/`raise`（grep 确认 `process.py` 只出现 `finalize` 的定义与调用各一次）。
+
+## 不会执行 `finalize()` 的情况
+
+1. **某项 `item` 为 `None`**（`invalid(item)` 为真）。此时 `return False`（process.py:4）直接结束函数，跳过第 6 行。这是代码中唯一的内嵌出口。
+2. **迭代本身抛异常**：如 `items` 不可迭代（`TypeError`）或惰性迭代器的 `__next__` 抛异常。因为没有 `try/finally`，异常沿调用栈传播，第 6 行不会到达。
+
+反过来说，`invalid()` 与 `save()` 是平凡函数（只做 `is None` 判断和返回入参），在不发生上述两种情形时循环体内没有任何能跳过 `finalize()` 的路径——所以没有任何其他"跳过"场景。
+
+## 一定会执行 `finalize()` 的情况
+
+**当 `for` 循环正常终止时必然执行**，即：`items` 为空，或其中每个 `item` 都非 `None`。理由：循环体内不存在除 `return False` 以外的控制流出口，且 `save(item)` 不会抛异常，因此循环体正常结束 ⇒ 必然到达第 6 行，然后执行 `return True`（第 7 行）。
+
+## CFG 证据（provenlattice `--analysis cfg`）
+
+对该符号查询 CFG，节点/边完全对应上述结论：
+
+- 循环正常路径：`entry → loop_header(for_statement[0]) --false--> loop_exit merge → callsite finalize()(block[2]/expression_statement[1]/call[0]，resolved_symbol = pipeline.process.finalize) → return True → exit`
+- 唯一绕过路径：`if_condition(invalid(item)) --true--> return(if_statement block, 即第 4 行 return False) --return--> exit`
+
+即 CFG 中 `finalize` 调用点节点（`cnode:dc21948a...`）只有一条入边（循环出口 merge `cnode:2e278494...`），而 `return False` 节点（`cnode:5ef850bd...`）有一条直达 `exit` 的 `return` 边（`cnode:0bbf1ad8...`）。仓库 `README.md:11` 的 fixture 说明也与此一致："finalize is skipped only by the early `return False` inside the loop"。
+
+补充一点语义细节：第 6 行是普通调用而非 `finally`，其返回值被丢弃；"一定执行"仅就正常控制流而言（异常路径不保证）。另外提前 `return False` 时，该 `None` 项本身未被 `save`，但此前已处理的项已产生副作用且不会回滚。
+
+ANSWER: 在 pipeline/process.py 中，`finalize()`（第 6 行，循环之后）**不会执行**当且仅当：迭代过程中遇到任一 `invalid(item)` 为真的项（即 `item is None`，第 3-4 行 `return False` 直接返回，CFG 中该 return 经 `return` 边直连 exit），或迭代本身抛出异常（`items` 不可迭代 / 惰性迭代器异常；全文件无 try/finally，无 break/continue）；**一定执行**当循环正常终止时——即 `items` 为空或全部元素非 None——因为循环体内除该 `return False` 外无任何其他出口且 `save`/`invalid` 不会抛异常，必然到达并执行第 6 行后 `return True`。

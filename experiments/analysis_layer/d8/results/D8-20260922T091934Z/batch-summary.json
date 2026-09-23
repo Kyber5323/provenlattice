@@ -1,0 +1,255 @@
+{
+  "experiment": "PL-DA-D8 Real Agent Deep-Analysis Utility Observation",
+  "batch_dir": "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\analysis_layer\\d8\\results\\D8-20260922T091934Z",
+  "rows": [
+    {
+      "task_id": "D8-A1",
+      "B_success": true,
+      "B_run_id": "D8-D8-A1-B-3d1233",
+      "B_tokens": {
+        "input": 28153,
+        "output": 4173,
+        "cache_read": 144000,
+        "cache_creation": 0,
+        "total": 176326
+      },
+      "D_success": true,
+      "AST/CFG used": true,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "UTILITY_OBSERVED",
+        "detail": "analysis used + correct answer + incremental fact cited"
+      },
+      "D_run_id": "D8-D8-A1-D-d52f37",
+      "D_tokens": {
+        "input": 34945,
+        "output": 6726,
+        "cache_read": 337920,
+        "cache_creation": 0,
+        "total": 379591
+      },
+      "replayed_requests": [
+        {
+          "feature": "bogus_feature",
+          "replayed_status": "unsupported",
+          "replayed_reason": "unsupported_feature",
+          "replayed_nodes": 0
+        },
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 6
+        },
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 6
+        },
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 6
+        }
+      ]
+    },
+    {
+      "task_id": "D8-A2",
+      "B_success": true,
+      "B_run_id": "D8-D8-A2-B-d58ea1",
+      "B_tokens": {
+        "input": 28342,
+        "output": 2719,
+        "cache_read": 91008,
+        "cache_creation": 0,
+        "total": 122069
+      },
+      "D_success": true,
+      "AST/CFG used": false,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "ADOPTION_GAP",
+        "detail": "analysis available but never requested"
+      },
+      "D_run_id": "D8-D8-A2-D-8cad4d",
+      "D_tokens": {
+        "input": 28976,
+        "output": 4603,
+        "cache_read": 169856,
+        "cache_creation": 0,
+        "total": 203435
+      },
+      "replayed_requests": []
+    },
+    {
+      "task_id": "D8-B1",
+      "B_success": true,
+      "B_run_id": "D8-D8-B1-B-175d4a",
+      "B_tokens": {
+        "input": 27231,
+        "output": 8142,
+        "cache_read": 144512,
+        "cache_creation": 0,
+        "total": 179885
+      },
+      "D_success": true,
+      "AST/CFG used": true,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "UTILITY_OBSERVED",
+        "detail": "analysis used + correct answer + incremental fact cited"
+      },
+      "D_run_id": "D8-D8-B1-D-73161a",
+      "D_tokens": {
+        "input": 32486,
+        "output": 7150,
+        "cache_read": 293248,
+        "cache_creation": 0,
+        "total": 332884
+      },
+      "replayed_requests": [
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 10
+        },
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 10
+        },
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 10
+        }
+      ]
+    },
+    {
+      "task_id": "D8-B2",
+      "B_success": true,
+      "B_run_id": "D8-D8-B2-B-126293",
+      "B_tokens": {
+        "input": 25039,
+        "output": 3095,
+        "cache_read": 115072,
+        "cache_creation": 0,
+        "total": 143206
+      },
+      "D_success": true,
+      "AST/CFG used": false,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "ADOPTION_GAP",
+        "detail": "analysis available but never requested"
+      },
+      "D_run_id": "D8-D8-B2-D-f1bdd5",
+      "D_tokens": {
+        "input": 29061,
+        "output": 5164,
+        "cache_read": 117504,
+        "cache_creation": 0,
+        "total": 151729
+      },
+      "replayed_requests": []
+    },
+    {
+      "task_id": "D8-C1",
+      "B_success": true,
+      "B_run_id": "D8-D8-C1-B-fa187a",
+      "B_tokens": {
+        "input": 24412,
+        "output": 3386,
+        "cache_read": 138496,
+        "cache_creation": 0,
+        "total": 166294
+      },
+      "D_success": true,
+      "AST/CFG used": true,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "UTILITY_OBSERVED",
+        "detail": "analysis used + correct answer + incremental fact cited"
+      },
+      "D_run_id": "D8-D8-C1-D-7e5f21",
+      "D_tokens": {
+        "input": 30692,
+        "output": 5362,
+        "cache_read": 173056,
+        "cache_creation": 0,
+        "total": 209110
+      },
+      "replayed_requests": [
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 6
+        },
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 6
+        },
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 6
+        }
+      ]
+    },
+    {
+      "task_id": "D8-C2",
+      "B_success": true,
+      "B_run_id": "D8-D8-C2-B-98eba3",
+      "B_tokens": {
+        "input": 28101,
+        "output": 4507,
+        "cache_read": 218880,
+        "cache_creation": 0,
+        "total": 251488
+      },
+      "D_success": true,
+      "AST/CFG used": true,
+      "Incremental fact": true,
+      "verdict_detail": {
+        "verdict": "UTILITY_OBSERVED",
+        "detail": "analysis used + correct answer + incremental fact cited"
+      },
+      "D_run_id": "D8-D8-C2-D-c6a323",
+      "D_tokens": {
+        "input": 38270,
+        "output": 6287,
+        "cache_read": 323712,
+        "cache_creation": 0,
+        "total": 368269
+      },
+      "replayed_requests": [
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 7
+        },
+        {
+          "feature": "cfg",
+          "replayed_status": "available",
+          "replayed_reason": null,
+          "replayed_nodes": 7
+        }
+      ]
+    }
+  ],
+  "verdict_counts": {
+    "UTILITY_OBSERVED": 4,
+    "ADOPTION_GAP": 2
+  },
+  "attribution_note": "replayed: each recorded explain-symbol --analysis call was re-evaluated against the same static derived store (D6 API) because the Agent's own shell pipelines truncated the JSON envelope"
+}

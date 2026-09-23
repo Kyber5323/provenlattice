@@ -1,0 +1,32 @@
+{
+  "gate": "D9-C1 Agent Transport Recovery Gate",
+  "launcher": "C:\\Users\\sunqinghw\\AppData\\Roaming\\npm\\claude.cmd",
+  "launcher_version": "2.1.280 (Claude Code)",
+  "runs_required": 3,
+  "runs_attempted": 1,
+  "rows": [
+    {
+      "sequence": 1,
+      "run_id": "D9-C1-TRANSPORT-1-4cc407ad",
+      "task_id": "D8-A1",
+      "gate_status": "AGENT_TRANSPORT_OR_PRE_TOOL_FAILURE",
+      "passed": false,
+      "actual_model": null,
+      "backend_model": null,
+      "gateway_identity": {
+        "transport": "Claude Code CLI stream-json",
+        "served_backend_model": null,
+        "requested_model": null,
+        "cli_version": null,
+        "endpoint": "not exposed by Claude stream-json"
+      },
+      "exit_reason": "timeout",
+      "error": "Command '['C:\\\\Users\\\\sunqinghw\\\\AppData\\\\Roaming\\\\npm\\\\claude.cmd', '-p', '--verbose', '--output-format', 'stream-json', '--append-system-prompt', \"Read-only code-analysis session in a small Python repository. Tools: Read, Grep, Glob, and a repository query CLI: `python -m provenlattice explain-symbol <QUALIFIED_SYMBOL> --json` (run it from the repository root; a symbol is qualified like pkg.module.function; run `python -m provenlattice explain-symbol --help` to see all options). Never edit, create, or delete files. Investigate the task question and answer with concrete code evidence (file, function, code fragment). End your reply with a final line starting with 'ANSWER:' followed by your concise conclusion.\", '--allowedTools', 'Read,Grep,Glob,Bash(python -m provenlattice explain-symbol *),Bash(provenlattice explain-symbol *)', '--permission-mode', 'dontAsk', '--disallowedTools', 'Edit,Write,NotebookEdit', '--safe-mode', '--no-session-persistence']' timed out after 240.0 seconds",
+      "tool_calls_total": 0,
+      "pl_tool_calls": 0,
+      "tool_result_receipt": null,
+      "agent_continued_after_result": false
+    }
+  ],
+  "final_status": "BLOCKED_BY_AGENT_TRANSPORT"
+}

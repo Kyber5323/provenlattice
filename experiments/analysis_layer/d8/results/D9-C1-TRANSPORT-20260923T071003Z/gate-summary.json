@@ -1,0 +1,30 @@
+{
+  "gate": "D9-C1 Agent Transport Recovery Gate",
+  "runs_required": 3,
+  "runs_attempted": 1,
+  "rows": [
+    {
+      "sequence": 1,
+      "run_id": "D9-C1-TRANSPORT-1-32f3d3b7",
+      "task_id": "D8-A1",
+      "gate_status": "AGENT_TRANSPORT_OR_PRE_TOOL_FAILURE",
+      "passed": false,
+      "actual_model": "deepseek-v4-flash",
+      "backend_model": "<synthetic>",
+      "gateway_identity": {
+        "transport": "Claude Code CLI stream-json",
+        "served_backend_model": "<synthetic>",
+        "requested_model": "deepseek-v4-flash",
+        "cli_version": "2.1.270",
+        "endpoint": "not exposed by Claude stream-json"
+      },
+      "exit_reason": "agent_nonzero_exit",
+      "error": null,
+      "tool_calls_total": 0,
+      "pl_tool_calls": 0,
+      "tool_result_receipt": null,
+      "agent_continued_after_result": false
+    }
+  ],
+  "final_status": "BLOCKED_BY_AGENT_TRANSPORT"
+}

@@ -1,0 +1,34 @@
+`pipeline/deploy.py` is 17 lines total; here is the whole relevant code (lines 1–6):
+
+```python
+def deploy(build):
+    if build.ok:
+        register(build)
+    announce(build)
+    cleanup(build)
+```
+
+**Findings**
+
+1. **`register()` — NOT executed on every call.** It sits inside `if build.ok:` (pipeline/deploy.py:2–3), so it runs only when `build.ok` is truthy. There is no `else` branch and no other call site for it.
+2. **`announce()` — unconditional.** Line 4 is a plain top-level statement in `deploy()`'s body, after the `if` block, at the same indentation as `if`. It executes on every invocation, whichever branch the `if` took.
+3. **`cleanup()` — unconditional.** Line 5, same level as `announce()`. Also executes on every invocation.
+4. **Ordering: `announce()` runs first, then `cleanup()`** (line 4 before line 5). They are in straight-line sequence after the branch merge; `cleanup()` is not in a `finally` or `else`, so if `announce()` raised, `cleanup()` would not run. On the `build.ok` true path the full order is `register → announce → cleanup`.
+
+**Independent corroboration from the CFG analysis layer** (same source, re-derived mechanically):
+
+```
+python -m provenlattice explain-symbol pipeline.deploy.deploy --json --analysis cfg
+```
+
+Its node/edge set reproduces exactly this shape — `entry → condition(true → register, false → merge)`, then `merge → announce → cleanup → exit`:
+
+- `cnode:3648dcc3…` → kind `true` → `ffa3cdda…`, whose payload is `"resolved_symbol_id": "symbol:f6a30f04…"` = `pipeline.deploy.register`, `"structural_path": "…if_statement[0]/block[1]/expression_statement[0]/call[0]"` (register is inside the if-body).
+- `cnode:3648dcc3…` → kind `false` → `c18b74d2…`, kind `merge`, path `…/if_statement[0]`, role `branch_merge` (both branches reconverge before announce/cleanup).
+- `cnode:2387c31c…` (entry) → `next` → condition; `merge → next → 73aaabc7` (announce: `"resolved_symbol_id": "symbol:27a5488a…"`, path `…/expression_statement[1]/call[0]`) → `next → f73b905b` (cleanup: `"resolved_symbol_id": "symbol:29928bed…"`, `expression_statement[2]`, start_byte 84, the highest body offset) → `next → exit` (`05a0eda5…`).
+
+The flat call-graph view (`python -m provenlattice explain-symbol pipeline.deploy.deploy --json` without `--analysis`) lists three `CALLS` edges (`deploy → register`, `→ announce`, `→ cleanup`) but cannot express conditionality or ordering — that only comes from the source and the `cfg` section.
+
+Note also: `deploy()` itself has no `return`, so it returns `None` and discards the `build` values that each helper (`register`/`announce`/`cleanup`, each body `return build`) hands back.
+
+ANSWER: No — `register()` is conditional, running only when `build.ok` is truthy (pipeline/deploy.py:2–3), while `announce()` (line 4) and `cleanup()` (line 5) are unconditional and execute on every `deploy()` call; between those two, `announce()` always executes before `cleanup()` (straight-line sequence after the if/merge, no try/finally), so the full true-path order is `register → announce → cleanup`.

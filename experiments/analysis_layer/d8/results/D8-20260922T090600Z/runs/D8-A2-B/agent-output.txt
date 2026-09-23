@@ -1,0 +1,26 @@
+Repo B is self-contained: six modules, no imports, no other bindings of these names (grep for `^import|^from` returns nothing). So `pipeline/gate.py` is the whole story.
+
+## Control flow in `gate()` (file: `pipeline/gate.py`, function `gate`)
+
+```python
+1  def gate(mode):
+2      if mode == "fast":
+3          skip_tests(mode)
+4      else:
+5          run_tests(mode)
+6      publish(mode)
+```
+
+There is no `return`, `raise`, or `break` anywhere in `gate()`, and the `if/else` on lines 2–5 has no `elif` and no inner nesting. The call graph is therefore: `skip_tests` XOR `run_tests` (mutually exclusive), then `publish` unconditionally on the merge point at line 6.
+
+**1. Can `skip_tests()` and `publish()` both execute in one call of `gate()`? — Yes.**
+Concrete path: `gate("fast")` → line 2 true → line 3 calls `skip_tests("fast")` → fall-through (no early exit) → line 6 calls `publish("fast")`. The branch bodies of `skip_tests`/`run_tests` are just `return mode` (lines 10, 14), so they return normally and cannot raise, meaning `publish` at line 6 is in fact **always** reached. This matches the fixture's own documentation in `README.md:10`: `| gate.py | gate | publish runs after the branch merge, on every path |`.
+
+**2. Can `run_tests()` and `publish()` both execute in one call? — Yes.**
+Concrete path: `gate("slow")` (or any `mode != "fast"`, including `None`) → line 2 false → line 5 calls `run_tests(mode)` → line 6 calls `publish(mode)`.
+
+**What is *not* possible:** `skip_tests()` and `run_tests()` together in one call — they sit in the two arms of the same `if/else` (lines 2–5). `publish()` is the only function with an unconditional call, so it accompanies exactly one of the two branch functions. It would be skipped only if `skip_tests`/`run_tests` raised, which their bodies (`return mode`) cannot do.
+
+(Note: I could not run `python -m provenlattice explain-symbol` — Bash was denied in this session — so the conclusion rests on direct source reading plus the repo-wide greps above.)
+
+ANSWER: Yes to both — `gate("fast")` executes `skip_tests` then `publish`; any other `mode` executes `run_tests` then `publish`. The two branch functions are mutually exclusive (`skip_tests` XOR `run_tests`), while `publish` at line 6 runs unconditionally on every path after the merge.

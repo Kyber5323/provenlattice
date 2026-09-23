@@ -1,0 +1,19 @@
+{
+  "run_id": "D8-D8-C2-D-aea813",
+  "task_id": "D8-C2",
+  "arm": "D",
+  "exit_reason": "agent_nonzero_exit",
+  "error": null,
+  "actual_model": "deepseek-v4-flash",
+  "backend_model": "<synthetic>",
+  "tool_calls_total": 0,
+  "pl_tool_calls": 0,
+  "read_calls": 0,
+  "search_calls": 0,
+  "analysis_requests": [],
+  "analysis_used": false,
+  "tokens": {},
+  "events": [],
+  "output": "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)",
+  "analysis_requests_replayed": []
+}

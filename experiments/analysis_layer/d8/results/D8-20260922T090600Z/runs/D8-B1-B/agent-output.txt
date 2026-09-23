@@ -1,0 +1,45 @@
+我已完成调查。`pipeline/process.py` 全文只有 19 行，控制流完全确定。另外说明：从仓库查询 CLI 拿不到工具层面的控制流事实——`explain-symbol pipeline.process.process --analysis cfg` 返回 `{"status": "not_built", "reason": "analysis_not_built"}`（`--analysis ast` 同样为 `not_built`，`control_flow` 则是 `unsupported_feature`），因此结论以源码为准。
+
+## 代码证据：`pipeline/process.py:1-19`
+
+```python
+1  def process(items):
+2      for item in items:
+3          if invalid(item):
+4              return False
+5          save(item)
+6      finalize()
+7      return True
+...
+10 def invalid(item):
+11     return item is None
+...
+18 def finalize():
+19     return True
+```
+
+关键结构：`finalize()` 在 `pipeline/process.py:6`，位于 for 循环（第 2 行）之外、函数体顶层，**没有任何 if 包裹**；函数内**没有 `break` / `continue` / `try` / `finally`**。唯一能绕过它的是 `pipeline/process.py:4` 的 `return False`。
+
+## 一、`finalize()` 不会执行的情况
+
+1. **某个 item 触发早期 `return False`（唯一的控制结构路径）** — 第 3 行 `invalid(item)` 为真（第 11 行：`return item is None`，即 item 为 `None`）时，第 4 行 `return False` **退出的是整个函数而不是循环**，直接跳过第 6 行的 `finalize()`。这正是 D8 fixture README 记录的隐藏事实：“finalize is skipped only by the early `return False` inside the loop”（`README.md:11`）。
+2. **循环体内抛出未捕获异常** — 第 2 行迭代 `items`、第 3 行 `invalid(item)`、第 5 行 `save(item)` 任一处抛异常（含 `items` 不可迭代导致的 `TypeError`），异常向上传播，且**没有 try/finally 兜底**，`finalize()` 同样被跳过。
+3. **循环不终止** — 若 `items` 是无限迭代器，第 6 行永远不可达。
+
+（第 7 行 `return True` 与第 19 行 `finalize()` 的返回值 `True` 无关联：`finalize()` 的返回值被丢弃，它只是必然先于 `return True` 执行。）
+
+## 二、`finalize()` 一定会执行的情况
+
+在函数被调用、且循环**正常结束**（无 `return False`、无异常）的前提下，第 6 行必然执行且只执行一次：
+
+- **`items` 为空**：循环体一次都不进，无任何 `return False`，直接落到第 6 行。
+- **所有 item 都通过 `invalid()`**（即序列中不含 `None`）：循环耗尽后落到第 6 行。
+- 两者都走同一"循环正常退出 → 合并点"路径，第 6 行处无任何条件判断，故是**无条件执行**的。
+
+## 三、与同 fixture 其他模块的对照（D8 的设计要点）
+
+- 对比 `pipeline/scan.py:1-6`：那里循环内是 `break`（第 4 行），`break` 只退出循环、不退出函数，所以第 6 行 `commit()` **即使某行 corrupt 也照样执行**。
+- `process.py` 里没有 `break`，唯一的循环内逃逸是 `return False`，属于**函数级退出**，所以才会跳过 `finalize()`；反过来说，凡"离开循环"的路径都汇合到第 6 行。
+- 结论中的"一定执行"仅限于正常返回路径；若把 `finalize()` 当作清理语义使用，当前代码缺少 `try/finally`，异常路径不保证执行。
+
+ANSWER: 在 `pipeline/process.py` 中，`finalize()`（第 6 行，循环外、无条件）不会执行的情形是：① 第 3-4 行某 item 满足 `invalid(item)`（即 `item is None`，见第 10-11 行）触发早期 `return False`——这是唯一控制结构路径，README 记载的隐藏事实；② 第 2/3/5 行任何未捕获异常（无 try/finally）；③ 循环不终止。它一定执行的情形是：函数被调用且循环正常结束（`items` 为空、或所有 item 均非 None，二者都汇合到第 6 行），即无异常且无 `return False` 时 `finalize()` 无条件执行一次。

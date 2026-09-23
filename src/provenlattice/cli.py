@@ -9,9 +9,28 @@ from pprint import pprint
 from .graph import full_index
 from .incremental import incremental_update
 from .knowledge import index_knowledge
+from .analysis_query import query_analysis
+from .orchestrator import AnalysisRequestError, analyze_scope
 from .query import GraphQuery
 from .shard import BuildAwareShardStrategy, DirectoryShardStrategy, StructuralShardStrategy
 
+
+ANALYSIS_FEATURES_HELP = (
+    "Optional derived function analysis; use ast for function structure and call "
+    "locations, or cfg for branches, loops, fallthrough, and early returns. "
+    "Use comma-separated features. Omit to keep base evidence unchanged."
+)
+
+
+def _add_analysis_options(command: argparse.ArgumentParser, *, multi_target: bool) -> None:
+    command.add_argument("--analysis", metavar="FEATURES", default=None,
+                         help=ANALYSIS_FEATURES_HELP)
+    if multi_target:
+        command.add_argument(
+            "--analysis-symbol-id", metavar="SYMBOL_ID", default=None,
+            help=("Required with --analysis: exact symbol_id from this command's returned "
+                  "bundle. Only that symbol is analyzed; results are never analyzed automatically."),
+        )
 
 def _database(args: argparse.Namespace) -> Path:
     if args.database:
@@ -39,6 +58,16 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge = command("knowledge")
     knowledge.add_argument("repo", nargs="?", default=".")
     knowledge.add_argument("--full", action="store_true", help="rebuild all knowledge documents")
+    analyze = command("analyze")
+    analyze.add_argument("repo")
+    analyze.add_argument("--scope", required=True)
+    analyze.add_argument("--features", required=True)
+    analysis_query = command("analysis")
+    analysis_query.add_argument("repo")
+    analysis_query.add_argument("--feature", required=True)
+    analysis_selectors = analysis_query.add_mutually_exclusive_group(required=True)
+    analysis_selectors.add_argument("--symbol-id")
+    analysis_selectors.add_argument("--file-path")
     command("status")
     symbol = command("symbol")
     symbol.add_argument("name")
@@ -88,10 +117,14 @@ def build_parser() -> argparse.ArgumentParser:
                            help="task-specific term used only for bundle ranking; repeatable")
         return child
 
-    evidence_command("explain-symbol", ["explain_symbol"])
+    explain_symbol_cmd = evidence_command("explain-symbol", ["explain_symbol"])
+    _add_analysis_options(explain_symbol_cmd, multi_target=False)
     evidence_command("explain-module", ["explain_module"])
-    evidence_command("find-related-code", ["find_related_code"])
-    evidence_command("find-related-documents", ["find_related_documents"])
+    find_related_code_cmd = evidence_command("find-related-code", ["find_related_code"])
+    _add_analysis_options(find_related_code_cmd, multi_target=True)
+    find_related_documents_cmd = evidence_command(
+        "find-related-documents", ["find_related_documents"])
+    _add_analysis_options(find_related_documents_cmd, multi_target=False)
     evidence_command("trace-evidence", ["trace_evidence"])
     return parser
 
@@ -110,6 +143,31 @@ def run(args: argparse.Namespace) -> dict:
         return incremental_update(args.repo, database, strategy=strategy)
     if args.command == "knowledge":
         return index_knowledge(args.repo, database, incremental=not args.full)
+    if args.command == "analyze":
+        try:
+            return analyze_scope(args.repo, args.scope, args.features, database)
+        except AnalysisRequestError as error:
+            return {
+                "status": "failed",
+                "error": {"code": error.code, "detail": error.detail},
+                "scope": args.scope,
+                "requested_features": [
+                    item.strip() for item in args.features.split(",") if item.strip()
+                ],
+            }
+    if args.command == "analysis":
+        try:
+            return query_analysis(
+                args.repo, args.feature,
+                file_path=args.file_path, symbol_id=args.symbol_id, database=database,
+            )
+        except AnalysisRequestError as error:
+            return {
+                "status": "failed",
+                "error": {"code": error.code, "detail": error.detail},
+                "feature": args.feature,
+                "selector": {"symbol_id": args.symbol_id, "file_path": args.file_path},
+            }
     with GraphQuery(database) as query:
         if args.command == "status":
             return query.status()
@@ -159,13 +217,17 @@ def run(args: argparse.Namespace) -> dict:
         for key in ("max_primary", "max_supporting", "max_total"):
             if isinstance(bundle_options[key], str): bundle_options[key] = int(bundle_options[key])
         if args.command in {"explain-symbol", "explain_symbol"}:
-            return query.explain_symbol(args.anchor, **budget, **bundle_options)
+            return query.explain_symbol(args.anchor, **budget, **bundle_options,
+                                        analysis=args.analysis)
         if args.command in {"explain-module", "explain_module"}:
             return query.explain_module(args.anchor, **budget, **bundle_options)
         if args.command in {"find-related-code", "find_related_code"}:
-            return query.find_related_code(args.anchor, **budget, **bundle_options)
+            return query.find_related_code(
+                args.anchor, **budget, **bundle_options, analysis=args.analysis,
+                analysis_symbol_id=args.analysis_symbol_id)
         if args.command in {"find-related-documents", "find_related_documents"}:
-            return query.find_related_documents(args.anchor, **budget, **bundle_options)
+            return query.find_related_documents(args.anchor, **budget, **bundle_options,
+                                                analysis=args.analysis)
         if args.command in {"trace-evidence", "trace_evidence"}:
             return query.trace_evidence(args.anchor, **budget)
     raise ValueError(f"unknown command: {args.command}")

@@ -1,0 +1,33 @@
+调查完成。`repos/D` 是 D8 observation fixture（只有 `pipeline/` 下 6 个模块），`gate` 无任何仓库内调用者，因此单次调用的行为完全由 `gate` 函数体决定。
+
+## 代码证据
+
+`pipeline/gate.py`（全文 19 行），函数 `gate`（第 1–6 行）：
+
+```python
+def gate(mode):          # L1
+    if mode == "fast":   # L2
+        skip_tests(mode) # L3
+    else:                # L4
+        run_tests(mode)  # L5
+    publish(mode)        # L6  ← 与 if/else 同级（dedent），位于分支汇合点之后
+```
+
+三条执行路径：
+
+| mode 取值 | 被执行的被调函数 |
+|---|---|
+| `mode == "fast"`（L2 为真） | `skip_tests` (L3) → `publish` (L6) |
+| `mode != "fast"`（L2 为假） | `run_tests` (L5) → `publish` (L6) |
+
+关键点是 `publish(mode)` 在 L6 缩进回到函数体层级，位于 if/else 的**汇合点（join）之后**，因此它是两条分支的后支配节点（post-dominator），在每次 `gate()` 调用中必然执行；而 `skip_tests` 与 `run_tests` 分别位于互斥的 if / else 分支中，单次调用只会命中其一。另外 `skip_tests`/`run_tests`/`publish`（L9–18）都只是 `return mode`，不会抛异常，因此不存在异常绕过 L6 的路径。
+
+CLI 佐证（`python -m provenlattice explain-symbol pipeline.gate.gate --json`）返回三条 CALLS 边——`gate → publish`（E-CALL-726a66c5…）、`gate → run_tests`（E-CALL-974b5dcb…）、`gate → skip_tests`（E-CALL-dd216ac6…），三者 source_range 均为 start_line 1 / end_line 6，即纯调用图只能说明"函数体内引用了这三个符号"，不携带分支条件或先后顺序信息，无法区分"同一次执行"与"互斥分支"。这也正是该 fixture README 第 10 行标注的隐藏事实："publish runs after the branch merge, on every path"。
+
+## 结论
+
+- **`skip_tests()` 与 `publish()` 会（可以）在同一次 `gate()` 调用中都被执行**：当且仅当 `mode == "fast"` 时，L3 执行后再执行 L6。
+- **`run_tests()` 与 `publish()` 会（可以）在同一次 `gate()` 调用中都被执行**：当 `mode != "fast"`（含任意其他字符串值）时，L5 执行后再执行 L6。
+- 补充：`skip_tests` 与 `run_tests` 互斥，任何单次调用中都不会同时执行；而 `publish` 是唯一在**所有**路径上都被执行的调用。
+
+ANSWER: 是，两者都可能。`pipeline/gate.py` 的 `gate` (L1–6)：`publish(mode)` 位于 L6、在 if/else 汇合点之后，是两条分支的后支配调用，每次调用必执行。故 mode=="fast" 时 `skip_tests()` 与 `publish()` 在一次调用中先后执行；mode!="fast" 时 `run_tests()` 与 `publish()` 在一次调用中先后执行。`skip_tests` 与 `run_tests` 分属互斥分支，单次调用中永不同时执行。

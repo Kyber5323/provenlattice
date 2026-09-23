@@ -1,0 +1,47 @@
+## 调查结论
+
+被调查的文件是 `pipeline/deploy.py`（该仓库是 D8 观测 fixture，全仓库仅 6 个模块、无任何 `import`，且 `deploy()` 无其他调用方或被覆盖定义——grep 确认全仓库只有一处 `def deploy`）。
+
+完整源码（`pipeline/deploy.py:1-18`）：
+
+```python
+1  def deploy(build):
+2      if build.ok:
+3          register(build)
+4      announce(build)
+5      cleanup(build)
+6
+7
+8  def register(build):
+9      return build
+10
+11 def announce(build):
+12     return build
+13
+14 def cleanup(build):
+15     return build
+```
+
+### 1. `register()`、`announce()`、`cleanup()` 是否每次调用 `deploy()` 都执行？
+
+- **`register()`：否，条件执行。** 它位于 `if build.ok:` 语句块内（`pipeline/deploy.py:2-3`），只有当 `build.ok` 为真值时才被调用；否则该调用点被跳过。
+- **`announce()`：是，无条件执行。** 它是函数体顶层语句（`pipeline/deploy.py:4`），不在任何分支/循环内。
+- **`cleanup()`：是，无条件执行。** 同理，`pipeline/deploy.py:5`，函数体顶层、无任何守卫条件。
+
+### 2. `announce()` 与 `cleanup()` 的先后关系
+
+**`announce()` 严格先于 `cleanup()` 执行**：两者是同一函数体中的相邻顺序语句，`announce(build)` 在第 4 行、`cleanup(build)` 在第 5 行，没有分支、循环或早期 `return` 介入，因此每次调用 `deploy()` 都是"先 announce、后 cleanup"这一固定顺序。
+
+（唯一的中断场景是异常传播：若 `build.ok` 求值或 `announce()` 内部抛出异常，则其后的 `cleanup()` 不会执行。函数体内没有 `try/finally`，因此不存在异常下的重排或保证性收尾。）
+
+### 工具侧交叉验证
+
+用 `python -m provenlattice explain-symbol pipeline.deploy.deploy --json` 查询，返回 5 条证据：1 条 `CODE_DEFINITION`（source_range 1-5，即 `deploy` 整个函数体）加 3 条 `CALLS` 边（confidence 0.98）：
+
+- `pipeline.deploy.deploy CALLS pipeline.deploy.register`（E-CALL-889a0063932f4391b3fff6cf）
+- `pipeline.deploy.deploy CALLS pipeline.deploy.announce`（E-CALL-b07dd05cdf4fd4a020e86421）
+- `pipeline.deploy.deploy CALLS pipeline.deploy.cleanup`（E-CALL-c8cd1404bbe05e2402d8e12d）
+
+注意：这三个 CALLS 边**不含任何行序或条件性信息**，无法区分"条件调用"与"无条件调用"；同时 `--analysis cfg` 的返回为 `{"cfg": {"status": "not_built", "reason": "analysis_not_built"}}`，即该 fixture 仓库的 CFG 分析尚未构建。因此"register 是条件调用、announce 先于 cleanup 且二者无条件"这一控制流结论只能由源码本身（`pipeline/deploy.py:2-5` 的缩进/语句位置）读出，这也正是该仓库 README 第 14 行所标注的 hidden fact：「register is conditional; announce precedes cleanup unconditionally」。
+
+ANSWER: 在 `pipeline/deploy.py` 的 `deploy()`（第 1-5 行）中，`register()` **不是**每次调用都执行——它位于 `if build.ok:` 块内（第 2-3 行），仅当 `build.ok` 为真时调用；`announce()`（第 4 行）和 `cleanup()`（第 5 行）都是函数体顶层的无条件语句，每次调用 `deploy()` 都会执行，且顺序固定为 **announce() 先、cleanup() 后**（第 4 行先于第 5 行，无分支/循环/提前 return，仅异常传播可打断该顺序）。

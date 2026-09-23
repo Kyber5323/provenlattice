@@ -1,0 +1,38 @@
+源码与工具查询都已确认。以下是结论与证据。
+
+## 代码证据
+
+`pipeline/gate.py`（全文 19 行，函数 `gate` 在第 1–6 行）：
+
+```python
+1  def gate(mode):
+2      if mode == "fast":
+3          skip_tests(mode)
+4      else:
+5          run_tests(mode)
+6      publish(mode)
+```
+
+关键观察：
+
+1. `skip_tests()` 只在 `if mode == "fast"` 分支内调用（第 3 行）。
+2. `run_tests()` 只在 `else` 分支（即 `mode != "fast"`）内调用（第 5 行）——因此二者**互斥**。
+3. `publish()` 在第 6 行，位于 if/else **合并点之后**，且函数体内 `publish` 之前没有任何 `return` / `raise` / `break` / `continue`，所以它在**每条执行路径**上都会执行。
+
+## 工具交叉验证
+
+`python -m provenlattice explain-symbol pipeline.gate.gate --json` 返回三条 `CALLS` 边（同一 commit `515ba31`，`source_path: pipeline/gate.py`，`source_range: 1–6`）：
+
+- `pipeline.gate.gate CALLS pipeline.gate.skip_tests`
+- `pipeline.gate.gate CALLS pipeline.gate.run_tests`
+- `pipeline.gate.gate CALLS pipeline.gate.publish`
+
+注意：这三条边是**扁平**的，只说明“存在调用”，不带顺序或分支信息——正如该 fixture 的 `README.md` 所述（"gate | publish runs after the branch merge, on every path"），基础符号/调用图本身无法表达这一控制流事实，必须靠源码/CFG 分析才能判定。
+
+## 结论
+
+- **`skip_tests()` 与 `publish()` 可以在同一次 `gate()` 调用中都被执行**：当 `mode == "fast"` 时，先走第 3 行，再走第 6 行。
+- **`run_tests()` 与 `publish()` 也可以在同一次调用中都被执行**：当 `mode != "fast"` 时，先走第 5 行，再走第 6 行。
+- 真正互斥的一对是 `skip_tests()` 与 `run_tests()`（分别位于 if / else 两支）；`publish()` 无条件执行，与两者都能共存。
+
+ANSWER: 是——两者都可以。`publish(mode)`（pipeline/gate.py:6）位于 if/else 合并点之后且无任何提前返回，因此在 mode=="fast" 时 skip_tests（第 3 行）+ publish 都会执行，在 mode!="fast" 时 run_tests（第 5 行）+ publish 都会执行；互斥的实际上是 skip_tests 与 run_tests 这一对。

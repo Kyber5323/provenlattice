@@ -1,0 +1,37 @@
+## 结论依据
+
+### 1. 源码：`pipeline/promote.py`（全文件 14 行）
+
+```python
+1  def promote(req):
+2      if req.failed:
+3          rollback(req)      # 分支 A（if 为真）
+4      else:
+5          cleanup(req)       # 分支 B（else）
+```
+
+`rollback`（第 8 行）与 `cleanup`（第 12 行）分别位于 `if`/`else` 的互斥分支中，`promote()` 中对 `req.failed` 只做一次真值判断，随后**恰好走一个分支**：不存在 fall-through、没有 `try/finally`、两个调用也不在同一路径上串联。
+
+### 2. 交叉验证：仓库内无其他绑定/覆盖
+
+- `Grep "def (promote|rollback|cleanup)"` 全仓命中仅：`pipeline/promote.py:1,8,12` 以及 `pipeline/deploy.py:16`（那是另一个模块的独立 `cleanup`）。
+- `pipeline/promote.py` 中无 import、无动态重绑定，`rollback`/`cleanup` 就是同模块定义的本地函数；CLI 证据也确认调用边解析为同文件本地符号（`resolved_symbol_id: symbol:9f249235…` 即 `pipeline.promote.cleanup`，`relative_path: pipeline/promote.py`，`start_line: 12`）。
+
+### 3. ProvenLattice CFG 分析（`explain-symbol pipeline.promote.promote --analysis cfg`，`status: available`，`truncated: false`，6 节点 / 6 边）
+
+| CFG 节点 | 类型 | 关键载荷 |
+| --- | --- | --- |
+| `cnode:d791e341…` | entry | `structural_role: entry` |
+| `cnode:5cb329da…` | condition | `if_condition`，`req.failed`（bytes 25–35） |
+| `cnode:c7e7e06e…` | callsite | 解析为 `rollback`（`symbol:a4d3d600…`），路径 `…/if_statement[0]/block[1]/…`（第 3 行，bytes 45–58） |
+| `cnode:bdca8d1f…` | callsite | 解析为 `cleanup`（`symbol:9f249235…`），路径 `…/if_statement[0]/else_clause[2]/…`（第 5 行，bytes 77–89） |
+| `cnode:59bb8898…` | merge | `branch_merge` |
+| `cnode:9c11f1a8…` | exit | — |
+
+全部 6 条边：entry→condition(`next`)；condition→rollback(`**true**`)；condition→cleanup(`**false**`)；rollback→merge(`next`)；cleanup→merge(`next`)；merge→exit(`next`)。
+
+condition 节点出度恰为 2（一条 `true`、一条 `false`），`rollback` 调用点只能经 `true` 边到达、`cleanup` 调用点只能经 `false` 边到达；两个 callsite 之间无边相连，也无环。因此单次 `promote()` 调用中二者的可达性互斥。
+
+（唯一理论上的例外是 `req.failed` 本身带副作用属性、由外部对象自行调用其中一个函数——仓库中不存在此类定义，且那也不属于 `promote` 的控制流。）
+
+ANSWER: 不会。`pipeline/promote.py:1-5` 中 `promote()` 用 `if req.failed: rollback(req) else: cleanup(req)`，两个调用位于互斥 if/else 分支；CFG 证据进一步确认二者分别仅能经 condition 节点的 `true`/`false` 边到达、之间无边，故单次调用中 `rollback()` 与 `cleanup()` 恰执行其一，绝不两者都执行。

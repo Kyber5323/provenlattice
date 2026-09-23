@@ -1,0 +1,32 @@
+I have complete evidence. The module is 18 lines, self-contained, with no other callers in the repo (grep for `scan`/`commit` hits only `pipeline/scan.py` and the README).
+
+## Analysis
+
+**`commit()` executes on every call path of `scan()`.**
+
+```python
+# pipeline/scan.py:1-6
+def scan(rows):
+    for row in rows:
+        if corrupt(row):
+            break
+        check(row)
+    commit()          # line 6 — outside the loop, unconditional
+```
+
+Key facts:
+
+1. **`commit()` is not inside the loop.** It sits at the function-body level after the `for` statement (line 6), so it runs regardless of how the loop terminates — normal exhaustion, empty `rows`, or `break`.
+2. **`break` exits the loop, not the function.** The `break` at line 4 unwinds only the iteration; control resumes at line 6. There is no `if/else` on the loop, no `return` anywhere in `scan()`, and no `try/except`, so nothing can divert control away from line 6.
+3. **`scan()` has exactly one branch and no early exits.** The `corrupt` check is the only conditional; its `break` is the only loop-exit statement. Contrast with the sibling module the README calls out — `pipeline/process.py` uses `return False` inside its loop, which *does* skip `finalize()` on the same "bad item" scenario.
+4. **Zero path-dependency on the data.** Since the only loop-exit paths (exhaustion and `break`) both converge on line 6, `commit()` runs whether `rows` is `[]`, all-clean, or contains a `None`. Purely the exception path could skip it, and the repo's own definitions cannot raise: `corrupt` is `return row is None` (line 9-10) and `check` is `return row` (line 13-14). An exception thrown by an overridden `corrupt`/`check` would propagate and skip `commit()` — but no such override exists in this repository.
+
+**What happens with a corrupt row** (`corrupt(row) is True`, i.e. `row is None`, pipeline/scan.py:9-10):
+
+- The `break` fires at the **first** corrupt row.
+- `check()` is **not called for that row, nor for any subsequent rows** — they are silently abandoned (no counter, no error, no logging; `scan` has no return value at all).
+- **`commit()` still runs at line 6**, committing the partial work done on the rows preceding the corrupt one. There is no rollback, abort flag, or partial-result signal — the function returns `None` and `commit()`'s `True` is discarded.
+
+This is exactly the hidden fact the fixture README documents for `scan.py`: *"commit runs even when a row triggers `break` (break exits the loop, not the function)"* (README.md:12).
+
+ANSWER: Yes — `commit()` at pipeline/scan.py:6 sits after the `for` loop, and `break` (line 4) exits only the loop, so `commit()` runs on every path: empty `rows`, all-clean rows, and rows containing a corrupt (`None`) entry. On a corrupt row, iteration stops, that row and all subsequent rows skip `check()` entirely, yet `commit()` still executes — committing the partial work with no rollback or error signal (the only way to skip `commit()` would be an exception escaping `corrupt`/`check`, which the in-repo definitions `return row is None` (line 10) and `return row` (line 14) cannot produce).

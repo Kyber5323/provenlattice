@@ -1,0 +1,41 @@
+I have all the evidence needed. Here is the analysis.
+
+## Code evidence
+
+**`pipeline/promote.py:1-13`** (entire file):
+
+```python
+def promote(req):
+    if req.failed:
+        rollback(req)      # line 3
+    else:
+        cleanup(req)       # line 5
+
+
+def rollback(req):
+    return req             # line 9
+
+
+def cleanup(req):
+    return req             # line 13
+```
+
+### Why both cannot run in one `promote()` call
+
+1. **Mutually exclusive branches.** `rollback(req)` (line 3) is the body of the `if` suite; `cleanup(req)` (line 5) is the body of the `else` suite. Python's `if/else` executes exactly one suite per evaluation; the condition `req.failed` is read once at line 2. Even if `rollback(req)` mutated `req.failed`, the `else` suite was already skipped — there is no re-test, no loop, no fall-through.
+
+2. **No exception path can cross branches.** There is no `try`/`except`/`finally`, no `with`, and no loop anywhere in the function (lines 1-5), so `cleanup` cannot be reached from a failing `rollback` (or vice versa).
+
+3. **The callees are inert and terminate.** `rollback` (lines 8-9) and `cleanup` (lines 12-13) each just `return req`. Neither calls the other, and neither calls `promote`, so there is no recursion/re-entrancy that could re-enter the other branch.
+
+4. **No competing definitions or callers.** A repo-wide grep for `rollback|cleanup|promote` returns matches only in `README.md`, `pipeline/promote.py`, and `pipeline/deploy.py` — and `deploy.py:16` defines its own separate `cleanup(build)`, invoked only from `deploy()` at `deploy.py:5`, never from `promote`. The modules contain **zero import statements** (grep for `import|from ` → no matches), so nothing can reach into `promote.py` to add behavior.
+
+5. **Code-graph corroboration** — `python -m provenlattice explain-symbol pipeline.promote.promote --json` yields:
+   - `E-CALL-e10dc11ffc5fddc998fa9251`: `"pipeline.promote.promote CALLS pipeline.promote.cleanup"` (confidence 0.98)
+   - `E-CALL-e4237d4a479ed5c93ee6262b`: `"pipeline.promote.promote CALLS pipeline.promote.rollback"` (confidence 0.98)
+
+   i.e., the graph records two independent CALLS edges but carries no branch-exclusivity fact — which the fixture's own `README.md:9` flags as the intended "hidden fact": *"rollback / cleanup sit in mutually exclusive if/else branches"*.
+
+The only way both could fire in one invocation would be if `promote` were restructured (e.g., sequential `if`/`if` instead of `if`/`else`), which the source shows it is not.
+
+ANSWER: 不可能 — 在 `promote()`（pipeline/promote.py:1-5）中，`rollback(req)` 位于 `if req.failed:` 分支（第3行），`cleanup(req)` 位于 `else` 分支（第5行），二者互斥，任一次调用最多且恰好执行其中一个；无 try/finally、无循环、无重入（两个被调函数仅 `return req`），全仓库无 import 及其他调用点，代码图（explain-symbol）也仅给出两条独立 CALLS 边而不含分支互斥信息。

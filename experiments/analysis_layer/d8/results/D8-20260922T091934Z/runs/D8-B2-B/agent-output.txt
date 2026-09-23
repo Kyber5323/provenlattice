@@ -1,0 +1,48 @@
+我已读取全部源码并确认仓库内没有其他调用点（grep `scan|commit` 只命中 `pipeline/scan.py` 与 README）。以下是结论与证据。
+
+## 代码证据
+
+`pipeline/scan.py` 全文（22 行）：
+
+```python
+1  def scan(rows):
+2      for row in rows:
+3          if corrupt(row):
+4              break
+5          check(row)
+6      commit()
+...
+9  def corrupt(row):
+10     return row is None
+```
+
+关键点：第 4 行是 `break`（不是 `return`），因此它只退出 `for` 循环；第 6 行的 `commit()` 缩进在函数体层级（与 `for` 同级，而非循环体内），位于循环之后、且在任何条件/`return` 之外。
+
+## 1. commit() 是否总会被执行？
+
+对于**正常返回**的调用路径：是。`scan()` 没有提前 `return`，`commit()` 位于唯一的语句序列末尾，因此无论循环是正常结束还是被 `break` 中断，都会执行到第 6 行。
+
+唯一的例外是**异常传播**出函数时（`commit()` 不会执行）：
+- `rows` 不可迭代 → 第 2 行 `TypeError`；
+- `corrupt(row)` / `check(row)` 抛出异常。
+在本 fixture 中这不会发生：`corrupt` 是 `row is None`（纯比较），`check` 是恒等返回（第 13–14 行）；仓库内也没有其它覆盖定义或调用方，因此实际所有调用路径都会执行 `commit()`。
+
+## 2. rows 中存在 corrupt 行时会发生什么
+
+以 `scan([r1, None, r2])` 为例：
+
+1. `r1` → `corrupt` 为假 → 执行 `check(r1)`；
+2. `None` → `corrupt(row)` 为真（`row is None`）→ 第 4 行 `break`，**该 corrupt 行本身不会传给 `check`**；
+3. `r2` **也不会被检查/处理**——`break` 直接结束整个循环，其后的所有行都被跳过；
+4. 控制流落到第 6 行，**`commit()` 仍然执行**，即基于「处理到第一个 corrupt 行之前的**部分**结果」提交；
+5. `scan()` 隐式返回 `None`，**不向调用方发出任何 corrupt 已发生的信号**（对比 `pipeline/process.py:4` 的 `return False`，那里的 `return` 会跳过 `finalize()`，这正是本 fixture 要区分的对照）。
+
+仓库 README 明确把该行为记为本模块要考察的隐藏事实：
+
+```
+README.md:12: | scan.py | scan | commit runs even when a row triggers `break` (break exits the loop, not the function) |
+```
+
+索引侧证据与此一致：`python -m provenlattice explain-symbol pipeline.scan.scan --json` 返回 `source_path: pipeline/scan.py`、`source_range: start_line 1, end_line 6`（第 6 行即含 `commit()` 的整函数范围），符号级事实本身不含控制流信息，故本问题必须靠读第 4/6 行的 `break` 与缩进层级判定。
+
+ANSWER: 在 pipeline/scan.py 的所有正常返回路径下 commit() 都会执行——包括 rows 中出现 corrupt 行的情况，因为第 4 行是 `break`（只跳出 for 循环）而非 `return`，第 6 行 `commit()` 与 for 同级且在循环之外；corrupt 行的后果是该行不进入 check()、其后所有行也全部被跳过，然后 commit() 基于不完整结果照常提交，且 scan() 返回 None、不报告任何错误（仅当 rows 不可迭代或 corrupt/check 抛异常时 commit() 才不执行）。

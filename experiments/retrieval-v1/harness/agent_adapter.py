@@ -134,6 +134,9 @@ class CommandAgentAdapter:
                         event.bundle_size = structured.get("bundle_size")
                         event.query_latency = structured.get("query_time_ms")
                         event.raw["bundle"] = structured.get("bundle")
+                        # additive (D8): keep the full tool envelope so optional
+                        # analysis sections survive audit without re-parsing.
+                        event.raw["envelope"] = structured
                     if event.operation == "read" and isinstance(event.target, str):
                         event.files = [event.target]
             elif value.get("type") == "result":

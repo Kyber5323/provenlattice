@@ -1,0 +1,54 @@
+我已完成调查。以下是基于代码与 CFG 分析证据的结论。
+
+## 代码本体
+
+`pipeline/process.py:1-19`（整个文件只有 19 行，无 import，`finalize` 仅在 `process` 内被调用一次）：
+
+```python
+def process(items):
+    for item in items:
+        if invalid(item):
+            return False          # line 4 —— 唯一的提前退出
+        save(item)
+    finalize()                     # line 6 —— 唯一的 finalize 调用点
+    return True
+
+def invalid(item):
+    return item is None
+```
+
+仓库内 grep 全量确认：`finalize` 全仓只出现在 `pipeline/process.py:6`（调用）与 `:18`（定义），`process(` 无任何其他调用方（本仓库无 import pipeline 的代码）。函数内无 `break`/`continue`/`try`/`finally`（对 process.py 的针对性 grep 无命中）。
+
+## 一定会执行的情况
+
+**仅有一种**：循环因迭代穷尽而正常退出（即所有 item 均通过 `invalid` 检查，且迭代过程与 `save` 均未抛异常）。空 `items` 也算——循环体不执行，直接落到 line 6。
+
+分析层 CFG 给出了机器可验证的同一结论（`python -m provenlattice explain-symbol pipeline.process.process --json --analysis cfg`）：
+
+- finalize 调用点节点 `cnode:92ef377e…`，`structural_path = module/function_definition[0]/block[2]/expression_statement[1]/call[0]`（字节 117–127）。
+- 它**唯一的入边**是 `kind: "next"`，来自 `cnode:2a879482…`，后者 `structural_role: "loop_exit"`、路径 `…/for_statement[0]`。即到达 finalize 的唯一前驱是"循环出口归并节点"。
+
+## 不会执行的情况
+
+1. **任一 item 为 `None`**：line 3–4 的 `if invalid(item): return False` 从循环体内部直接返回，跳过 line 6。这是 README（`README.md:11`）标注的该 fixture 的"hidden fact"。CFG 佐证：`return False` 节点 `cnode:d8405223…`（路径 `…/for_statement[0]/block[2]/if_statement[0]/block[1]/return_statement[0]`）有一条 `kind: "return"` 边直达函数 exit 节点 `cnode:4ba10bdf…`，绕过 finalize 调用点。
+
+2. **line 6 之前任何异常向外传播**：函数没有 `try/finally`，finalize 不是保底调用，所以以下都会跳过 finalize：
+   - `save(item)` 抛异常（line 5）；
+   - `invalid(item)` 抛异常（line 3）；
+   - `items` 不可迭代（如 `process(None)` 在 line 2 的 `for` 处抛 `TypeError`），或迭代器中途抛异常（生成器）；
+   - `KeyboardInterrupt` / `SystemExit` 等。
+   
+   注意：这一条**不在**分析层 CFG 的建模范围内——`src/provenlattice/analysis_cfg.py:36-39` 把 `try_statement`、`raise_statement` 等列为 `FORBIDDEN_CONSTRUCTS`，CFG 只建模结构化控制流（if/for/break/continue/return），不含异常边。所以 CFG 的"唯一跳过路径是 return False"是对**结构化控制流**的断言，异常路径是它不表达的另一类真实跳过途径。
+
+3. **平凡情况**：`process` 从未被调用（本仓库内确实无调用方，它是对外入口）；或 `items` 是永不终止的迭代器——循环不退出，finalize 永不执行。
+
+## 小结（按发生条件）
+
+| 情况 | finalize 是否执行 |
+| --- | --- |
+| 循环正常穷尽（含空 `items`） | 是（必然） |
+| 任一 item 为 `None` → `return False` | 否 |
+| line 6 前任何异常（save/invalid/迭代/`items` 不可迭代） | 否（无 `try/finally` 兜底） |
+| `process` 未被调用 / 循环永不终止 | 否 |
+
+ANSWER: `finalize()` 全仓仅在 `pipeline/process.py:6` 被调用一次，且不在 `try/finally` 中。**一定执行**：仅当 `process(items)` 被调用且 for 循环正常穷尽（所有 item 非 None、迭代与 `save`/`invalid` 均不抛异常；空 items 也走此路径）——CFG 中 finalize 调用节点（`expression_statement[1]/call[0]`）唯一前驱是 `loop_exit` 归并节点。**不执行**：(1) 任一 item 为 `None` 时 line 4 的 `return False`（CFG 中该 return 节点有直达 exit 的 return 边，绕过 finalize）；(2) line 6 前任何异常向外传播（`save`/`invalid` 抛错、`items` 不可迭代或迭代器中途抛错、KeyboardInterrupt），因函数无 `try/finally`——分析层 CFG 不建模异常路径（`analysis_cfg.py:36-39` 将 try/raise 列为禁止构造），故 README 所载"仅被 `return False` 跳过"是就结构化控制流而言的结论；(3) `process` 从未被调用（仓库内无调用方）或循环永不终止。

@@ -1,0 +1,108 @@
+{
+  "experiment": "D9-C1 Frozen Agent Adoption Re-observation",
+  "batch_dir": "experiments\\analysis_layer\\d8\\results\\D8-20260923T061603Z",
+  "rows": [
+    {
+      "case": "D8-A1",
+      "run_id": "D8-D8-A1-D-d30db0",
+      "task_success": false,
+      "analysis_discovered": "no",
+      "analysis_requested": false,
+      "features": [],
+      "selected_surface": null,
+      "selected_symbol": [],
+      "analysis_used_in_answer": false,
+      "incremental_fact_used": false,
+      "verdict": "INFRA_EXCLUDED",
+      "backend_model": "<synthetic>",
+      "actual_model": "deepseek-v4-flash"
+    },
+    {
+      "case": "D8-A2",
+      "run_id": "D8-D8-A2-D-8a3ee8",
+      "task_success": false,
+      "analysis_discovered": "no",
+      "analysis_requested": false,
+      "features": [],
+      "selected_surface": null,
+      "selected_symbol": [],
+      "analysis_used_in_answer": false,
+      "incremental_fact_used": false,
+      "verdict": "INFRA_EXCLUDED",
+      "backend_model": "<synthetic>",
+      "actual_model": "deepseek-v4-flash"
+    },
+    {
+      "case": "D8-B1",
+      "run_id": "D8-D8-B1-D-a1d298",
+      "task_success": false,
+      "analysis_discovered": "no",
+      "analysis_requested": false,
+      "features": [],
+      "selected_surface": null,
+      "selected_symbol": [],
+      "analysis_used_in_answer": false,
+      "incremental_fact_used": false,
+      "verdict": "INFRA_EXCLUDED",
+      "backend_model": "<synthetic>",
+      "actual_model": "deepseek-v4-flash"
+    },
+    {
+      "case": "D8-B2",
+      "run_id": "D8-D8-B2-D-404c5c",
+      "task_success": false,
+      "analysis_discovered": "no",
+      "analysis_requested": false,
+      "features": [],
+      "selected_surface": null,
+      "selected_symbol": [],
+      "analysis_used_in_answer": false,
+      "incremental_fact_used": false,
+      "verdict": "INFRA_EXCLUDED",
+      "backend_model": "<synthetic>",
+      "actual_model": "deepseek-v4-flash"
+    },
+    {
+      "case": "D8-C1",
+      "run_id": "D8-D8-C1-D-1b6894",
+      "task_success": false,
+      "analysis_discovered": "no",
+      "analysis_requested": false,
+      "features": [],
+      "selected_surface": null,
+      "selected_symbol": [],
+      "analysis_used_in_answer": false,
+      "incremental_fact_used": false,
+      "verdict": "INFRA_EXCLUDED",
+      "backend_model": "<synthetic>",
+      "actual_model": "deepseek-v4-flash"
+    },
+    {
+      "case": "D8-C2",
+      "run_id": "D8-D8-C2-D-aea813",
+      "task_success": false,
+      "analysis_discovered": "no",
+      "analysis_requested": false,
+      "features": [],
+      "selected_surface": null,
+      "selected_symbol": [],
+      "analysis_used_in_answer": false,
+      "incremental_fact_used": false,
+      "verdict": "INFRA_EXCLUDED",
+      "backend_model": "<synthetic>",
+      "actual_model": "deepseek-v4-flash"
+    }
+  ],
+  "counts": {
+    "UTILITY_OBSERVED": 0,
+    "ADOPTION_GAP": 0,
+    "NO_INCREMENTAL_VALUE": 0,
+    "CAPABILITY_GAP": 0,
+    "DISCOVERY_OBSERVED": 0
+  },
+  "method": {
+    "discovery": "--help invocation, or an analysis request without recorded help",
+    "requested": "recorded explain-symbol --analysis call",
+    "used_in_answer": "available replayed analysis plus D8 incremental fact marker"
+  }
+}

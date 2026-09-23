@@ -1,0 +1,29 @@
+CLI access was denied, but the file is 18 lines and fully read, so the code evidence is complete. No other call sites exist (`grep` over repo D shows `register`/`announce`/`cleanup` only in `pipeline/deploy.py`, plus an unrelated `cleanup()` in `pipeline/promote.py`).
+
+## Investigation
+
+`pipeline/deploy.py` (complete file):
+
+```python
+1  def deploy(build):
+2      if build.ok:
+3          register(build)
+4      announce(build)
+5      cleanup(build)
+```
+
+**1. Per-call execution**
+
+- `register(build)` — line 3, nested inside `if build.ok:` (lines 2–3). It is guarded by a branch, so it runs **only when `build.ok` is truthy** — not on every call.
+- `announce(build)` — line 4, at function-body level, no enclosing branch → runs on **every call**.
+- `cleanup(build)` — line 5, at function-body level → runs on **every call** that reaches line 5.
+
+One caveat: there is no `try/finally` and no exception handling. Straight-line control flow guarantees `announce` → `cleanup` on every normal invocation, but if `announce(build)` raises, `cleanup(build)` never executes. The code itself contains no such guard; that is a property of straight-line sequencing, not of any error handling in this file.
+
+**2. Ordering of `announce()` vs `cleanup()`**
+
+Lines 4 and 5 are consecutive, unconditional statements in the same block; nothing branches or returns between them. So `announce()` always executes **before** `cleanup()`, on every call. This matches the fixture README (`README.md:14`): "register is conditional; announce precedes cleanup unconditionally".
+
+The bodies of all three helpers (`return build`, lines 8–17) are pure pass-throughs, so there are no side effects inside them that would alter the ordering.
+
+ANSWER: In `pipeline/deploy.py`, `deploy()` (lines 1–5) calls `register(build)` only conditionally — guarded by `if build.ok:` (line 2–3), so it is **not** executed on every call; `announce(build)` (line 4) and `cleanup(build)` (line 5) are unconditional statements at function-body level, so both execute on every call (assuming no exception in between, as there is no try/finally). `announce()` always runs **before** `cleanup()` in the same unconditional sequence (line 4 precedes line 5, with no branch or return between them).

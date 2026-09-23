@@ -1,0 +1,4 @@
+Symbol: `pipeline.promote.promote`
+File path: `pipeline/promote.py`
+
+Fact: The symbol is a public, non-async Function with signature `(req)` spanning lines 1–5, and it CALLS both `pipeline.promote.rollback` (line 8) and `pipeline.promote.cleanup` (line 12) within the same file.

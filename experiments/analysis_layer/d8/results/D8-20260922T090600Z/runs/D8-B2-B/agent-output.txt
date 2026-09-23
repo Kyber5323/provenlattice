@@ -1,0 +1,32 @@
+Investigation complete. The full file is only 19 lines and definitive; the CLI bundle confirms the call edges but (as the README notes) cannot express the control-structure fact itself.
+
+## Code evidence
+
+`pipeline/scan.py` (entire function, lines 1–6):
+
+```python
+def scan(rows):
+    for row in rows:
+        if corrupt(row):
+            break          # line 4 — exits only the loop
+        check(row)
+    commit()               # line 6 — outside the loop, function-body level
+```
+
+`corrupt` is `return row is None` (line 9–10), `check` is `return row` (line 13–14), `commit` is `return True` (line 17–18).
+
+## Analysis
+
+**1. Is `commit()` on every path?** Yes, for every execution that completes the `for` statement normally. `commit()` sits at the function body level, outside the loop, with no `return`/`raise` before it and no conditional guarding it. The only loop-exit construct present is `break`, which transfers control past the loop **to the statement after it** — i.e. directly to `commit()`. The function then returns `commit()`'s result (`True`).
+
+The paths where `commit()` would *not* run are only abnormal ones: `rows` being non-iterable (the `for` itself raises `TypeError`), or `corrupt`/`check` raising an exception that propagates out. Neither helper can raise here (both are pure comparisons/returns), so within this codebase no reachable call path skips `commit()`.
+
+**2. What happens with a corrupt row?** When `corrupt(row)` is true (`row is None`):
+- The loop terminates via `break` (line 4) — remaining rows are **not** examined, and `check(row)` is not called on the corrupt row or on any row after it, so the scan ends early and silently.
+- Execution falls through to line 6, so `commit()` **still runs** and the function returns `True`. The net observable behavior: a partial scan gets committed as if successful.
+
+This is deliberately contrasted with the sibling module `pipeline/process.py`, where the corrupt-element branch uses `return False` (line 4) *inside* the loop, which **does** skip `finalize()` (line 6) — a return exits the function, whereas `break` does not.
+
+The fixture README states the intent explicitly (`README.md` line 12): "commit runs even when a row triggers `break` (break exits the loop, not the function)". The `provenlattice explain-symbol pipeline.scan.scan` bundle confirms the CALLS edges (`scan → corrupt`, `scan → commit`, `scan → check`, e.g. evidence `E-CALL-897739be658c1995ab0c4f7b` "pipeline.scan.scan CALLS pipeline.scan.commit") but, as README line 5 notes, the base call graph alone cannot express that `commit` is on the always-taken path.
+
+ANSWER: Yes — `commit()` (line 6) executes on every normal call path of `scan()`: `break` at line 4 exits only the `for` loop, not the function, so a corrupt row (row is None) stops iteration early and silently skips `check()` for that and all remaining rows, yet control falls through to `commit()`, which runs and makes the function return `True`; `commit()` is skipped only on abnormal paths (non-iterable `rows`, or an exception from `corrupt`/`check`), none reachable in this code since both helpers are pure.

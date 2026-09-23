@@ -1,0 +1,100 @@
+{
+  "experiment": "PL-DA-D8 Real Agent Deep-Analysis Utility Observation",
+  "arms": {
+    "B": "base graph only (index, no analyze)",
+    "D": "base graph + analyze --scope pipeline --features ast,cfg"
+  },
+  "neutrality_rules": [
+    "identical prompt, system prompt, allowed tools and model across arms",
+    "no mention of AST/CFG/analysis in any prompt",
+    "analysis capability discoverable only via the tool's own --help"
+  ],
+  "tasks": [
+    {
+      "task_id": "D8-A1",
+      "category": "A_branch_exclusivity",
+      "target": "pipeline/promote.py::promote",
+      "prompt": "在 pipeline/promote.py 中：在 promote() 的一次调用里，rollback() 和 cleanup() 是否可能都被执行？请调查代码并给出明确结论和代码证据（文件、函数、代码片段）。",
+      "oracle": {
+        "facts": [
+          {"id": "mutual_exclusion", "any_of": ["互斥", "不会同时", "不可能同时", "不能同时", "不会都", "不可能都", "只有一个", "只有其中", "not both", "only one", "mutually exclusive"]},
+          {"id": "condition", "any_of": ["req.failed", "failed", "失败"]},
+          {"id": "branch_structure", "any_of": ["else", "分支", "branch", "if"]}
+        ]
+      },
+      "incremental_markers": ["互斥", "不会同时", "不可能同时", "不能同时", "else", "分支", "branch", "exclusive"]
+    },
+    {
+      "task_id": "D8-A2",
+      "category": "A_merge_fallthrough",
+      "target": "pipeline/gate.py::gate",
+      "prompt": "在 pipeline/gate.py 中：在 gate() 的一次调用里，skip_tests() 和 publish() 是否可能都被执行？run_tests() 和 publish() 呢？请调查代码并给出明确结论和代码证据（文件、函数、代码片段）。",
+      "oracle": {
+        "facts": [
+          {"id": "mentions_skip_and_publish", "any_of": ["skip_tests", "skip"]},
+          {"id": "mentions_publish", "any_of": ["publish"]},
+          {"id": "co_execution_affirmed", "any_of": ["可以", "能", "会执行", "都执行", "可能", "yes", "can", "会"]},
+          {"id": "merge_or_sequence", "any_of": ["汇合", "之后", "无论", "顺序", "接着", "然后", "fall", "after", "都执行", "都会"]}
+        ]
+      },
+      "incremental_markers": ["汇合", "之后", "无论", "顺序", "fall", "merge", "after", "任一分支", "两条路径", "都执行"]
+    },
+    {
+      "task_id": "D8-B1",
+      "category": "B_early_return",
+      "target": "pipeline/process.py::process",
+      "prompt": "在 pipeline/process.py 中：finalize() 在哪些情况下不会执行？在哪些情况下一定会执行？请调查代码并给出明确结论和代码证据（文件、函数、代码片段）。",
+      "oracle": {
+        "facts": [
+          {"id": "invalid_trigger", "any_of": ["invalid", "无效"]},
+          {"id": "early_return_skips_finalize", "any_of": ["return false", "提前", "早退", "early", "不会执行", "跳过", "skip", "不会运行"]},
+          {"id": "normal_path_executes", "any_of": ["循环", "全部", "正常", "完成", "结束", "loop", "all items", "after the loop", "之后"]}
+        ]
+      },
+      "incremental_markers": ["return", "提前", "早退", "early", "终止", "跳过", "不会执行", "early return"]
+    },
+    {
+      "task_id": "D8-B2",
+      "category": "B_break_vs_return",
+      "target": "pipeline/scan.py::scan",
+      "prompt": "在 pipeline/scan.py 中：commit() 是否在 scan() 的任何调用路径下都会执行？如果 rows 中存在 corrupt 的行（corrupt(row) 为真），会发生什么？请调查代码并给出明确结论和代码证据（文件、函数、代码片段）。",
+      "oracle": {
+        "facts": [
+          {"id": "commit_always", "any_of": ["总会", "都会", "总是", "一定", "任何情况", "仍会", "依然", "仍然", "always", "still", "保证"]},
+          {"id": "break_behavior", "any_of": ["break", "跳出", "中断"]},
+          {"id": "corrupt_mentioned", "any_of": ["corrupt"]}
+        ]
+      },
+      "incremental_markers": ["break", "跳出循环", "跳出", "中断", "仍会", "依然", "仍然", "退出循环"]
+    },
+    {
+      "task_id": "D8-C1",
+      "category": "C_call_plus_condition",
+      "target": "pipeline/handle.py::handle",
+      "prompt": "在 pipeline/handle.py 中：notify() 的执行是否依赖 validate() 的返回结果？persist() 的执行是否依赖 validate() 的返回结果？请调查代码并给出明确结论和代码证据（文件、函数、代码片段）。",
+      "oracle": {
+        "facts": [
+          {"id": "notify_unconditional", "any_of": ["无条件", "总是", "都会", "一定", "无论", "不依赖", "无关", "独立", "always", "unconditional", "regardless", "independent"]},
+          {"id": "persist_conditional", "any_of": ["仅当", "只有", "依赖", "条件", "为真", "true", "only if", "depends", "才会"]},
+          {"id": "mentions_both_calls", "any_of": ["notify", "persist"]}
+        ]
+      },
+      "incremental_markers": ["汇合", "无条件", "无论", "总是", "都会", "之后", "unconditional", "always", "merge", "regardless"]
+    },
+    {
+      "task_id": "D8-C2",
+      "category": "C_call_plus_condition",
+      "target": "pipeline/deploy.py::deploy",
+      "prompt": "在 pipeline/deploy.py 中：register()、announce()、cleanup() 各自是否在 deploy() 的每次调用中都会执行？announce() 和 cleanup() 的执行先后关系是什么？请调查代码并给出明确结论和代码证据（文件、函数、代码片段）。",
+      "oracle": {
+        "facts": [
+          {"id": "register_conditional", "any_of": ["build.ok", "条件", "不一定", "仅当", "只有", "conditional", "not always", "only if", "才会", "取决于"]},
+          {"id": "announce_cleanup_always", "any_of": ["announce"]},
+          {"id": "cleanup_mentioned", "any_of": ["cleanup"]},
+          {"id": "order", "any_of": ["先", "之后", "顺序", "然后", "再", "before", "after", "then"]}
+        ]
+      },
+      "incremental_markers": ["条件", "不一定", "仅当", "只有", "build.ok", "conditional", "顺序", "先", "之后", "再", "无条件"]
+    }
+  ]
+}

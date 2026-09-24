@@ -83,6 +83,7 @@ class FormalHarnessTests(unittest.TestCase):
         bad=records[:-1]; self.assertEqual("FORMAL_DATA_INCOMPLETE", h.completeness_gate(self.matrix,bad)["state"])
         with self.assertRaises(h.FormalDataError): h.aggregate(self.matrix,bad)
         pilot=deepcopy(records); pilot[0]["marking"]="PILOT_ONLY"; self.assertEqual("FORMAL_DATA_INCOMPLETE", h.completeness_gate(self.matrix,pilot)["state"])
+        bypass=deepcopy(records); bypass[0].pop("dispatcher_version"); self.assertEqual("FORMAL_DATA_INCOMPLETE", h.completeness_gate(self.matrix,bypass)["state"])
         uncovered=deepcopy(records); next(r for r in uncovered if "::B::" in r["cell_id"])["returned_fact_ids"]=["symbol:x"]; self.assertEqual("FORMAL_DATA_INCOMPLETE", h.completeness_gate(self.matrix,uncovered)["state"])
     def test_execution_preflight_rejects_conflict_and_schema_drift(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -11,4 +11,6 @@ root `formal-manifest.json` contains the 36 planned provenance records.
 open, checkout, or execute a frozen ContextBench case.
 
 `formal_runner.py --config synthetic.json --output scratch/` is a dry-run
-planner. `--execute` fails closed during D9-C5-C.
+planner. `--execute` runs the same manifest preflight and emits
+`EXECUTION_READY` with `agent_invocation_count: 0`; it never dispatches an
+Agent in this readiness gate.

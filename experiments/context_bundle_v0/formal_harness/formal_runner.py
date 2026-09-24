@@ -10,21 +10,21 @@ import argparse
 import json
 from pathlib import Path
 
-from formal_harness import generate_matrix, write_manifest
+from formal_harness import generate_matrix, preflight_execution, write_manifest
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="D9-C5 formal manifest dry-run")
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--execute", action="store_true", help="reserved; forbidden during qualification")
+    parser.add_argument("--execute", action="store_true", help="enter execution-ready state after preflight; never dispatches an Agent")
     args = parser.parse_args()
-    if args.execute:
-        parser.error("formal execution is not enabled by D9-C5-C qualification")
     config = json.loads(args.config.read_text(encoding="utf-8"))
     matrix = generate_matrix(config)
     path = write_manifest(args.output, matrix, config)
-    print(json.dumps({"mode": "DRY_RUN", "planned_cells": len(matrix), "manifest": str(path)}))
+    gate = preflight_execution(matrix, args.output)
+    mode = "EXECUTION_READY" if args.execute else "DRY_RUN"
+    print(json.dumps({"mode": mode, "planned_cells": len(matrix), "manifest": str(path), "preflight": gate}))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,8 @@ ARM_SHA = {
     "B": "e385681146f9d70b08466093060b8cc8204c65a8",
 }
 PROTOCOL_VERSION = "d9-c5-review-v1"
+FROZEN_INVENTORY_A = frozenset({"analysis", "analyze", "callees", "callers", "definition", "dependencies", "dependents", "document", "evidence", "explain-module", "explain-symbol", "explain_module", "explain_symbol", "find-related-code", "find-related-documents", "find_related_code", "find_related_documents", "implemented", "index", "knowledge", "references", "requirements", "shard", "status", "subgraph", "symbol", "trace-evidence", "trace_evidence", "update"})
+FROZEN_INVENTORY_B = FROZEN_INVENTORY_A | {"task-context"}
 YES_REASONS = {"EXPLICIT_REASONING_USE", "TOOL_SELECTION_USE", "CODE_NAVIGATION_USE", "PATCH_ACTION_USE"}
 NO_REASONS = {"NO_OBSERVABLE_USE", "FACT_DUPLICATED_BY_INDEPENDENT_RETRIEVAL", "FACT_NOT_ACTIONABLE_IN_TRACE"}
 R3_REASON = "EVIDENCE_INTERPRETATION_DISAGREEMENT"
@@ -86,12 +88,18 @@ def validate_matrix(matrix: list[dict[str, Any]]) -> None:
     for cell in matrix:
         if cell["runtime_sha"] != ARM_SHA[cell["arm"]]:
             raise FormalDataError("wrong runtime")
-        if cell["case_id"] not in FROZEN_CASES or cell["repeat"] not in (1, 2, 3):
+        expected_instance, expected_commit = FROZEN_CASES.get(cell["case_id"], (None, None))
+        if cell["case_id"] not in FROZEN_CASES or cell["repeat"] not in (1, 2, 3) or \
+           cell.get("original_instance_id") != expected_instance or cell.get("base_commit") != expected_commit:
             raise FormalDataError("invalid formal cell")
+        if cell.get("review_protocol_version") != PROTOCOL_VERSION:
+            raise FormalDataError("review protocol schema drift")
         inventories[cell["arm"]] = set(cell["command_inventory"])
     if inventories.get("B", set()) - inventories.get("A", set()) != {"task-context"} or \
        inventories.get("A", set()) - inventories.get("B", set()):
         raise FormalDataError("command inventory delta is not task-context only")
+    if inventories["A"] != FROZEN_INVENTORY_A or inventories["B"] != FROZEN_INVENTORY_B:
+        raise FormalDataError("command inventory differs from frozen runtime baseline")
 
 
 def write_manifest(root: Path, matrix: list[dict[str, Any]], run_config: dict[str, Any]) -> Path:
@@ -103,6 +111,29 @@ def write_manifest(root: Path, matrix: list[dict[str, Any]], run_config: dict[st
     path = root / "formal-manifest.json"
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return path
+
+
+def preflight_execution(matrix: list[dict[str, Any]], artifact_root: Path) -> dict[str, Any]:
+    """Validate a frozen manifest before dispatch; never starts an Agent."""
+    validate_matrix(matrix)
+    if artifact_root.exists():
+        completed = list(artifact_root.glob("cells/*/cell-record.json"))
+        if completed:
+            raise FormalDataError("completed cell output conflicts with execution plan")
+        manifest = artifact_root / "formal-manifest.json"
+        if manifest.exists():
+            saved = json.loads(manifest.read_text(encoding="utf-8"))
+            if saved.get("namespace") != "D9-C5-FORMAL" or saved.get("matrix") != matrix:
+                raise FormalDataError("existing manifest drift")
+    arm_counts = Counter(c["arm"] for c in matrix)
+    case_counts = Counter(c["case_id"] for c in matrix)
+    return {"state": "EXECUTION_READY", "agent_invocation_count": 0,
+            "planned_cells": len(matrix), "arm_counts": dict(arm_counts),
+            "case_counts": dict(case_counts), "runtime_sha": ARM_SHA,
+            "artifact_schema": {"manifest": "d9-c5-formal-manifest-v1",
+                                "trace": "d9-c5-normalized-trace-v1",
+                                "packet": "d9-c5-blinded-packet-v1",
+                                "review": PROTOCOL_VERSION}}
 
 
 def normalize_trace(cell: dict[str, Any], raw_trace_pointer: str, events: list[dict[str, Any]],

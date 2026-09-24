@@ -14,7 +14,7 @@ import formal_harness as h
 def config():
     return {"case_prompts": {c: "synthetic prompt " + c for c in h.FROZEN_CASES},
             "model": "synthetic-model", "agent_runtime": "synthetic-agent", "timeout_s": 3600,
-            "inventories": {"A": ["index", "explain-symbol"], "B": ["index", "explain-symbol", "task-context"]},
+            "inventories": {"A": sorted(h.FROZEN_INVENTORY_A), "B": sorted(h.FROZEN_INVENTORY_B)},
             "environment_fingerprint": "synthetic-env", "evaluator_sha256": "evaluator", "metric_pipeline_sha256": "metrics", "review_protocol_sha256": "protocol"}
 
 
@@ -33,10 +33,12 @@ class FormalHarnessTests(unittest.TestCase):
             with self.assertRaises(h.FormalDataError): h.validate_matrix(bad)
         bad = [dict(c) for c in self.matrix]; bad[0]["runtime_sha"] = "wrong"
         with self.assertRaises(h.FormalDataError): h.validate_matrix(bad)
+        bad = [dict(c) for c in self.matrix]; bad[0]["base_commit"] = "wrong"
+        with self.assertRaises(h.FormalDataError): h.validate_matrix(bad)
     def test_reject_non_frozen_and_inventory_drift(self):
         bad = config(); bad["case_prompts"] = dict(bad["case_prompts"], other="x")
         with self.assertRaises(h.FormalDataError): h.generate_matrix(bad)
-        bad = config(); bad["inventories"]["B"].append("other")
+        bad = config(); bad["inventories"]["B"].remove("status")
         with self.assertRaises(h.FormalDataError): h.generate_matrix(bad)
     def test_manifest_and_normalized_trace_preserve_raw_pointer(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -45,14 +47,14 @@ class FormalHarnessTests(unittest.TestCase):
         trace = h.normalize_trace(cell, "raw/trace.jsonl", [{"kind":"tool_use","tool":"Grep","detail":{}}, {"kind":"tool_result","tool":"Bash","detail":{"result":{"version":"task-context-v0","facts":[{"fact_id":"symbol:x"}]}}}], "patch", "answer")
         self.assertEqual("raw/trace.jsonl", trace["raw_trace_pointer"]); self.assertEqual("symbol:x", trace["returned_facts"][0]["fact_id"])
         with self.assertRaises(h.FormalDataError): h.normalize_trace(cell, "PILOT_ONLY/x", [], "", "")
-    def test_runner_dry_run_only(self):
+    def test_runner_execution_readiness_has_zero_agent_invocations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); cfg=root/"config.json"; cfg.write_text(json.dumps(config()), encoding="utf-8")
             runner=Path(__file__).parent/"formal_runner.py"
             result=subprocess.run([sys.executable, str(runner), "--config", str(cfg), "--output", str(root/"out")], capture_output=True, text=True)
             self.assertEqual(0, result.returncode); self.assertIn('"planned_cells": 36', result.stdout)
-            blocked=subprocess.run([sys.executable, str(runner), "--config", str(cfg), "--output", str(root/"blocked"), "--execute"], capture_output=True, text=True)
-            self.assertNotEqual(0, blocked.returncode)
+            execute=subprocess.run([sys.executable, str(runner), "--config", str(cfg), "--output", str(root/"ready"), "--execute"], capture_output=True, text=True)
+            self.assertEqual(0, execute.returncode); self.assertIn('"mode": "EXECUTION_READY"', execute.stdout); self.assertIn('"agent_invocation_count": 0', execute.stdout)
     def test_packet_is_blind(self):
         cell = next(c for c in self.matrix if c["arm"] == "B")
         trace = h.normalize_trace(cell, "raw/x", [], "patch", "answer")
@@ -83,5 +85,15 @@ class FormalHarnessTests(unittest.TestCase):
         with self.assertRaises(h.FormalDataError): h.aggregate(self.matrix,bad)
         pilot=deepcopy(records); pilot[0]["marking"]="PILOT_ONLY"; self.assertEqual("FORMAL_DATA_INCOMPLETE", h.completeness_gate(self.matrix,pilot)["state"])
         uncovered=deepcopy(records); next(r for r in uncovered if "::B::" in r["cell_id"])["returned_fact_ids"]=["symbol:x"]; self.assertEqual("FORMAL_DATA_INCOMPLETE", h.completeness_gate(self.matrix,uncovered)["state"])
+    def test_execution_preflight_rejects_conflict_and_schema_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/"formal"; h.write_manifest(root, self.matrix, config())
+            self.assertEqual(0, h.preflight_execution(self.matrix, root)["agent_invocation_count"])
+            changed=config(); changed["case_prompts"][next(iter(h.FROZEN_CASES))]="different"
+            with self.assertRaises(h.FormalDataError): h.preflight_execution(h.generate_matrix(changed), root)
+            (root/"cells"/"x").mkdir(parents=True); (root/"cells"/"x"/"cell-record.json").write_text("{}")
+            with self.assertRaises(h.FormalDataError): h.preflight_execution(self.matrix, root)
+        bad=[dict(c) for c in self.matrix]; bad[0]["review_protocol_version"]="drift"
+        with self.assertRaises(h.FormalDataError): h.preflight_execution(bad, Path("does-not-exist"))
 
 if __name__ == "__main__": unittest.main()

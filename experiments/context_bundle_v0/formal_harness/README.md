@@ -15,3 +15,8 @@ the immutable plan. Its `--execute --cell-id <id>` path loads that plan, calls
 the single `dispatch_cell` lifecycle, and accepts no caller overrides of cell
 identity or runtime. Qualification uses a fake executor; the production adapter
 must be explicitly installed before a formal run can start.
+
+Each dispatch materializes `worktrees/<stable-cell-hash>/` as a detached, clean
+checkout at the manifest base commit. Existing workspaces and either completed
+or incomplete artifacts for the selected cell fail closed; completed artifacts
+for other cells do not block a later cell.

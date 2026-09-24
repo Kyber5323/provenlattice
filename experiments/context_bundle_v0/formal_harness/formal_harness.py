@@ -158,6 +158,37 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def _revision(repo: Path, ref: str = "HEAD") -> str:
+    result = _git(["-C", str(repo), "rev-parse", ref])
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def materialize_workspace(artifact_root: Path, invocation: dict[str, Any]) -> Path:
+    """Create one clean detached workspace, permanently bound to one cell."""
+    cell = invocation["cell"]
+    source = Path(invocation["target_repository"])
+    workspace = artifact_root / "worktrees" / artifact_key(cell["cell_id"])
+    if workspace.exists():
+        raise FormalDataError("workspace already exists; cell cannot be reused")
+    if _git(["-C", str(source), "status", "--porcelain"]).stdout.strip():
+        raise FormalDataError("source repository is dirty")
+    if not _revision(source, cell["base_commit"]):
+        raise FormalDataError("frozen base commit is unavailable")
+    added = _git(["-C", str(source), "worktree", "add", "--detach", str(workspace), cell["base_commit"]])
+    if added.returncode != 0:
+        raise FormalDataError("workspace materialization failed")
+    if _revision(workspace) != cell["base_commit"] or _git(["-C", str(workspace), "status", "--porcelain"]).stdout.strip():
+        raise FormalDataError("workspace commit or cleanliness validation failed")
+    binding = artifact_root / "worktree-bindings" / f"{artifact_key(cell['cell_id'])}.json"
+    binding.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_json(binding, {"cell_id": cell["cell_id"], "workspace": str(workspace), "base_commit": cell["base_commit"], "dispatcher_version": DISPATCHER_VERSION})
+    return workspace
+
+
 def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> dict[str, Any]:
     """Execute exactly once through an injected executor and atomically record it.
 
@@ -171,6 +202,8 @@ def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> 
     cell_root = artifact_root / "cells" / artifact_key(cell["cell_id"])
     if cell_root.exists():
         raise FormalDataError("completed or incomplete cell cannot be rerun")
+    workspace = materialize_workspace(artifact_root, invocation)
+    invocation = {**invocation, "target_repository": str(workspace)}
     raw_root = cell_root / "raw"
     raw_root.mkdir(parents=True)
     started = time.time()
@@ -184,7 +217,7 @@ def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> 
         (raw_root / f"{name}.txt").write_text(value, encoding="utf-8")
     metadata = {"cell_id": cell["cell_id"], "runtime_sha": cell["runtime_sha"], "attempt_count": 1,
                 "started_at": started, "ended_at": ended, "exit_code": outcome.get("exit_code"),
-                "completion_state": outcome.get("completion_state"), "invocation_sha256": digest(invocation)}
+                "completion_state": outcome.get("completion_state"), "workspace": str(workspace), "invocation_sha256": digest(invocation)}
     _atomic_json(raw_root / "metadata.json", metadata)
     if outcome.get("infrastructure_failure"):
         _atomic_json(cell_root / "incomplete.json", {"state": "infrastructure_failure", "attempt_count": 1})
@@ -236,13 +269,14 @@ def subprocess_executor(invocation: dict[str, Any]) -> dict[str, Any]:
         if isinstance(stderr, bytes): stderr = stderr.decode("utf-8", "replace")
         return {"stdout": stdout, "stderr": stderr, "raw_trace": stdout, "events": [],
                 "completion_state": "timeout", "infrastructure_failure": True}
-def preflight_execution(matrix: list[dict[str, Any]], artifact_root: Path) -> dict[str, Any]:
+def preflight_execution(matrix: list[dict[str, Any]], artifact_root: Path, current_cell_id: str | None = None) -> dict[str, Any]:
     """Validate a frozen manifest before dispatch; never starts an Agent."""
     validate_matrix(matrix)
     if artifact_root.exists():
-        completed = list(artifact_root.glob("cells/*/cell-record.json"))
-        if completed:
-            raise FormalDataError("completed cell output conflicts with execution plan")
+        if current_cell_id:
+            cell_root = artifact_root / "cells" / artifact_key(current_cell_id)
+            if cell_root.exists():
+                raise FormalDataError("current cell already completed or incomplete")
         manifest = artifact_root / "formal-manifest.json"
         if manifest.exists():
             saved = json.loads(manifest.read_text(encoding="utf-8"))

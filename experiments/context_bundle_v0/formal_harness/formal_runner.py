@@ -29,7 +29,7 @@ def main() -> None:
     if not args.cell_id:
         parser.error("--execute requires --cell-id")
     manifest = load_manifest(args.output / "formal-manifest.json")
-    gate = preflight_execution(manifest["matrix"], args.output)
+    gate = preflight_execution(manifest["matrix"], args.output, args.cell_id)
     invocation = construct_invocation(manifest, config, args.cell_id)
     result = dispatch_cell(args.output, invocation, subprocess_executor)
     print(json.dumps({"mode": "DISPATCHED", "preflight": gate, "cell_id": args.cell_id, "result": result}))

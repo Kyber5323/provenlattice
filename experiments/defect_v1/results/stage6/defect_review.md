@@ -131,7 +131,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `identity`
+- `needs_dfg`: `false`
+- `missing_capability`: `声明身份与作用域（declaration identity / scope）`
+- `confidence`: `0.85`
+- `reason`: `` 主体身份 `name:output` 把 src/models/deepseek.cpp:29 的写点（llama_model_deepseek::load_arch_tensors 的 output 成员）与 src/models/baichuan.cpp 侧的同名成员连成同一对象——两个不同模型类各自的成员变量，仅拼写相同；且两侧都是模型加载期（单线程）的初始化，不存在并发写读对。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-bdf42a3680959f46
 
@@ -185,7 +195,17 @@ static inline void updateCachedTimeWithUs(int update_daylight_info, const long l
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `other`
+- `needs_dfg`: `false`
+- `missing_capability`: `执行阶段与线程模型（execution phase / thread model）`
+- `confidence`: `0.8`
+- `reason`: `写点 src/server.c:1383（updateCachedTimeWithUs）与读点 initServerConfig 无法并发：initServerConfig 是启动期一次性执行、先于任何线程创建；server.mstime 的周期更新也由主线程 cron 驱动。两个上下文在执行阶段上不重叠。图缺「初始化期 vs 运行期」的执行模型事实，MAY_PARALLEL 歧义在图内无法排除。`
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-fb4a226c969e08ff
 
@@ -231,7 +251,17 @@ Missing evidence:
                 break;
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `ownership`
+- `needs_dfg`: `false`
+- `missing_capability`: `RAII 守卫的析构释放（destructor release）`
+- `confidence`: `0.85`
+- `reason`: `` tools/server/server-queue.cpp:166 的 `std::unique_lock lock(mutex_tasks)` 是 cv.wait 用的内层块作用域守卫，块结束即析构释放；:183 catch 内的第二次获取是顺序获取，不嵌套。释放发生在 unique_lock 析构（无 UNLOCK 事件），图看不见。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-ef252e5f13617291
 
@@ -276,7 +306,17 @@ Missing evidence:
         return -1;
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `other`
+- `needs_dfg`: `false`
+- `missing_capability`: `候选规则消费 holding 判定（candidate rule × holding verdict）`
+- `confidence`: `0.8`
+- `reason`: `modules/vector-sets/hnsw.c:2017 与 :2032 是同一函数内两个顺序的 rdlock 站点（循环内成功路径持锁返回；:2032 是循环后 fallback），不存在两把同锁都持有的路径——单子自己的 HOLDING_CONFIRMED 判定就写着 no path reaches the second acquisition without releasing the lock。图已判 holding 不成立仍产出候选，是「同方法双获取」候选规则的过度包含。`
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-4175f77da71d70dc
 
@@ -319,7 +359,17 @@ Missing evidence:
                 break;
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `extractor`
+- `needs_dfg`: `false`
+- `missing_capability`: `守卫变量成员 .unlock() 的释放识别（guard-member unlock recognition）`
+- `confidence`: `0.9`
+- `reason`: `` src/llama-quant.cpp:780 的 `std::unique_lock lock(mutex)` 在 :792 有显式 `lock.unlock()`（取完行块即放锁再去量化），:800 的再次获取发生在验证失败路径、此刻锁已释放——不存在同线程自死锁。holding_confirmed=true 未把 :792 对守卫变量的成员 `.unlock()` 识别为释放事件。已读源码核对 :780-:803。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `源码核对：llama-quant.cpp:792 lock.unlock() 在 :800 再获取之前。`
 
 ### DFV1-redis-50-7c81a7e06079fa9c
 
@@ -361,7 +411,17 @@ Missing evidence:
                 fprintf(stderr, "Invalid cluster node #%d\n", i);
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `other`
+- `needs_dfg`: `true`
+- `missing_capability`: `跨方法/经出参的中间 def（intervening def via callee out-param）`
+- `confidence`: `0.7`
+- `reason`: `` src/redis-benchmark.c:1760 的 WRITE 是 `config.cluster_nodes = NULL`（初始置空）；:1803 的解引用在 `for (j = 0; j < config.cluster_node_count; j++)` 内——count>0 蕴含解析阶段已在别处把 cluster_nodes 重新赋值为分配结果。杀死 NULL def 的 intervening def 经跨方法/字段写入，图未连出这条 def；补上「真实分配 def → 解引用」的数据流边后此候选即被击杀。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-9fc4d428cfd8c4b8
 
@@ -402,7 +462,17 @@ Missing evidence:
     memcpy(rc.gid, gid.raw, RDMA_GID_SIZE);
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `extractor`
+- `needs_dfg`: `false`
+- `missing_capability`: `出参分配器契约（out-param allocator: posix_memalign）`
+- `confidence`: `0.8`
+- `reason`: `` ggml/src/ggml-rpc/transport-apple.cpp:268 的 ALLOC 事实把 `posix_memalign(&c->send_mem, …)` 当作 malloc 式工厂——posix_memalign 经出参分配、返回错误码，被追踪的「分配值」并不是流向 :283 `c->qpn` 解引用的指针；`c` 本身在 :215 已判空返回（PARTIAL_GUARD 已如实标注）。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-9e263c54611a14ba
 
@@ -442,7 +512,17 @@ Missing evidence:
             entries[idx].ctime = time(NULL);
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `true` — **true positive**
+- `failure_reason`: `null`
+- `needs_dfg`: `false`
+- `missing_capability`: `null`
+- `confidence`: `0.9`
+- `reason`: `` utils/lru/lfu-simulation.c:87 `entries = malloc(sizeof(*entries) * …)` 的返回值全程无任何 CHECK（resolved 判定与源码一致），:135 `entries[idx].counter` 直接解引用——典型 3.1：分配失败即空指针解引用。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `本单的真阳性样本；仿真工具程序，但缺陷模式典型。`
 
 ### DFV1-llama.cpp-69-19a31c006f46316e
 
@@ -482,7 +562,17 @@ ggml_gallocr_t ggml_gallocr_new_n(ggml_backend_buffer_type_t * bufts, int n_bufs
     galloc->buffers = calloc(n_bufs, sizeof(struct vbuffer *));
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `extractor`
+- `needs_dfg`: `false`
+- `missing_capability`: `宏内 null 断言识别（GGML_ASSERT）`
+- `confidence`: `0.85`
+- `reason`: `` ggml/src/ggml-alloc.c:499 calloc 后 :500 紧跟 `GGML_ASSERT(galloc != NULL)`——断言失败即进程终止，解引用不可达；宏包裹的 null 比较未被 CHECK 识别（CHECK 只认裸比较表达式），导致「该身份无 CHECK」的 resolved 误立。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-84f9fb6a1311ff90
 
@@ -674,7 +764,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `false`
+- `missing_capability`: `API 所有权契约（callee takes ownership）`
+- `confidence`: `0.75`
+- `reason`: `` modules/vector-sets/w2v.c:356 循环内 `word = malloc(…)` 随后交给 hnsw_try_commit_insert(ctx->index, ic, word) / hnsw_insert(…, word, …)——vector-sets 的 hnsw_insert 接管 blob 所有权并随节点存入索引；fread 失败路径 exit(1)。每条路径 word 都移交出帧，无泄漏。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-0e72cd2816ec69e4
 
@@ -719,7 +819,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `extractor`
+- `needs_dfg`: `false`
+- `missing_capability`: `getline 误入 ALLOC 词表（std::getline misclassified）`
+- `confidence`: `0.9`
+- `reason`: `` ggml/src/ggml-hexagon/ggml-hexagon.cpp:7137 的 ALLOC 事实 matched_name=getline——`std::getline(ss, t, ',')` 是读流不是分配；ss 是栈上 RAII stringstream，无堆资源。提取词表把 getline 误映射为 ALLOC。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-d57419b7efe1c7e9
 
@@ -791,7 +901,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `ownership`
+- `needs_dfg`: `false`
+- `missing_capability`: `经参数数组的移交（store-through-parameter transfer）`
+- `confidence`: `0.85`
+- `reason`: `` src/setproctitle.c:172 `tmp = strdup(argv[i])` 后 :176 `argv[i] = tmp`——strdup 结果移交进调用方的 argv 数组，由 setproctitle 的调用方统一释放；图只见帧内无 RELEASE 即立候选。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-536a4d3fd1731572
 
@@ -902,7 +1022,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `ownership`
+- `needs_dfg`: `false`
+- `missing_capability`: `对象图传递所有权（transitive ownership via object graph）`
+- `confidence`: `0.85`
+- `reason`: `` ggml/src/ggml-rpc/ggml-rpc.cpp:2348 `dev_ctx = new …{}` 随后装进 dev->context、dev push 进 ctx->devices、reg 经返回值逃逸并存入 reg_map——dev_ctx 的所有权随对象图整体移交；「存进堆对象成员再随根逃逸」的传递路径图不建模（只认 RETURN 直接逃逸，故 reg 的逃逸判定没有帮到 dev_ctx）。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-dcf8abc68a1eb2df
 
@@ -942,7 +1072,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `true`
+- `missing_capability`: `被调经出参的 def（callee out-param write）`
+- `confidence`: `0.85`
+- `reason`: `` src/redis-benchmark.c:1939 与 :1986 的两个 free 属于不同 benchmark 块（RPUSH / ZPOPMIN 等互不相干的两段测试代码），块间 `cmd = redisFormatCommand(&cmd, …)` 重新分配——杀死第二次 free 的 intervening def 是被调经出参 `&cmd` 写入的，图看不到被调帧内的分配。补上跨方法出参 def 边即淘汰。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-bbcc905b1bc1a8c6
 
@@ -1069,7 +1209,17 @@ Missing evidence:
             }
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `extractor`
+- `needs_dfg`: `false`
+- `missing_capability`: `getline 误入 ALLOC 词表（std::getline misclassified）`
+- `confidence`: `0.9`
+- `reason`: `` common/console.cpp:1060 的 ALLOC matched_name=getline 且主体为空（SUBJECT_UNRESOLVED）——`std::getline(std::cin, line)` 是读流不是分配；与 case 10 同一提取词表错误。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-8b60100a4fc409d1
 
@@ -1111,7 +1261,17 @@ Missing evidence:
             free(cmd);
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `missing_read_write`
+- `needs_dfg`: `false`
+- `missing_capability`: `取址实参 vs 值实参（address-of vs value argument）`
+- `confidence`: `0.8`
+- `reason`: `` src/redis-benchmark.c:1997 的 free 与 :2032 的「使用」之间隔着多个 benchmark 块，且 :2032 `len = redisFormatCommandArgv(&cmd, …)` 传的是 &cmd（变量的地址），不是悬垂指针值——图不区分 f(p) 与 f(&p)（USE_KIND_UNKNOWN 注解自述），且其间 cmd 已被重新分配。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-8700674b9ba8bea4
 
@@ -1151,7 +1311,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `false`
+- `missing_capability`: `noreturn 语义（GGML_ABORT / abort）`
+- `confidence`: `0.85`
+- `reason`: `` ggml/src/ggml-virtgpu/ggml-backend-reg.cpp:72 的 free 在 malloc 失败臂内，臂尾 `GGML_ABORT(...)` 终止进程；:76 的 free 在 snprintf 成功路径——两条臂互斥，R1→R2 不可达。图未建模 GGML_ABORT 的 noreturn 语义，失败臂被当成可落穿。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-4141c43e3a33db4a
 
@@ -1225,7 +1395,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `false`
+- `missing_capability`: `noreturn 语义（assert / abort）`
+- `confidence`: `0.75`
+- `reason`: `` src/redis-benchmark.c:350 的 LOCK 与 :354 的 UNLOCK 共用同一 `if (config.num_threads)` 守卫——真实路径上锁定/释放成对；唯一「持锁退出」的路径是 :352 `assert(ln != NULL)` 失败 abort，进程即终止。assert 的 noreturn 语义缺失使错误臂被当成可达出口。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-c8df5f3a2d7feaf3
 
@@ -1266,7 +1446,17 @@ Missing evidence:
     }
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `identity`
+- `needs_dfg`: `false`
+- `missing_capability`: `循环变量/局部作用域身份（for-scope identity）`
+- `confidence`: `0.9`
+- `reason`: `` ggml/src/ggml-opencl/ggml-opencl.cpp:9295 `for (e : temp_tensor_extras_iq4_nl_in_use) delete e;` 与 :9313 `for (e : temp_tensor_extras_q5_K_in_use) delete e;` 是两个不同容器的 range-for 循环变量，共用拼写 e——循环变量无作用域身份（IDENTITY_UNKNOWN，5B 登记缺口），按拼写连接成同一身份。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-d85693b7ea77dfb9
 
@@ -1302,7 +1492,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `false`
+- `missing_capability`: `跨帧配对释放（paired unlock in another frame）`
+- `confidence`: `0.9`
+- `reason`: `src/module.c:13423 加锁后函数即返回，注释原文 Our thread-safe contexts GIL must start with already locked——moduleInitModulesSystem 按设计持锁返回，释放由 moduleReleaseGIL 承担；这是文档化的协议不变量，不是泄漏。`
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-ca753350c046dc65
 
@@ -1344,7 +1544,17 @@ Missing evidence:
         for (ggml_tensor_extra_cl_q5_0 * e : temp_tensor_extras_q5_0) {
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `identity`
+- `needs_dfg`: `false`
+- `missing_capability`: `循环变量/局部作用域身份（for-scope identity）`
+- `confidence`: `0.9`
+- `reason`: `` ggml/src/ggml-opencl/ggml-opencl.cpp:9256 `delete e`（temp_tensor_extras_q4_1_in_use 循环）与 :9259 的 e 是相邻两个 range-for 的循环变量（不同容器、不同对象），拼写同为 e——与 case 18 同一作用域身份缺口。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-2ad47121f22a062b
 
@@ -1376,7 +1586,17 @@ void asmInit(void) {
     asmManager->pending_trim_jobs = listCreate();
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `false`
+- `missing_capability`: `MUST_CHECK API 语义（AI-side）`
+- `confidence`: `0.7`
+- `reason`: `` src/cluster_asm.c:212 `asmManager->tasks = listCreate();`——listCreate 内部走 zmalloc（OOM 即 panic），实际上不会返回 NULL；「不检查」是 redis 全仓惯例而非缺陷。9.1 已登记「哪些 API 必须检查结果」是 AI 侧语义，本条是该登记的代表样本。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-c0914d10fdccce31
 
@@ -1417,7 +1637,17 @@ Missing evidence:
     delete tmp;
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `false`
+- `missing_capability`: `释放器方法的实际释放粒度（iface->free granularity）`
+- `confidence`: `0.8`
+- `reason`: `` src/llama-sampler.cpp:4316 `dst->iface->free(dst)` 释放的是 dst 的内部状态（注释明写 free the dst state, including children for a chain，即 dst->ctx），不是 dst 壳对象；:4320 `dst->ctx = tmp->ctx` 移植新状态。RELEASE 事件按实参根 dst 记身份，实际释放对象是成员状态——与后续 dst->ctx 写点不构成 UAF。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-0b7b42aaae323b80
 
@@ -1457,7 +1687,17 @@ Missing evidence:
     d->layout.dense.offset = offset;
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `false`
+- `missing_capability`: `MUST_CHECK API 语义（zmalloc 族不失败）`
+- `confidence`: `0.85`
+- `reason`: `` src/sparsearray.c:432 `arSlice *d = arAllocAndTrack(…)` 后立即 `d->encoding`——arAllocAndTrack 走 zmalloc_usable（src/zmalloc.c:298-301，OOM 时 zmalloc_oom_handler 直接 panic），不会返回 NULL。已读源码核对；与 case 21 同族（redis 分配惯例）。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `源码核对：sparsearray.c:50-55 arAllocAndTrack → zmalloc_usable；zmalloc.c:301 if (!ptr) zmalloc_oom_handler(size)。`
 
 ### DFV1-llama.cpp-69-72c8281b11e5633b
 
@@ -1670,7 +1910,17 @@ Missing evidence:
             ggml_vk_submit(subctx, {});
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `extractor`
+- `needs_dfg`: `false`
+- `missing_capability`: `.lock() 消歧（weak_ptr::lock vs mutex）`
+- `confidence`: `0.85`
+- `reason`: `` ggml/src/ggml-vulkan/ggml-vulkan.cpp:12344 `vk_context subctx = ctx->tensor_ctxs[tensor_idx].lock()`——这是共享槽位的 `.lock()`（取共享所有权，弱引用升格），不是互斥量加锁；LOCK 事件按成员名匹配把 `.lock()` 误判为 mutex 获取，随后的「未释放」自然不成立（单子的 MUTEX_RECURSIVE 类不确定项也已自述 type not a known mutex）。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-0416083f00f39aae
 
@@ -1706,7 +1956,17 @@ void ggml_critical_section_start() {
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `ownership`
+- `needs_dfg`: `false`
+- `missing_capability`: `跨帧配对释放（paired unlock in callee）`
+- `confidence`: `0.9`
+- `reason`: `ggml/src/ggml-threading.cpp:7 该函数的职责就是加锁并持锁返回，释放由配对的 ggml_critical_section_end（另一帧）承担——函数对式协议，「另一帧的释放」。`
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-78e006bad06618d6
 
@@ -1739,7 +1999,17 @@ Missing evidence:
 }
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `false`
+- `missing_capability`: `MUST_CHECK API 语义（create_tensor 必需位不失败）`
+- `confidence`: `0.75`
+- `reason`: `` src/models/qwen3vlmoe.cpp:56 `layer.ffn_up_exps = create_tensor(tn(…), {…}, 0);`——flags=0 的必需 tensor，create_tensor 找不到时内部 abort（llama.cpp 建模惯例），不会静默返回 NULL 再被存进 layer。与 case 21/23 同族。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-2f7db7656b4287cb
 
@@ -1771,7 +2041,17 @@ Missing evidence:
                     iacc_1 = _mm256_add_epi16(iacc_1, _mm256_maddubs_epi16(_mm256_blend_epi32(rhs_vec_0123_13 ,_mm256_shuffle_epi32(rhs_vec_4567_13, 177), 170), _mm256_shuffle_epi32(lhs_vec_11, 170)));
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `contract`
+- `needs_dfg`: `false`
+- `missing_capability`: `MUST_CHECK 词表排除纯计算调用（intrinsics）`
+- `confidence`: `0.9`
+- `reason`: `` ggml/src/ggml-cpu/arch/x86/repack.cpp:1646 `iacc_1 = _mm256_add_epi16(iacc_1, _mm256_maddubs_epi16(…))`——SIMD 内建函数的返回值是算术结果，没有失败语义，「未检查返回值」对内建函数不成立；9.1 候选规则需在词表排除内建函数/纯计算调用。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-d2f307ac373ad159
 
@@ -1816,7 +2096,17 @@ Missing evidence:
     ggml_build_forward_expand(gf, cur);
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `identity`
+- `needs_dfg`: `false`
+- `missing_capability`: `声明身份与作用域（member-keeping identity 需类型限定）`
+- `confidence`: `0.85`
+- `reason`: `` src/models/gemma4.cpp:433 的 `res->t_logits` 写点与 src/models/starcoder2.cpp:155 的写点是两个不同模型类 graph_build 里各自的 res 局部对象——共享身份 name:res#t_logits 仅按拼写+成员连接；两个方法分属不同模型的建图路径，对象从不共享。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-redis-50-6dd6515b7ed62c28
 
@@ -1871,7 +2161,17 @@ Missing evidence:
 
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `other`
+- `needs_dfg`: `false`
+- `missing_capability`: `执行模型事实（single-thread / GIL）`
+- `confidence`: `0.7`
+- `reason`: `src/t_stream.c:3508/3506（streamCreateConsumer，+alloc_size）与 :3365（streamFreeNACK，−alloc_size）操作同一 stream 的计数器，但 redis 命令执行在主线程单线程进行（模块侧访问需持 GIL），两条路径不并发——图缺「单线程执行模型」事实，MAY_PARALLEL 歧义在图内无法排除。`
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `null`
 
 ### DFV1-llama.cpp-69-9211f82d2999ee21
 
@@ -1916,7 +2216,17 @@ void server_models::on_child_exit(const std::string & name, const std::shared_pt
     } else {
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `ownership`
+- `needs_dfg`: `false`
+- `missing_capability`: `RAII 守卫的析构释放（destructor release）`
+- `confidence`: `0.9`
+- `reason`: `tools/server/server-models.cpp:1222-1229 第一个 lock_guard 在内层块内，块在 :1229 闭合即析构释放（其内还有 return 分支）；:1232 的第二个 lock_guard 是外层 if 内的独立作用域——顺序获取不嵌套。已读源码核对。析构释放无 UNLOCK 事件，holding_confirmed=true 是这一缺口的产物。`
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `源码核对：server-models.cpp:1229 内层块闭合在 :1232 的 if 之前。`
 
 ### DFV1-llama.cpp-69-67eb44dc900d1559
 
@@ -1959,4 +2269,14 @@ Missing evidence:
                     if (cv_stop.wait_for(lock, wait_time, []{ return !running; })) {
 ```
 
-Verdict (fill in `defect_review.json`): `verdict` = `REVIEWED`, `is_true_positive` = ____ (`true` / `false` / `null`), `failure_reason` = ____ (closed list), `needs_dfg` = ____ (is a data-flow edge the missing piece?), `missing_capability` = ____, `reason` = ____
+Verdict (recorded in `defect_review.json`):
+
+- `verdict`: `REVIEWED`
+- `is_true_positive`: `false` — **false positive**
+- `failure_reason`: `other`
+- `needs_dfg`: `false`
+- `missing_capability`: `线程边界（lambda runs on new thread）`
+- `confidence`: `0.9`
+- `reason`: `` common/console.cpp:1109 start() 的 unique_lock 持至函数返回；:1119 的第二次获取在 `std::thread([](){ … })` 的 lambda 体内——在**新线程**上执行，新线程阻塞至 start() 返回、父线程放锁为止，是正常同步不是同线程自死锁。已读源码核对。图把 lambda 体当成同方法体，缺线程边界事实。 ``
+- `annotator`: `AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）`
+- `notes`: `源码核对：console.cpp:1118 th = std::thread([](){ … :1119 lock(mtx) … })。`

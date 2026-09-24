@@ -32845,14 +32845,14 @@
         "whether the variable tolerates weak consistency (a statistics counter may be allowed to race by design)"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "identity",
+        "reason": "主体身份 `name:output` 把 src/models/deepseek.cpp:29 的写点（llama_model_deepseek::load_arch_tensors 的 output 成员）与 src/models/baichuan.cpp 侧的同名成员连成同一对象——两个不同模型类各自的成员变量，仅拼写相同；且两侧都是模型加载期（单线程）的初始化，不存在并发写读对。",
+        "needs_dfg": false,
+        "missing_capability": "声明身份与作用域（declaration identity / scope）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -32964,14 +32964,14 @@
         "whether the variable tolerates weak consistency (a statistics counter may be allowed to race by design)"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "other",
+        "reason": "写点 src/server.c:1383（updateCachedTimeWithUs）与读点 initServerConfig 无法并发：initServerConfig 是启动期一次性执行、先于任何线程创建；server.mstime 的周期更新也由主线程 cron 驱动。两个上下文在执行阶段上不重叠。图缺「初始化期 vs 运行期」的执行模型事实，MAY_PARALLEL 歧义在图内无法排除。",
+        "needs_dfg": false,
+        "missing_capability": "执行阶段与线程模型（execution phase / thread model）",
+        "confidence": 0.8,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -33070,14 +33070,14 @@
         "the failure path of a non-blocking acquisition: a try-lock that fails leaves the lock unheld and the graph cannot tell the two arms apart"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "ownership",
+        "reason": "tools/server/server-queue.cpp:166 的 `std::unique_lock lock(mutex_tasks)` 是 cv.wait 用的内层块作用域守卫，块结束即析构释放；:183 catch 内的第二次获取是顺序获取，不嵌套。释放发生在 unique_lock 析构（无 UNLOCK 事件），图看不见。",
+        "needs_dfg": false,
+        "missing_capability": "RAII 守卫的析构释放（destructor release）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -33170,14 +33170,14 @@
         "the failure path of a non-blocking acquisition: a try-lock that fails leaves the lock unheld and the graph cannot tell the two arms apart"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "other",
+        "reason": "modules/vector-sets/hnsw.c:2017 与 :2032 是同一函数内两个顺序的 rdlock 站点（循环内成功路径持锁返回；:2032 是循环后 fallback），不存在两把同锁都持有的路径——单子自己的 HOLDING_CONFIRMED 判定就写着 no path reaches the second acquisition without releasing the lock。图已判 holding 不成立仍产出候选，是「同方法双获取」候选规则的过度包含。",
+        "needs_dfg": false,
+        "missing_capability": "候选规则消费 holding 判定（candidate rule × holding verdict）",
+        "confidence": 0.8,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -33297,15 +33297,15 @@
         "the failure path of a non-blocking acquisition: a try-lock that fails leaves the lock unheld and the graph cannot tell the two arms apart"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
-        "notes": null
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "extractor",
+        "reason": "src/llama-quant.cpp:780 的 `std::unique_lock lock(mutex)` 在 :792 有显式 `lock.unlock()`（取完行块即放锁再去量化），:800 的再次获取发生在验证失败路径、此刻锁已释放——不存在同线程自死锁。holding_confirmed=true 未把 :792 对守卫变量的成员 `.unlock()` 识别为释放事件。已读源码核对 :780-:803。",
+        "needs_dfg": false,
+        "missing_capability": "守卫变量成员 .unlock() 的释放识别（guard-member unlock recognition）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
+        "notes": "源码核对：llama-quant.cpp:792 lock.unlock() 在 :800 再获取之前。"
       }
     },
     {
@@ -33390,14 +33390,14 @@
         "whether a guard covers every route to the dereference: the graph can say the null arm still reaches it, not whether some check upstream already excluded null on the paths that matter"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "other",
+        "reason": "src/redis-benchmark.c:1760 的 WRITE 是 `config.cluster_nodes = NULL`（初始置空）；:1803 的解引用在 `for (j = 0; j < config.cluster_node_count; j++)` 内——count>0 蕴含解析阶段已在别处把 cluster_nodes 重新赋值为分配结果。杀死 NULL def 的 intervening def 经跨方法/字段写入，图未连出这条 def；补上「真实分配 def → 解引用」的数据流边后此候选即被击杀。",
+        "needs_dfg": true,
+        "missing_capability": "跨方法/经出参的中间 def（intervening def via callee out-param）",
+        "confidence": 0.7,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -33619,14 +33619,14 @@
         "whether a guard covers every route to the dereference: the graph can say the null arm still reaches it, not whether some check upstream already excluded null on the paths that matter"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "extractor",
+        "reason": "ggml/src/ggml-rpc/transport-apple.cpp:268 的 ALLOC 事实把 `posix_memalign(&c->send_mem, …)` 当作 malloc 式工厂——posix_memalign 经出参分配、返回错误码，被追踪的「分配值」并不是流向 :283 `c->qpn` 解引用的指针；`c` 本身在 :215 已判空返回（PARTIAL_GUARD 已如实标注）。",
+        "needs_dfg": false,
+        "missing_capability": "出参分配器契约（out-param allocator: posix_memalign）",
+        "confidence": 0.8,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -34017,15 +34017,15 @@
         "whether a guard covers every route to the dereference: the graph can say the null arm still reaches it, not whether some check upstream already excluded null on the paths that matter"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": true,
         "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
+        "reason": "utils/lru/lfu-simulation.c:87 `entries = malloc(sizeof(*entries) * …)` 的返回值全程无任何 CHECK（resolved 判定与源码一致），:135 `entries[idx].counter` 直接解引用——典型 3.1：分配失败即空指针解引用。",
+        "needs_dfg": false,
         "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
-        "notes": null
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
+        "notes": "本单的真阳性样本；仿真工具程序，但缺陷模式典型。"
       }
     },
     {
@@ -34122,14 +34122,14 @@
         "whether a guard covers every route to the dereference: the graph can say the null arm still reaches it, not whether some check upstream already excluded null on the paths that matter"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "extractor",
+        "reason": "ggml/src/ggml-alloc.c:499 calloc 后 :500 紧跟 `GGML_ASSERT(galloc != NULL)`——断言失败即进程终止，解引用不可达；宏包裹的 null 比较未被 CHECK 识别（CHECK 只认裸比较表达式），导致「该身份无 CHECK」的 resolved 误立。",
+        "needs_dfg": false,
+        "missing_capability": "宏内 null 断言识别（GGML_ASSERT）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -35151,14 +35151,14 @@
         "a release performed inside a callee: the graph only sees RELEASE points in the method it walked"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "modules/vector-sets/w2v.c:356 循环内 `word = malloc(…)` 随后交给 hnsw_try_commit_insert(ctx->index, ic, word) / hnsw_insert(…, word, …)——vector-sets 的 hnsw_insert 接管 blob 所有权并随节点存入索引；fread 失败路径 exit(1)。每条路径 word 都移交出帧，无泄漏。",
+        "needs_dfg": false,
+        "missing_capability": "API 所有权契约（callee takes ownership）",
+        "confidence": 0.75,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -35278,14 +35278,14 @@
         "a release performed inside a callee: the graph only sees RELEASE points in the method it walked"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "extractor",
+        "reason": "ggml/src/ggml-hexagon/ggml-hexagon.cpp:7137 的 ALLOC 事实 matched_name=getline——`std::getline(ss, t, ',')` 是读流不是分配；ss 是栈上 RAII stringstream，无堆资源。提取词表把 getline 误映射为 ALLOC。",
+        "needs_dfg": false,
+        "missing_capability": "getline 误入 ALLOC 词表（std::getline misclassified）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -35484,14 +35484,14 @@
         "a release performed inside a callee: the graph only sees RELEASE points in the method it walked"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "ownership",
+        "reason": "src/setproctitle.c:172 `tmp = strdup(argv[i])` 后 :176 `argv[i] = tmp`——strdup 结果移交进调用方的 argv 数组，由 setproctitle 的调用方统一释放；图只见帧内无 RELEASE 即立候选。",
+        "needs_dfg": false,
+        "missing_capability": "经参数数组的移交（store-through-parameter transfer）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -35704,14 +35704,14 @@
         "a release performed inside a callee: the graph only sees RELEASE points in the method it walked"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "ownership",
+        "reason": "ggml/src/ggml-rpc/ggml-rpc.cpp:2348 `dev_ctx = new …{}` 随后装进 dev->context、dev push 进 ctx->devices、reg 经返回值逃逸并存入 reg_map——dev_ctx 的所有权随对象图整体移交；「存进堆对象成员再随根逃逸」的传递路径图不建模（只认 RETURN 直接逃逸，故 reg 的逃逸判定没有帮到 dev_ctx）。",
+        "needs_dfg": false,
+        "missing_capability": "对象图传递所有权（transitive ownership via object graph）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -36383,14 +36383,14 @@
         "whether two names really address one object: the alias annotation is a same-statement copy fact, so a pair joined through it is a candidate and not an identity"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "src/redis-benchmark.c:1939 与 :1986 的两个 free 属于不同 benchmark 块（RPUSH / ZPOPMIN 等互不相干的两段测试代码），块间 `cmd = redisFormatCommand(&cmd, …)` 重新分配——杀死第二次 free 的 intervening def 是被调经出参 `&cmd` 写入的，图看不到被调帧内的分配。补上跨方法出参 def 边即淘汰。",
+        "needs_dfg": true,
+        "missing_capability": "被调经出参的 def（callee out-param write）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -36806,14 +36806,14 @@
         "a release performed inside a callee: the graph only sees RELEASE points in the method it walked"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "extractor",
+        "reason": "common/console.cpp:1060 的 ALLOC matched_name=getline 且主体为空（SUBJECT_UNRESOLVED）——`std::getline(std::cin, line)` 是读流不是分配；与 case 10 同一提取词表错误。",
+        "needs_dfg": false,
+        "missing_capability": "getline 误入 ALLOC 词表（std::getline misclassified）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -37549,14 +37549,14 @@
         "aliasing and reassignment: `q = p; free(q)`, `free(p); p = NULL` and `p = realloc(p, n)` are all invisible without a data-flow graph"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "missing_read_write",
+        "reason": "src/redis-benchmark.c:1997 的 free 与 :2032 的「使用」之间隔着多个 benchmark 块，且 :2032 `len = redisFormatCommandArgv(&cmd, …)` 传的是 &cmd（变量的地址），不是悬垂指针值——图不区分 f(p) 与 f(&p)（USE_KIND_UNKNOWN 注解自述），且其间 cmd 已被重新分配。",
+        "needs_dfg": false,
+        "missing_capability": "取址实参 vs 值实参（address-of vs value argument）",
+        "confidence": 0.8,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -37651,14 +37651,14 @@
         "whether two names really address one object: the alias annotation is a same-statement copy fact, so a pair joined through it is a candidate and not an identity"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "ggml/src/ggml-virtgpu/ggml-backend-reg.cpp:72 的 free 在 malloc 失败臂内，臂尾 `GGML_ABORT(...)` 终止进程；:76 的 free 在 snprintf 成功路径——两条臂互斥，R1→R2 不可达。图未建模 GGML_ABORT 的 noreturn 语义，失败臂被当成可落穿。",
+        "needs_dfg": false,
+        "missing_capability": "noreturn 语义（GGML_ABORT / abort）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -37826,14 +37826,14 @@
         "the guard-to-mutex binding: `std::unique_lock<T> g(m)` releases through `g`, and `g.unlock()` is an operation on the guard, not on `m`, so a walk that joins on the mutex's identity cannot see the release"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "src/redis-benchmark.c:350 的 LOCK 与 :354 的 UNLOCK 共用同一 `if (config.num_threads)` 守卫——真实路径上锁定/释放成对；唯一「持锁退出」的路径是 :352 `assert(ln != NULL)` 失败 abort，进程即终止。assert 的 noreturn 语义缺失使错误臂被当成可达出口。",
+        "needs_dfg": false,
+        "missing_capability": "noreturn 语义（assert / abort）",
+        "confidence": 0.75,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -37946,14 +37946,14 @@
         "whether two names really address one object: the alias annotation is a same-statement copy fact, so a pair joined through it is a candidate and not an identity"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "identity",
+        "reason": "ggml/src/ggml-opencl/ggml-opencl.cpp:9295 `for (e : temp_tensor_extras_iq4_nl_in_use) delete e;` 与 :9313 `for (e : temp_tensor_extras_q5_K_in_use) delete e;` 是两个不同容器的 range-for 循环变量，共用拼写 e——循环变量无作用域身份（IDENTITY_UNKNOWN，5B 登记缺口），按拼写连接成同一身份。",
+        "needs_dfg": false,
+        "missing_capability": "循环变量/局部作用域身份（for-scope identity）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -38024,14 +38024,14 @@
         "the guard-to-mutex binding: `std::unique_lock<T> g(m)` releases through `g`, and `g.unlock()` is an operation on the guard, not on `m`, so a walk that joins on the mutex's identity cannot see the release"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "src/module.c:13423 加锁后函数即返回，注释原文 Our thread-safe contexts GIL must start with already locked——moduleInitModulesSystem 按设计持锁返回，释放由 moduleReleaseGIL 承担；这是文档化的协议不变量，不是泄漏。",
+        "needs_dfg": false,
+        "missing_capability": "跨帧配对释放（paired unlock in another frame）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -38110,14 +38110,14 @@
         "aliasing and reassignment: `q = p; free(q)`, `free(p); p = NULL` and `p = realloc(p, n)` are all invisible without a data-flow graph"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "identity",
+        "reason": "ggml/src/ggml-opencl/ggml-opencl.cpp:9256 `delete e`（temp_tensor_extras_q4_1_in_use 循环）与 :9259 的 e 是相邻两个 range-for 的循环变量（不同容器、不同对象），拼写同为 e——与 case 18 同一作用域身份缺口。",
+        "needs_dfg": false,
+        "missing_capability": "循环变量/局部作用域身份（for-scope identity）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -38244,14 +38244,14 @@
         "whether a result was discarded outright: a CALL point records where a result went, never that it went nowhere, so `f();` as a bare statement is outside this query entirely -- and so is a result passed straight on as an argument, which no branch examines and no variable holds"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "src/cluster_asm.c:212 `asmManager->tasks = listCreate();`——listCreate 内部走 zmalloc（OOM 即 panic），实际上不会返回 NULL；「不检查」是 redis 全仓惯例而非缺陷。9.1 已登记「哪些 API 必须检查结果」是 AI 侧语义，本条是该登记的代表样本。",
+        "needs_dfg": false,
+        "missing_capability": "MUST_CHECK API 语义（AI-side）",
+        "confidence": 0.7,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -38335,14 +38335,14 @@
         "aliasing and reassignment: `q = p; free(q)`, `free(p); p = NULL` and `p = realloc(p, n)` are all invisible without a data-flow graph"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "src/llama-sampler.cpp:4316 `dst->iface->free(dst)` 释放的是 dst 的内部状态（注释明写 free the dst state, including children for a chain，即 dst->ctx），不是 dst 壳对象；:4320 `dst->ctx = tmp->ctx` 移植新状态。RELEASE 事件按实参根 dst 记身份，实际释放对象是成员状态——与后续 dst->ctx 写点不构成 UAF。",
+        "needs_dfg": false,
+        "missing_capability": "释放器方法的实际释放粒度（iface->free granularity）",
+        "confidence": 0.8,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -38425,15 +38425,15 @@
         "whether a result was discarded outright: a CALL point records where a result went, never that it went nowhere, so `f();` as a bare statement is outside this query entirely -- and so is a result passed straight on as an argument, which no branch examines and no variable holds"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
-        "notes": null
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "src/sparsearray.c:432 `arSlice *d = arAllocAndTrack(…)` 后立即 `d->encoding`——arAllocAndTrack 走 zmalloc_usable（src/zmalloc.c:298-301，OOM 时 zmalloc_oom_handler 直接 panic），不会返回 NULL。已读源码核对；与 case 21 同族（redis 分配惯例）。",
+        "needs_dfg": false,
+        "missing_capability": "MUST_CHECK API 语义（zmalloc 族不失败）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
+        "notes": "源码核对：sparsearray.c:50-55 arAllocAndTrack → zmalloc_usable；zmalloc.c:301 if (!ptr) zmalloc_oom_handler(size)。"
       }
     },
     {
@@ -39491,14 +39491,14 @@
         "the guard-to-mutex binding: `std::unique_lock<T> g(m)` releases through `g`, and `g.unlock()` is an operation on the guard, not on `m`, so a walk that joins on the mutex's identity cannot see the release"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "extractor",
+        "reason": "ggml/src/ggml-vulkan/ggml-vulkan.cpp:12344 `vk_context subctx = ctx->tensor_ctxs[tensor_idx].lock()`——这是共享槽位的 `.lock()`（取共享所有权，弱引用升格），不是互斥量加锁；LOCK 事件按成员名匹配把 `.lock()` 误判为 mutex 获取，随后的「未释放」自然不成立（单子的 MUTEX_RECURSIVE 类不确定项也已自述 type not a known mutex）。",
+        "needs_dfg": false,
+        "missing_capability": ".lock() 消歧（weak_ptr::lock vs mutex）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -39569,14 +39569,14 @@
         "the guard-to-mutex binding: `std::unique_lock<T> g(m)` releases through `g`, and `g.unlock()` is an operation on the guard, not on `m`, so a walk that joins on the mutex's identity cannot see the release"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "ownership",
+        "reason": "ggml/src/ggml-threading.cpp:7 该函数的职责就是加锁并持锁返回，释放由配对的 ggml_critical_section_end（另一帧）承担——函数对式协议，「另一帧的释放」。",
+        "needs_dfg": false,
+        "missing_capability": "跨帧配对释放（paired unlock in callee）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -39662,14 +39662,14 @@
         "whether a result was discarded outright: a CALL point records where a result went, never that it went nowhere, so `f();` as a bare statement is outside this query entirely -- and so is a result passed straight on as an argument, which no branch examines and no variable holds"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "src/models/qwen3vlmoe.cpp:56 `layer.ffn_up_exps = create_tensor(tn(…), {…}, 0);`——flags=0 的必需 tensor，create_tensor 找不到时内部 abort（llama.cpp 建模惯例），不会静默返回 NULL 再被存进 layer。与 case 21/23 同族。",
+        "needs_dfg": false,
+        "missing_capability": "MUST_CHECK API 语义（create_tensor 必需位不失败）",
+        "confidence": 0.75,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -39846,14 +39846,14 @@
         "whether a result was discarded outright: a CALL point records where a result went, never that it went nowhere, so `f();` as a bare statement is outside this query entirely -- and so is a result passed straight on as an argument, which no branch examines and no variable holds"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "contract",
+        "reason": "ggml/src/ggml-cpu/arch/x86/repack.cpp:1646 `iacc_1 = _mm256_add_epi16(iacc_1, _mm256_maddubs_epi16(…))`——SIMD 内建函数的返回值是算术结果，没有失败语义，「未检查返回值」对内建函数不成立；9.1 候选规则需在词表排除内建函数/纯计算调用。",
+        "needs_dfg": false,
+        "missing_capability": "MUST_CHECK 词表排除纯计算调用（intrinsics）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -39949,14 +39949,14 @@
         "whether the variable tolerates weak consistency (a statistics counter may be allowed to race by design)"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "identity",
+        "reason": "src/models/gemma4.cpp:433 的 `res->t_logits` 写点与 src/models/starcoder2.cpp:155 的写点是两个不同模型类 graph_build 里各自的 res 局部对象——共享身份 name:res#t_logits 仅按拼写+成员连接；两个方法分属不同模型的建图路径，对象从不共享。",
+        "needs_dfg": false,
+        "missing_capability": "声明身份与作用域（member-keeping identity 需类型限定）",
+        "confidence": 0.85,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -40077,14 +40077,14 @@
         "whether the variable tolerates weak consistency (a statistics counter may be allowed to race by design)"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "other",
+        "reason": "src/t_stream.c:3508/3506（streamCreateConsumer，+alloc_size）与 :3365（streamFreeNACK，−alloc_size）操作同一 stream 的计数器，但 redis 命令执行在主线程单线程进行（模块侧访问需持 GIL），两条路径不并发——图缺「单线程执行模型」事实，MAY_PARALLEL 歧义在图内无法排除。",
+        "needs_dfg": false,
+        "missing_capability": "执行模型事实（single-thread / GIL）",
+        "confidence": 0.7,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
         "notes": null
       }
     },
@@ -40209,15 +40209,15 @@
         "the failure path of a non-blocking acquisition: a try-lock that fails leaves the lock unheld and the graph cannot tell the two arms apart"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
-        "notes": null
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "ownership",
+        "reason": "tools/server/server-models.cpp:1222-1229 第一个 lock_guard 在内层块内，块在 :1229 闭合即析构释放（其内还有 return 分支）；:1232 的第二个 lock_guard 是外层 if 内的独立作用域——顺序获取不嵌套。已读源码核对。析构释放无 UNLOCK 事件，holding_confirmed=true 是这一缺口的产物。",
+        "needs_dfg": false,
+        "missing_capability": "RAII 守卫的析构释放（destructor release）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
+        "notes": "源码核对：server-models.cpp:1229 内层块闭合在 :1232 的 if 之前。"
       }
     },
     {
@@ -40327,15 +40327,15 @@
         "the failure path of a non-blocking acquisition: a try-lock that fails leaves the lock unheld and the graph cannot tell the two arms apart"
       ],
       "annotation": {
-        "verdict": "PENDING",
-        "is_true_positive": null,
-        "failure_reason": null,
-        "reason": null,
-        "needs_dfg": null,
-        "missing_capability": null,
-        "confidence": null,
-        "annotator": null,
-        "notes": null
+        "verdict": "REVIEWED",
+        "is_true_positive": false,
+        "failure_reason": "other",
+        "reason": "common/console.cpp:1109 start() 的 unique_lock 持至函数返回；:1119 的第二次获取在 `std::thread([](){ … })` 的 lambda 体内——在**新线程**上执行，新线程阻塞至 start() 返回、父线程放锁为止，是正常同步不是同线程自死锁。已读源码核对。图把 lambda 体当成同方法体，缺线程边界事实。",
+        "needs_dfg": false,
+        "missing_capability": "线程边界（lambda runs on new thread）",
+        "confidence": 0.9,
+        "annotator": "AI 提议 + 人工确认（Claude Code 提议 / Kyber5323 逐条确认，2026-09-24）",
+        "notes": "源码核对：console.cpp:1118 th = std::thread([](){ … :1119 lock(mtx) … })。"
       }
     }
   ]

@@ -206,6 +206,33 @@ def materialize_workspace(artifact_root: Path, invocation: dict[str, Any]) -> Pa
     return workspace
 
 
+def prepare_cell_execution(artifact_root: Path, invocation: dict[str, Any]) -> dict[str, Any]:
+    """The shared pre-Agent half of materialize-only and real dispatch."""
+    cell = invocation["cell"]
+    if cell["runtime_sha"] != ARM_SHA[cell["arm"]] or invocation.get("dispatcher_version") != DISPATCHER_VERSION:
+        raise FormalDataError("runtime or dispatcher identity mismatch before Agent start")
+    workspace = materialize_workspace(artifact_root, invocation)
+    prepared = {**invocation, "target_repository": str(workspace), "approved_workspace": str(workspace)}
+    return {"invocation": prepared, "workspace": workspace,
+            "command_sha256": digest(prepared["agent_argv"]),
+            "prompt_sha256": digest(prepared["prompt"]),
+            "runtime_sha": cell["runtime_sha"], "base_commit": cell["base_commit"]}
+
+
+def write_materialization_readiness(readiness_root: Path, prepared: dict[str, Any]) -> Path:
+    """Record no-dispatch evidence outside the formal cells namespace."""
+    cell = prepared["invocation"]["cell"]
+    path = readiness_root / "readiness" / "materialization" / f"{artifact_key(cell['cell_id'])}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise FormalDataError("readiness artifact already exists for cell")
+    _atomic_json(path, {"schema": "d9-c6-a4b-materialization-v1", "cell_id": cell["cell_id"],
+                        "workspace": str(prepared["workspace"]), "runtime_sha": prepared["runtime_sha"],
+                        "base_commit": prepared["base_commit"], "command_sha256": prepared["command_sha256"],
+                        "prompt_sha256": prepared["prompt_sha256"], "agent_invocation_count": 0})
+    return path
+
+
 def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> dict[str, Any]:
     """Execute exactly once through an injected executor and atomically record it.
 
@@ -214,13 +241,11 @@ def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> 
     never receives a caller-overridable cell field.
     """
     cell = invocation["cell"]
-    if cell["runtime_sha"] != ARM_SHA[cell["arm"]] or invocation.get("dispatcher_version") != DISPATCHER_VERSION:
-        raise FormalDataError("runtime or dispatcher identity mismatch before Agent start")
     cell_root = artifact_root / "cells" / artifact_key(cell["cell_id"])
     if cell_root.exists():
         raise FormalDataError("completed or incomplete cell cannot be rerun")
-    workspace = materialize_workspace(artifact_root, invocation)
-    invocation = {**invocation, "target_repository": str(workspace), "approved_workspace": str(workspace)}
+    prepared = prepare_cell_execution(artifact_root, invocation)
+    invocation, workspace = prepared["invocation"], prepared["workspace"]
     raw_root = cell_root / "raw"
     raw_root.mkdir(parents=True)
     started = time.time()

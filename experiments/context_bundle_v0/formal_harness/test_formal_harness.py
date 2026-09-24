@@ -174,6 +174,16 @@ class FormalHarnessTests(unittest.TestCase):
             self.assertIn(f"safe.directory={workspace.resolve()}", worktree.args)
         implementation=(Path(__file__).parent/"formal_harness.py").read_text(encoding="utf-8")
         self.assertNotIn("safe.directory=*", implementation); self.assertNotIn("--global", implementation); self.assertNotIn("--system", implementation)
+    def test_materialize_only_uses_shared_prepare_without_executor_or_formal_records(self):
+        cell=self.matrix[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); repo,commit=self.synthetic_repo(root); invocation=self.invocation(cell,repo,commit)
+            prepared=h.prepare_cell_execution(root,invocation)
+            readiness=h.write_materialization_readiness(root,prepared)
+            self.assertTrue(readiness.exists()); self.assertTrue(prepared["workspace"].exists())
+            self.assertFalse((root/"cells").exists()); self.assertEqual(commit, prepared["base_commit"])
+            payload=json.loads(readiness.read_text(encoding="utf-8")); self.assertEqual(0,payload["agent_invocation_count"])
+            self.assertEqual(h.digest(invocation["agent_argv"]), prepared["command_sha256"])
     def test_production_adapter_checks_revision_before_agent(self):
         cell=next(c for c in self.matrix if c["arm"] == "A")
         invocation={"cell":cell, "runtime_root":"missing", "approved_runtime_root":str(Path("missing").resolve()), "target_repository":"missing", "approved_workspace":str(Path("missing").resolve()), "agent_argv":["must-not-run"], "prompt":"synthetic", "environment":{}, "timeout_s":1}

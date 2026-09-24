@@ -21,6 +21,11 @@ checkout at the manifest base commit. Existing workspaces and either completed
 or incomplete artifacts for the selected cell fail closed; completed artifacts
 for other cells do not block a later cell.
 
+`--materialize-only --manifest <frozen-manifest> --cell-id <id>` invokes the
+same `prepare_cell_execution()` lifecycle used by dispatch, then writes a
+readiness artifact under `readiness/materialization/`. It does not enter the
+executor branch and never writes `cells/*/cell-record.json` or `incomplete.json`.
+
 Every formal Git operation uses command-scoped `git -c safe.directory=<exact
 canonical approved path>`. Source and worktree paths are independently
 canonicalized and validated; the harness never writes global/system Git config

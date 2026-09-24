@@ -16,8 +16,10 @@ open, checkout, or execute a frozen ContextBench case.
 `--materialize-only`. `--validate-invocation` uses the same canonical and
 binding validation but stops before workspace materialization. The runner verifies the canonical artifact hashes, then
 checks `--binding-freeze` against the exact binding SHA, then resolves the
-local binding into a sealed environment before it constructs an
-invocation. Raw `runtime_roots` and `target_repositories` are never formal CLI
+local binding into a sealed environment. Before any worktree operation it
+requires a wrapper-issued `--dispatch-attestation` validated against a local
+`--dispatch-context-freeze`; this verifies the approved runner identity and
+binding SHA without modelling UAC elevation. Raw `runtime_roots` and `target_repositories` are never formal CLI
 inputs. Synthetic qualification helpers remain internal to `formal_harness.py`.
 
 Each dispatch materializes `worktrees/<stable-cell-hash>/` as a detached, clean

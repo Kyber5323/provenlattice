@@ -14,6 +14,7 @@ from pathlib import Path
 from formal_harness import (FormalDataError, construct_formal_invocation, dispatch_cell,
                             load_canonical_bundle, preflight_formal_execution,
                             prepare_cell_execution, validate_frozen_execution_binding,
+                            validate_dispatch_attestation,
                             subprocess_executor, write_materialization_readiness)
 
 
@@ -25,6 +26,10 @@ def parse_args() -> argparse.Namespace:
                         help="local execution-environment binding; raw runtime/repository paths are not CLI inputs")
     parser.add_argument("--binding-freeze", required=True, type=Path,
                         help="local SHA freeze evidence for the only binding allowed in this formal batch")
+    parser.add_argument("--dispatch-context-freeze", required=True, type=Path,
+                        help="local approved-dispatch context freeze evidence")
+    parser.add_argument("--dispatch-attestation", required=True, type=Path,
+                        help="wrapper-issued approved-dispatch attestation")
     parser.add_argument("--output", required=True, type=Path)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--execute", action="store_true", help="dispatch exactly one preflight-qualified manifest cell")
@@ -41,13 +46,15 @@ def main() -> None:
     args = parse_args()
     bundle = load_canonical_bundle(args.formal_root)
     environment = validate_frozen_execution_binding(bundle, args.binding, args.binding_freeze)
+    dispatch_attestation = validate_dispatch_attestation(bundle, environment, args.dispatch_context_freeze, args.dispatch_attestation)
     gate = preflight_formal_execution(bundle, args.output, args.cell_id)
-    invocation = construct_formal_invocation(bundle, environment, args.cell_id)
+    invocation = construct_formal_invocation(bundle, environment, dispatch_attestation, args.cell_id)
     if args.validate_invocation:
         print(json.dumps({"mode": "INVOCATION_VALIDATED_NO_DISPATCH", "preflight": gate, "cell_id": args.cell_id,
                           "binding_sha256": environment.binding_sha256, "runtime_root": invocation["runtime_root"],
                           "source_repository": invocation["target_repository"], "agent_invocation_count": 0,
-                          "materialization_cells": 0}))
+                          "materialization_cells": 0, "runner_identity": invocation["runner_identity"],
+                          "dispatch_context": invocation["dispatch_context"]}))
         return
     if args.materialize_only:
         prepared = prepare_cell_execution(args.output, invocation)

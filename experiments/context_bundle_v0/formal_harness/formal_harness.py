@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import time
 from collections import Counter
@@ -24,6 +25,7 @@ ARM_SHA = {
 }
 PROTOCOL_VERSION = "d9-c5-review-v1"
 DISPATCHER_VERSION = "d9-c6-a2-dispatcher-v1"
+REQUIRED_RUNNER_IDENTITY = "desktop-u1amjdf\\sunqinghw"
 FROZEN_INVENTORY_A = frozenset({"analysis", "analyze", "callees", "callers", "definition", "dependencies", "dependents", "document", "evidence", "explain-module", "explain-symbol", "explain_module", "explain_symbol", "find-related-code", "find-related-documents", "find_related_code", "find_related_documents", "implemented", "index", "knowledge", "references", "requirements", "shard", "status", "subgraph", "symbol", "trace-evidence", "trace_evidence", "update"})
 FROZEN_INVENTORY_B = FROZEN_INVENTORY_A | {"task-context"}
 YES_REASONS = {"EXPLICIT_REASONING_USE", "TOOL_SELECTION_USE", "CODE_NAVIGATION_USE", "PATCH_ACTION_USE"}
@@ -251,18 +253,102 @@ def validate_frozen_execution_binding(bundle: dict[str, Any], binding_path: Path
     return environment
 
 
-def construct_formal_invocation(bundle: dict[str, Any], environment: ValidatedExecutionEnvironment, selected_cell_id: str) -> dict[str, Any]:
+def _runner_identity() -> str:
+    result = subprocess.run(["whoami"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0 or not result.stdout.strip():
+        raise FormalDataError("runner identity unavailable")
+    return result.stdout.strip().lower()
+
+
+def _launcher_sha256() -> str:
+    return hashlib.sha256(Path(__file__).with_name("formal_dispatch_launcher.py").read_bytes()).hexdigest()
+
+
+def freeze_dispatch_context(bundle: dict[str, Any], environment: ValidatedExecutionEnvironment,
+                            freeze_path: Path, attestation_root: Path, frozen_at: str) -> dict[str, Any]:
+    if freeze_path.exists():
+        raise FormalDataError("dispatch-context freeze evidence already exists")
+    if _runner_identity() != REQUIRED_RUNNER_IDENTITY:
+        raise FormalDataError("runner identity is not approved for dispatch-context freeze")
+    evidence = {
+        "artifact_class": "formal_dispatch_context_freeze_evidence",
+        "schema": "d9-c6-approved-dispatch-v1",
+        "experiment_id": "D9-C5-FORMAL",
+        "required_runner_identity": REQUIRED_RUNNER_IDENTITY,
+        "required_dispatch_context": "formal-approved",
+        "execution_binding_sha256": environment.binding_sha256,
+        "attestation_root": str(_canonical(attestation_root)),
+        "launcher_sha256": _launcher_sha256(),
+        "frozen_at": frozen_at,
+    }
+    freeze_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_json(freeze_path, evidence)
+    return evidence
+
+
+def validate_dispatch_context_freeze(bundle: dict[str, Any], environment: ValidatedExecutionEnvironment,
+                                     freeze_path: Path) -> dict[str, Any]:
+    evidence = json.loads(freeze_path.read_text(encoding="utf-8"))
+    if evidence.get("artifact_class") != "formal_dispatch_context_freeze_evidence" or evidence.get("schema") != "d9-c6-approved-dispatch-v1" or evidence.get("experiment_id") != "D9-C5-FORMAL":
+        raise FormalDataError("invalid dispatch-context freeze evidence")
+    if evidence.get("required_runner_identity") != REQUIRED_RUNNER_IDENTITY or evidence.get("required_dispatch_context") != "formal-approved" or evidence.get("execution_binding_sha256") != environment.binding_sha256 or evidence.get("launcher_sha256") != _launcher_sha256():
+        raise FormalDataError("dispatch-context freeze mismatch")
+    return evidence
+
+
+def create_dispatch_attestation(bundle: dict[str, Any], environment: ValidatedExecutionEnvironment,
+                                context_freeze: Path, attestation_path: Path, issued_at: str) -> dict[str, Any]:
+    freeze = validate_dispatch_context_freeze(bundle, environment, context_freeze)
+    identity = _runner_identity()
+    if identity != freeze["required_runner_identity"]:
+        raise FormalDataError("runner identity is not approved for formal dispatch")
+    root = Path(freeze["attestation_root"])
+    if _canonical(attestation_path.parent) != _canonical(root) or attestation_path.exists():
+        raise FormalDataError("attestation path is outside approved dispatch context")
+    root.mkdir(parents=True, exist_ok=True)
+    attestation = {
+        "artifact_class": "formal_dispatch_attestation",
+        "schema": "d9-c6-approved-dispatch-v1",
+        "experiment_id": "D9-C5-FORMAL",
+        "dispatch_context": "formal-approved",
+        "dispatch_context_version": "d9-c6-approved-dispatch-v1",
+        "runner_identity": identity,
+        "execution_binding_sha256": environment.binding_sha256,
+        "launcher_sha256": freeze["launcher_sha256"],
+        "attestation_nonce": secrets.token_hex(16),
+        "issued_at": issued_at,
+    }
+    _atomic_json(attestation_path, attestation)
+    return attestation
+
+
+def validate_dispatch_attestation(bundle: dict[str, Any], environment: ValidatedExecutionEnvironment,
+                                  context_freeze: Path, attestation_path: Path) -> dict[str, Any]:
+    freeze = validate_dispatch_context_freeze(bundle, environment, context_freeze)
+    if _canonical(attestation_path.parent) != _canonical(Path(freeze["attestation_root"])):
+        raise FormalDataError("attestation is outside approved dispatch context")
+    attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+    identity = _runner_identity()
+    if attestation.get("artifact_class") != "formal_dispatch_attestation" or attestation.get("schema") != freeze["schema"] or attestation.get("experiment_id") != "D9-C5-FORMAL" or attestation.get("dispatch_context") != "formal-approved" or attestation.get("runner_identity") != identity or identity != freeze["required_runner_identity"] or attestation.get("execution_binding_sha256") != environment.binding_sha256 or attestation.get("launcher_sha256") != freeze["launcher_sha256"] or not attestation.get("attestation_nonce"):
+        raise FormalDataError("approved dispatch attestation validation failed")
+    return {**attestation, "attestation_sha256": digest(attestation)}
+
+
+def construct_formal_invocation(bundle: dict[str, Any], environment: ValidatedExecutionEnvironment,
+                                dispatch_attestation: dict[str, Any], selected_cell_id: str) -> dict[str, Any]:
     """Formal-only invocation: raw paths are impossible at this interface."""
     cell = next((c for c in bundle["manifest"]["cells"] if c["cell_id"] == selected_cell_id), None)
     if cell is None or cell["runtime_sha"] != bundle["contract"]["runtime_sha"][cell["arm"]]:
         raise FormalDataError("formal cell/runtime mismatch")
-    if not isinstance(environment, ValidatedExecutionEnvironment) or not environment.is_resolver_issued() or cell["source_repo"] != "facebook/zstd":
+    if not isinstance(environment, ValidatedExecutionEnvironment) or not environment.is_resolver_issued() or cell["source_repo"] != "facebook/zstd" or not dispatch_attestation.get("attestation_sha256"):
         raise FormalDataError("validated environment required")
     runtime_root = environment.runtime_for(cell["arm"])
     formal_cell = {**cell, "provenance_sha256": digest({"manifest_sha256": bundle["manifest_sha256"], "cell": cell})}
     return {"dispatcher_version": DISPATCHER_VERSION, "cell": formal_cell, "runtime_root": runtime_root,
             "approved_runtime_root": runtime_root, "target_repository": environment.source_repository,
             "approved_source_repository": environment.source_repository, "binding_sha256": environment.binding_sha256,
+            "runner_identity": dispatch_attestation["runner_identity"], "dispatch_context": dispatch_attestation["dispatch_context"],
+            "dispatch_attestation_sha256": dispatch_attestation["attestation_sha256"],
             "agent_argv": bundle["contract"]["agent_adapter"].split(), "prompt": bundle["prompts"][cell["case_id"]],
             "environment": {}, "timeout_s": bundle["contract"]["timeout_s"]}
 
@@ -401,6 +487,8 @@ def write_materialization_readiness(readiness_root: Path, prepared: dict[str, An
                         "workspace": str(prepared["workspace"]), "runtime_sha": prepared["runtime_sha"],
                         "base_commit": prepared["base_commit"], "command_sha256": prepared["command_sha256"],
                         "prompt_sha256": prepared["prompt_sha256"], "execution_binding_sha256": prepared["invocation"].get("binding_sha256"),
+                        "runner_identity": prepared["invocation"].get("runner_identity"), "dispatch_context": prepared["invocation"].get("dispatch_context"),
+                        "dispatch_attestation_sha256": prepared["invocation"].get("dispatch_attestation_sha256"),
                         "agent_invocation_count": 0})
     return path
 
@@ -429,7 +517,7 @@ def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> 
             _atomic_json(cell_root / "incomplete.json", {"state": "infrastructure_failure", "reason": f"missing {name}", "attempt_count": 1})
             return {"state": "incomplete", "attempt_count": 1}
         (raw_root / f"{name}.txt").write_text(value, encoding="utf-8")
-    metadata = {"cell_id": cell["cell_id"], "runtime_sha": cell["runtime_sha"], "execution_binding_sha256": invocation.get("binding_sha256"), "attempt_count": 1,
+    metadata = {"cell_id": cell["cell_id"], "runtime_sha": cell["runtime_sha"], "execution_binding_sha256": invocation.get("binding_sha256"), "runner_identity": invocation.get("runner_identity"), "dispatch_context": invocation.get("dispatch_context"), "dispatch_attestation_sha256": invocation.get("dispatch_attestation_sha256"), "attempt_count": 1,
                 "started_at": started, "ended_at": ended, "exit_code": outcome.get("exit_code"),
                 "completion_state": outcome.get("completion_state"), "workspace": str(workspace), "invocation_sha256": digest(invocation)}
     _atomic_json(raw_root / "metadata.json", metadata)
@@ -440,7 +528,7 @@ def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> 
         normalized = normalize_trace(cell, str(raw_root / "raw_trace.txt"), outcome.get("events"),
                                      outcome.get("final_patch", ""), outcome.get("final_result", ""))
         _atomic_json(cell_root / "normalized-trace.json", normalized)
-        record = {"cell_id": cell["cell_id"], "provenance_sha256": cell["provenance_sha256"], "execution_binding_sha256": invocation.get("binding_sha256"),
+        record = {"cell_id": cell["cell_id"], "provenance_sha256": cell["provenance_sha256"], "execution_binding_sha256": invocation.get("binding_sha256"), "runner_identity": invocation.get("runner_identity"), "dispatch_context": invocation.get("dispatch_context"), "dispatch_attestation_sha256": invocation.get("dispatch_attestation_sha256"),
                   "dispatcher_version": DISPATCHER_VERSION, "attempt_count": 1, "trace_parse_pass": True,
                   "raw_artifacts": str(raw_root), "normalized_trace": str(cell_root / "normalized-trace.json"),
                   "returned_fact_ids": [f["fact_id"] for f in normalized["returned_facts"]],

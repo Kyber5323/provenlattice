@@ -207,6 +207,46 @@ def resolve_execution_environment(bundle: dict[str, Any], binding_path: Path) ->
                                          runtimes=tuple(sorted(resolved_runtimes)), _seal=_VALIDATED_ENVIRONMENT_SEAL)
 
 
+def freeze_execution_binding(bundle: dict[str, Any], binding_path: Path, freeze_path: Path, frozen_at: str) -> dict[str, Any]:
+    """Validate and locally freeze the sole machine-specific batch binding."""
+    if freeze_path.exists():
+        raise FormalDataError("execution binding freeze evidence already exists")
+    environment = resolve_execution_environment(bundle, binding_path)
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    evidence = {
+        "artifact_class": "execution_binding_freeze_evidence",
+        "schema": "d9-c5-execution-binding-freeze-v1",
+        "experiment_id": "D9-C5-FORMAL",
+        "binding_id": binding.get("binding_id"),
+        "binding_path": str(_canonical(binding_path)),
+        "execution_binding_sha256": environment.binding_sha256,
+        "source_logical_id": "facebook/zstd",
+        "source_repository": environment.source_repository,
+        "runtime_sha": bundle["contract"]["runtime_sha"],
+        "runtime_roots": dict(environment.runtimes),
+        "required_base_commits": sorted({cell["base_commit"] for cell in bundle["manifest"]["cells"]}),
+        "frozen_at": frozen_at,
+    }
+    freeze_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_json(freeze_path, evidence)
+    return evidence
+
+
+def validate_frozen_execution_binding(bundle: dict[str, Any], binding_path: Path, freeze_path: Path) -> ValidatedExecutionEnvironment:
+    """Reject changed, substituted, or semantically mismatched local bindings."""
+    evidence = json.loads(freeze_path.read_text(encoding="utf-8"))
+    if evidence.get("artifact_class") != "execution_binding_freeze_evidence" or evidence.get("schema") != "d9-c5-execution-binding-freeze-v1" or evidence.get("experiment_id") != "D9-C5-FORMAL":
+        raise FormalDataError("invalid execution binding freeze evidence")
+    if evidence.get("runtime_sha") != bundle["contract"]["runtime_sha"] or evidence.get("source_logical_id") != bundle["contract"]["source_repo"]:
+        raise FormalDataError("execution binding freeze semantics mismatch")
+    environment = resolve_execution_environment(bundle, binding_path)
+    if environment.binding_sha256 != evidence.get("execution_binding_sha256"):
+        raise FormalDataError("execution binding SHA mismatch")
+    if environment.source_repository != evidence.get("source_repository") or dict(environment.runtimes) != evidence.get("runtime_roots"):
+        raise FormalDataError("execution binding resolved path mismatch")
+    return environment
+
+
 def construct_formal_invocation(bundle: dict[str, Any], environment: ValidatedExecutionEnvironment, selected_cell_id: str) -> dict[str, Any]:
     """Formal-only invocation: raw paths are impossible at this interface."""
     cell = next((c for c in bundle["manifest"]["cells"] if c["cell_id"] == selected_cell_id), None)
@@ -321,7 +361,8 @@ def write_materialization_readiness(readiness_root: Path, prepared: dict[str, An
     _atomic_json(path, {"schema": "d9-c6-a4b-materialization-v1", "cell_id": cell["cell_id"],
                         "workspace": str(prepared["workspace"]), "runtime_sha": prepared["runtime_sha"],
                         "base_commit": prepared["base_commit"], "command_sha256": prepared["command_sha256"],
-                        "prompt_sha256": prepared["prompt_sha256"], "agent_invocation_count": 0})
+                        "prompt_sha256": prepared["prompt_sha256"], "execution_binding_sha256": prepared["invocation"].get("binding_sha256"),
+                        "agent_invocation_count": 0})
     return path
 
 
@@ -349,7 +390,7 @@ def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> 
             _atomic_json(cell_root / "incomplete.json", {"state": "infrastructure_failure", "reason": f"missing {name}", "attempt_count": 1})
             return {"state": "incomplete", "attempt_count": 1}
         (raw_root / f"{name}.txt").write_text(value, encoding="utf-8")
-    metadata = {"cell_id": cell["cell_id"], "runtime_sha": cell["runtime_sha"], "attempt_count": 1,
+    metadata = {"cell_id": cell["cell_id"], "runtime_sha": cell["runtime_sha"], "execution_binding_sha256": invocation.get("binding_sha256"), "attempt_count": 1,
                 "started_at": started, "ended_at": ended, "exit_code": outcome.get("exit_code"),
                 "completion_state": outcome.get("completion_state"), "workspace": str(workspace), "invocation_sha256": digest(invocation)}
     _atomic_json(raw_root / "metadata.json", metadata)
@@ -360,7 +401,7 @@ def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> 
         normalized = normalize_trace(cell, str(raw_root / "raw_trace.txt"), outcome.get("events"),
                                      outcome.get("final_patch", ""), outcome.get("final_result", ""))
         _atomic_json(cell_root / "normalized-trace.json", normalized)
-        record = {"cell_id": cell["cell_id"], "provenance_sha256": cell["provenance_sha256"],
+        record = {"cell_id": cell["cell_id"], "provenance_sha256": cell["provenance_sha256"], "execution_binding_sha256": invocation.get("binding_sha256"),
                   "dispatcher_version": DISPATCHER_VERSION, "attempt_count": 1, "trace_parse_pass": True,
                   "raw_artifacts": str(raw_root), "normalized_trace": str(cell_root / "normalized-trace.json"),
                   "returned_fact_ids": [f["fact_id"] for f in normalized["returned_facts"]],

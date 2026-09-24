@@ -78,6 +78,31 @@ class FormalRunnerCutoverTests(unittest.TestCase):
             with self.assertRaises(h.FormalDataError):
                 self.resolve(self.binding(root, swap=True))
 
+    def test_binding_freeze_rejects_tamper_and_is_deterministic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); binding = self.binding(root); freeze = root / "binding-freeze.json"
+            def fake_git(repo, args, approved):
+                return subprocess.CompletedProcess(["git"], 0, "https://github.com/facebook/zstd\n", "")
+            def fake_revision(repo, approved, ref="HEAD"):
+                name = Path(repo).name
+                if name == "runtime-a": return h.ARM_SHA["A"]
+                if name == "runtime-b": return h.ARM_SHA["B"]
+                return ref
+            with patch.object(h, "_git", fake_git), patch.object(h, "_revision", fake_revision):
+                first = h.freeze_execution_binding(self.bundle(), binding, freeze, "2026-09-24T00:00:00+00:00")
+                resolved = h.validate_frozen_execution_binding(self.bundle(), binding, freeze)
+                self.assertEqual(first["execution_binding_sha256"], resolved.binding_sha256)
+                original = json.loads(binding.read_text(encoding="utf-8"))
+                def source_path_changed(payload): payload["source_repositories"]["facebook/zstd"]["path"] = str(root / "other-source")
+                def runtime_sha_changed(payload): payload["runtime_roots"]["A"]["expected_sha"] = "wrong"
+                def runtime_paths_swapped(payload): payload["runtime_roots"]["A"]["path"], payload["runtime_roots"]["B"]["path"] = payload["runtime_roots"]["B"]["path"], payload["runtime_roots"]["A"]["path"]
+                def same_schema_substitution(payload): payload["binding_id"] = "another-binding"
+                for mutate in (source_path_changed, runtime_sha_changed, runtime_paths_swapped, same_schema_substitution):
+                    payload = json.loads(json.dumps(original)); mutate(payload)
+                    binding.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(h.FormalDataError):
+                        h.validate_frozen_execution_binding(self.bundle(), binding, freeze)
+
     def test_formal_cli_has_no_legacy_or_raw_path_options(self):
         result = subprocess.run([sys.executable, str(Path(__file__).parent / "formal_runner.py"), "--help"], capture_output=True, text=True)
         self.assertEqual(0, result.returncode)
@@ -90,18 +115,18 @@ class FormalRunnerCutoverTests(unittest.TestCase):
 
     def test_runner_calls_resolver_then_formal_constructor_not_legacy_constructor(self):
         env = SimpleNamespace(binding_sha256="synthetic-binding")
-        args = argparse.Namespace(formal_root=Path("formal"), binding=Path("binding"), output=Path("out"),
+        args = argparse.Namespace(formal_root=Path("formal"), binding=Path("binding"), binding_freeze=Path("freeze"), output=Path("out"),
                                   cell_id="cell", execute=False, materialize_only=False, validate_invocation=True)
         with patch.object(runner, "parse_args", return_value=args), \
              patch.object(runner, "load_canonical_bundle", return_value={"bundle": True}) as load, \
-             patch.object(runner, "resolve_execution_environment", return_value=env) as resolve, \
+             patch.object(runner, "validate_frozen_execution_binding", return_value=env) as resolve, \
              patch.object(runner, "preflight_formal_execution", return_value={"state": "EXECUTION_READY"}), \
              patch.object(runner, "construct_formal_invocation", return_value={"cell": {}, "runtime_root": "runtime", "target_repository": "source"}) as construct, \
              patch.object(runner, "dispatch_cell", side_effect=self.fail):
             with patch("builtins.print"):
                 runner.main()
         load.assert_called_once_with(args.formal_root)
-        resolve.assert_called_once_with({"bundle": True}, args.binding)
+        resolve.assert_called_once_with({"bundle": True}, args.binding, args.binding_freeze)
         construct.assert_called_once_with({"bundle": True}, env, args.cell_id)
         self.assertNotIn("construct_invocation", runner.__dict__)
 

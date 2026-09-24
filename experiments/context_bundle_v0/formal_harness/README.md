@@ -15,7 +15,8 @@ open, checkout, or execute a frozen ContextBench case.
 <artifacts> --cell-id <id>` followed by either `--execute` or
 `--materialize-only`. `--validate-invocation` uses the same canonical and
 binding validation but stops before workspace materialization. The runner verifies the canonical artifact hashes, then
-resolves the local binding into a sealed environment before it constructs an
+checks `--binding-freeze` against the exact binding SHA, then resolves the
+local binding into a sealed environment before it constructs an
 invocation. Raw `runtime_roots` and `target_repositories` are never formal CLI
 inputs. Synthetic qualification helpers remain internal to `formal_harness.py`.
 
@@ -24,7 +25,7 @@ checkout at the manifest base commit. Existing workspaces and either completed
 or incomplete artifacts for the selected cell fail closed; completed artifacts
 for other cells do not block a later cell.
 
-`--materialize-only --formal-root <canonical-formal-root> --binding <binding> --cell-id <id>` invokes the
+`--materialize-only --formal-root <canonical-formal-root> --binding <binding> --binding-freeze <freeze-evidence> --cell-id <id>` invokes the
 same `prepare_cell_execution()` lifecycle used by dispatch, then writes a
 readiness artifact under `readiness/materialization/`. It does not enter the
 executor branch and never writes `cells/*/cell-record.json` or `incomplete.json`.

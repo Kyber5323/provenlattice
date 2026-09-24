@@ -12,7 +12,7 @@ from pathlib import Path
 
 from formal_harness import (construct_formal_invocation, dispatch_cell,
                             load_canonical_bundle, preflight_formal_execution,
-                            prepare_cell_execution, resolve_execution_environment,
+                            prepare_cell_execution, validate_frozen_execution_binding,
                             subprocess_executor, write_materialization_readiness)
 
 
@@ -22,6 +22,8 @@ def parse_args() -> argparse.Namespace:
                         help="directory containing the hash-closed formal manifest, contract, and prompts")
     parser.add_argument("--binding", required=True, type=Path,
                         help="local execution-environment binding; raw runtime/repository paths are not CLI inputs")
+    parser.add_argument("--binding-freeze", required=True, type=Path,
+                        help="local SHA freeze evidence for the only binding allowed in this formal batch")
     parser.add_argument("--output", required=True, type=Path)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--execute", action="store_true", help="dispatch exactly one preflight-qualified manifest cell")
@@ -37,7 +39,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     bundle = load_canonical_bundle(args.formal_root)
-    environment = resolve_execution_environment(bundle, args.binding)
+    environment = validate_frozen_execution_binding(bundle, args.binding, args.binding_freeze)
     gate = preflight_formal_execution(bundle, args.output, args.cell_id)
     invocation = construct_formal_invocation(bundle, environment, args.cell_id)
     if args.validate_invocation:

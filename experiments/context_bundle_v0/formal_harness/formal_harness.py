@@ -149,7 +149,9 @@ def construct_invocation(manifest: dict[str, Any], run_config: dict[str, Any], s
     return {"dispatcher_version": DISPATCHER_VERSION, "cell": cell, "runtime_root": runtime_root,
             "target_repository": target_repo, "agent_argv": list(dispatch["agent_argv"]),
             "prompt": run_config["case_prompts"][cell["case_id"]],
-            "environment": deepcopy(dispatch.get("environment", {})), "timeout_s": cell["timeout_s"]}
+            "environment": deepcopy(dispatch.get("environment", {})), "timeout_s": cell["timeout_s"],
+            "approved_source_repository": str(_canonical(Path(target_repo))),
+            "approved_runtime_root": str(_canonical(Path(runtime_root)))}
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -158,12 +160,21 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+def _canonical(path: Path) -> Path:
+    return path.resolve()
 
 
-def _revision(repo: Path, ref: str = "HEAD") -> str:
-    result = _git(["-C", str(repo), "rev-parse", ref])
+def _git(repo: Path, args: list[str], approved_repo: Path) -> subprocess.CompletedProcess:
+    """Trust only one already-approved canonical repository for one command."""
+    canonical_repo, canonical_approved = _canonical(repo), _canonical(approved_repo)
+    if canonical_repo != canonical_approved:
+        raise FormalDataError("Git path is outside the approved repository contract")
+    return subprocess.run(["git", "-c", f"safe.directory={canonical_repo}", "-C", str(canonical_repo), *args],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def _revision(repo: Path, approved_repo: Path, ref: str = "HEAD") -> str:
+    result = _git(repo, ["rev-parse", ref], approved_repo)
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
@@ -171,17 +182,23 @@ def materialize_workspace(artifact_root: Path, invocation: dict[str, Any]) -> Pa
     """Create one clean detached workspace, permanently bound to one cell."""
     cell = invocation["cell"]
     source = Path(invocation["target_repository"])
+    approved_source = Path(invocation["approved_source_repository"])
     workspace = artifact_root / "worktrees" / artifact_key(cell["cell_id"])
+    workspace_root = artifact_root / "worktrees"
+    if _canonical(source) != _canonical(approved_source) or _canonical(workspace.parent) != _canonical(workspace_root):
+        raise FormalDataError("source or workspace path is outside dispatcher contract")
     if workspace.exists():
         raise FormalDataError("workspace already exists; cell cannot be reused")
-    if _git(["-C", str(source), "status", "--porcelain"]).stdout.strip():
+    source_status = _git(source, ["status", "--porcelain"], approved_source)
+    if source_status.returncode != 0 or source_status.stdout.strip():
         raise FormalDataError("source repository is dirty")
-    if not _revision(source, cell["base_commit"]):
+    if not _revision(source, approved_source, cell["base_commit"]):
         raise FormalDataError("frozen base commit is unavailable")
-    added = _git(["-C", str(source), "worktree", "add", "--detach", str(workspace), cell["base_commit"]])
+    added = _git(source, ["worktree", "add", "--detach", str(workspace), cell["base_commit"]], approved_source)
     if added.returncode != 0:
         raise FormalDataError("workspace materialization failed")
-    if _revision(workspace) != cell["base_commit"] or _git(["-C", str(workspace), "status", "--porcelain"]).stdout.strip():
+    workspace_status = _git(workspace, ["status", "--porcelain"], workspace)
+    if _revision(workspace, workspace) != cell["base_commit"] or workspace_status.returncode != 0 or workspace_status.stdout.strip():
         raise FormalDataError("workspace commit or cleanliness validation failed")
     binding = artifact_root / "worktree-bindings" / f"{artifact_key(cell['cell_id'])}.json"
     binding.parent.mkdir(parents=True, exist_ok=True)
@@ -203,7 +220,7 @@ def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> 
     if cell_root.exists():
         raise FormalDataError("completed or incomplete cell cannot be rerun")
     workspace = materialize_workspace(artifact_root, invocation)
-    invocation = {**invocation, "target_repository": str(workspace)}
+    invocation = {**invocation, "target_repository": str(workspace), "approved_workspace": str(workspace)}
     raw_root = cell_root / "raw"
     raw_root.mkdir(parents=True)
     started = time.time()
@@ -245,10 +262,9 @@ def subprocess_executor(invocation: dict[str, Any]) -> dict[str, Any]:
     target = Path(invocation["target_repository"])
     expected_runtime = invocation["cell"]["runtime_sha"]
     expected_target = invocation["cell"]["base_commit"]
-    def revision(path: Path) -> str:
-        result = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-        return result.stdout.strip() if result.returncode == 0 else ""
-    if revision(runtime) != expected_runtime or revision(target) != expected_target:
+    if _canonical(runtime) != _canonical(Path(invocation["approved_runtime_root"])) or _canonical(target) != _canonical(Path(invocation["approved_workspace"])):
+        return {"stdout": "", "stderr": "runtime or workspace path mismatch", "raw_trace": "", "events": [], "completion_state": "preflight_failed", "infrastructure_failure": True}
+    if _revision(runtime, runtime) != expected_runtime or _revision(target, target) != expected_target:
         return {"stdout": "", "stderr": "runtime or target revision mismatch", "raw_trace": "", "events": [], "completion_state": "preflight_failed", "infrastructure_failure": True}
     environment = {**os.environ, **invocation["environment"], "PYTHONPATH": str(runtime / "src")}
     try:

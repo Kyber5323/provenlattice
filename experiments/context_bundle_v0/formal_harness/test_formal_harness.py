@@ -37,7 +37,7 @@ class FormalHarnessTests(unittest.TestCase):
         return repo, commit
     def invocation(self, cell, repo, commit):
         bound=dict(cell, base_commit=commit)
-        return {"dispatcher_version":h.DISPATCHER_VERSION, "cell":bound, "runtime_root":"synthetic", "target_repository":str(repo), "agent_argv":["fake"], "prompt":"synthetic", "environment":{}, "timeout_s":1}
+        return {"dispatcher_version":h.DISPATCHER_VERSION, "cell":bound, "runtime_root":"synthetic", "target_repository":str(repo), "approved_source_repository":str(repo.resolve()), "approved_runtime_root":str(Path("synthetic").resolve()), "agent_argv":["fake"], "prompt":"synthetic", "environment":{}, "timeout_s":1}
     def test_matrix_has_stable_36_cells(self):
         self.assertEqual(36, len(self.matrix)); self.assertEqual(36, len({c["cell_id"] for c in self.matrix}))
     def test_reject_matrix_errors(self):
@@ -163,9 +163,20 @@ class FormalHarnessTests(unittest.TestCase):
             root=Path(tmp); repo,commit=self.synthetic_repo(root); invocation=self.invocation(cell,repo,commit)
             (root/"worktrees"/h.artifact_key(cell["cell_id"])).mkdir(parents=True)
             with self.assertRaises(h.FormalDataError): h.dispatch_cell(root,invocation,lambda _: self.fail("executor called"))
+    def test_git_trust_is_scoped_to_exact_source_and_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); repo,commit=self.synthetic_repo(root)
+            source=h._git(repo,["status","--porcelain"],repo)
+            self.assertIn(f"safe.directory={repo.resolve()}", source.args)
+            with self.assertRaises(h.FormalDataError): h._git(repo,["status"],root/"other")
+            cell=self.matrix[0]; workspace=h.materialize_workspace(root,self.invocation(cell,repo,commit))
+            worktree=h._git(workspace,["status","--porcelain"],workspace)
+            self.assertIn(f"safe.directory={workspace.resolve()}", worktree.args)
+        implementation=(Path(__file__).parent/"formal_harness.py").read_text(encoding="utf-8")
+        self.assertNotIn("safe.directory=*", implementation); self.assertNotIn("--global", implementation); self.assertNotIn("--system", implementation)
     def test_production_adapter_checks_revision_before_agent(self):
         cell=next(c for c in self.matrix if c["arm"] == "A")
-        invocation={"cell":cell, "runtime_root":"missing", "target_repository":"missing", "agent_argv":["must-not-run"], "prompt":"synthetic", "environment":{}, "timeout_s":1}
+        invocation={"cell":cell, "runtime_root":"missing", "approved_runtime_root":str(Path("missing").resolve()), "target_repository":"missing", "approved_workspace":str(Path("missing").resolve()), "agent_argv":["must-not-run"], "prompt":"synthetic", "environment":{}, "timeout_s":1}
         result=h.subprocess_executor(invocation)
         self.assertTrue(result["infrastructure_failure"]); self.assertEqual("preflight_failed", result["completion_state"])
 

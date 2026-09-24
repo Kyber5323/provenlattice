@@ -20,3 +20,8 @@ Each dispatch materializes `worktrees/<stable-cell-hash>/` as a detached, clean
 checkout at the manifest base commit. Existing workspaces and either completed
 or incomplete artifacts for the selected cell fail closed; completed artifacts
 for other cells do not block a later cell.
+
+Every formal Git operation uses command-scoped `git -c safe.directory=<exact
+canonical approved path>`. Source and worktree paths are independently
+canonicalized and validated; the harness never writes global/system Git config
+and never uses wildcard trust.

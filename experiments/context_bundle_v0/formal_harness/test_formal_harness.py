@@ -221,6 +221,31 @@ class FormalHarnessTests(unittest.TestCase):
             self.assertFalse((root/"cells").exists()); self.assertEqual(commit, prepared["base_commit"])
             payload=json.loads(readiness.read_text(encoding="utf-8")); self.assertEqual(0,payload["agent_invocation_count"])
             self.assertEqual(h.digest(invocation["agent_argv"]), prepared["command_sha256"])
+
+    def test_pre_attestation_readiness_supersession_is_scoped_and_auditable(self):
+        cell=self.matrix[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); repo,commit=self.synthetic_repo(root); invocation={**self.invocation(cell,repo,commit), "binding_sha256":"binding"}
+            prepared=h.prepare_cell_execution(root,invocation); record=h.write_materialization_readiness(root,prepared)
+            invalidation=h.supersede_pre_attestation_readiness(root,repo,cell["cell_id"],"binding",{"attestation_sha256":"attested"})
+            self.assertTrue(invalidation.exists()); self.assertFalse(record.exists()); self.assertEqual([],h.active_readiness_records(root))
+            archived=root/"readiness"/"materialization"/"superseded"/record.name
+            self.assertTrue(archived.exists()); self.assertFalse(prepared["workspace"].exists())
+            audit=json.loads(invalidation.read_text(encoding="utf-8")); self.assertEqual("PRE_ATTESTATION_CONTRACT",audit["reason"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); repo,commit=self.synthetic_repo(root); invocation={**self.invocation(cell,repo,commit), "binding_sha256":"binding"}
+            prepared=h.prepare_cell_execution(root,invocation); record=h.write_materialization_readiness(root,prepared)
+            payload=json.loads(record.read_text(encoding="utf-8")); payload["runner_identity"]=h.REQUIRED_RUNNER_IDENTITY; record.write_text(json.dumps(payload),encoding="utf-8")
+            with self.assertRaises(h.FormalDataError): h.supersede_pre_attestation_readiness(root,repo,cell["cell_id"],"binding",{"attestation_sha256":"attested"})
+            with self.assertRaises(h.FormalDataError): h.supersede_pre_attestation_readiness(root,repo,cell["cell_id"],"wrong",{"attestation_sha256":"attested"})
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); repo,commit=self.synthetic_repo(root); invocation={**self.invocation(cell,repo,commit), "binding_sha256":"binding"}
+            prepared=h.prepare_cell_execution(root,invocation); record=h.write_materialization_readiness(root,prepared)
+            payload=json.loads(record.read_text(encoding="utf-8")); payload["agent_invocation_count"]=1; record.write_text(json.dumps(payload),encoding="utf-8")
+            with self.assertRaises(h.FormalDataError): h.supersede_pre_attestation_readiness(root,repo,cell["cell_id"],"binding",{"attestation_sha256":"attested"})
+            cell_root=root/"cells"/h.artifact_key(cell["cell_id"]); cell_root.mkdir(parents=True)
+            payload["agent_invocation_count"]=0; record.write_text(json.dumps(payload),encoding="utf-8")
+            with self.assertRaises(h.FormalDataError): h.supersede_pre_attestation_readiness(root,repo,cell["cell_id"],"binding",{"attestation_sha256":"attested"})
     def test_production_adapter_checks_revision_before_agent(self):
         cell=next(c for c in self.matrix if c["arm"] == "A")
         invocation={"cell":cell, "runtime_root":"missing", "approved_runtime_root":str(Path("missing").resolve()), "target_repository":"missing", "approved_workspace":str(Path("missing").resolve()), "agent_argv":["must-not-run"], "prompt":"synthetic", "environment":{}, "timeout_s":1}

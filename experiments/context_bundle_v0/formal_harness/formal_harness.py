@@ -493,6 +493,58 @@ def write_materialization_readiness(readiness_root: Path, prepared: dict[str, An
     return path
 
 
+def active_readiness_records(artifact_root: Path) -> list[dict[str, Any]]:
+    """Only top-level materialization records are active; superseded records remain auditable."""
+    directory = artifact_root / "readiness" / "materialization"
+    if not directory.exists():
+        return []
+    return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(directory.glob("*.json"))]
+
+
+def supersede_pre_attestation_readiness(artifact_root: Path, source_repository: Path,
+                                        cell_identifier: str, expected_binding_sha256: str,
+                                        dispatch_attestation: dict[str, Any]) -> Path:
+    """Retire exactly one zero-Agent readiness workspace from the pre-attestation contract."""
+    key = artifact_key(cell_identifier)
+    record_path = artifact_root / "readiness" / "materialization" / f"{key}.json"
+    invalidation = artifact_root / "readiness" / "invalidation" / f"{key}.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    workspace = Path(record.get("workspace", ""))
+    expected_workspace = artifact_root / "worktrees" / key
+    cell_root = artifact_root / "cells" / key
+    missing_attestation = not record.get("runner_identity") and not record.get("dispatch_context") and not record.get("dispatch_attestation_sha256")
+    if record.get("schema") != "d9-c6-a4b-materialization-v1" or record.get("cell_id") != cell_identifier or record.get("agent_invocation_count") != 0 or record.get("execution_binding_sha256") != expected_binding_sha256 or not missing_attestation:
+        raise FormalDataError("readiness is not eligible for pre-attestation supersession")
+    if cell_root.exists() or invalidation.exists() or _canonical(workspace) != _canonical(expected_workspace) or not workspace.exists():
+        raise FormalDataError("readiness workspace or formal-artifact binding is unsafe")
+    workspace_head = _git(workspace, ["rev-parse", "HEAD"], workspace)
+    workspace_status = _git(workspace, ["status", "--porcelain"], workspace)
+    if workspace_head.returncode != 0 or workspace_head.stdout.strip() != record.get("base_commit") or workspace_status.returncode != 0 or workspace_status.stdout.strip():
+        raise FormalDataError("readiness workspace is not a clean frozen worktree")
+    removed = _git(source_repository, ["worktree", "remove", str(workspace)], source_repository)
+    if removed.returncode != 0:
+        invocation = {"cell": {"cell_id": cell_identifier, "base_commit": record["base_commit"]},
+                      "binding_sha256": expected_binding_sha256, "approved_source_repository": str(source_repository)}
+        raise _git_failure("pre-attestation workspace retirement", "git worktree remove", removed, invocation, workspace)
+    archive = record_path.parent / "superseded" / record_path.name
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(record_path, archive)
+    invalidation.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_json(invalidation, {
+        "schema": "d9-c6-a4f-r2-pre-attestation-supersession-v1",
+        "reason": "PRE_ATTESTATION_CONTRACT",
+        "cell_id": cell_identifier,
+        "execution_binding_sha256": expected_binding_sha256,
+        "original_readiness_sha256": digest(record),
+        "original_readiness_archive": str(archive),
+        "retired_workspace": str(workspace),
+        "agent_invocation_count": 0,
+        "formal_runs": 0,
+        "dispatch_attestation_sha256": dispatch_attestation["attestation_sha256"],
+    })
+    return invalidation
+
+
 def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> dict[str, Any]:
     """Execute exactly once through an injected executor and atomically record it.
 

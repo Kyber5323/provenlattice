@@ -163,6 +163,43 @@ class FormalHarnessTests(unittest.TestCase):
             root=Path(tmp); repo,commit=self.synthetic_repo(root); invocation=self.invocation(cell,repo,commit)
             (root/"worktrees"/h.artifact_key(cell["cell_id"])).mkdir(parents=True)
             with self.assertRaises(h.FormalDataError): h.dispatch_cell(root,invocation,lambda _: self.fail("executor called"))
+
+    def test_materialization_failures_preserve_structured_git_diagnostics(self):
+        cell=self.matrix[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); repo,commit=self.synthetic_repo(root); invocation=self.invocation(cell,repo,commit)
+            bound=dict(invocation, binding_sha256="binding-sha")
+            original=h._git
+            def reject_worktree(repo_path,args,approved):
+                if args[:2] == ["worktree", "add"]:
+                    return subprocess.CompletedProcess(["git", *args], 128, "synthetic stdout", "synthetic stderr")
+                return original(repo_path,args,approved)
+            with unittest.mock.patch.object(h,"_git",reject_worktree):
+                with self.assertRaises(h.FormalDataError) as raised: h.materialize_workspace(root,bound)
+            diagnostic=raised.exception.diagnostic
+            self.assertEqual("detached-worktree materialization",diagnostic["stage"])
+            self.assertEqual("git worktree add",diagnostic["operation"])
+            self.assertEqual(128,diagnostic["git_returncode"])
+            self.assertEqual("synthetic stderr",diagnostic["git_stderr"])
+            self.assertEqual(cell["cell_id"],diagnostic["cell_id"])
+            self.assertEqual("binding-sha",diagnostic["execution_binding_sha256"])
+            self.assertFalse((root/"readiness").exists()); self.assertFalse((root/"cells").exists())
+            raw=h._git(repo,["rev-parse","missing"],repo)
+            self.assertNotEqual(0,raw.returncode); self.assertIn(f"safe.directory={repo.resolve()}",raw.args)
+            raw_error=h._git_failure("frozen base-commit validation","git rev-parse",raw,bound)
+            self.assertEqual(raw.stderr,raw_error.diagnostic["git_stderr"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); repo,commit=self.synthetic_repo(root); invocation=self.invocation(cell,repo,commit)
+            bad=dict(invocation, cell=dict(invocation["cell"],base_commit="missing"))
+            with self.assertRaises(h.FormalDataError) as raised: h.materialize_workspace(root,bad)
+            self.assertEqual("frozen base-commit validation",raised.exception.diagnostic["stage"])
+            self.assertNotEqual(0,raised.exception.diagnostic["git_returncode"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); repo,commit=self.synthetic_repo(root); invocation=self.invocation(cell,repo,commit)
+            (root/"worktrees"/h.artifact_key(cell["cell_id"])).mkdir(parents=True)
+            with self.assertRaises(h.FormalDataError) as raised: h.materialize_workspace(root,invocation)
+            self.assertEqual("workspace existence check",raised.exception.diagnostic["operation"])
+            self.assertIsNone(raised.exception.diagnostic["git_returncode"])
     def test_git_trust_is_scoped_to_exact_source_and_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); repo,commit=self.synthetic_repo(root)

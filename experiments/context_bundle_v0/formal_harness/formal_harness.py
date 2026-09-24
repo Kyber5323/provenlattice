@@ -42,6 +42,10 @@ FROZEN_CASES = {
 class FormalDataError(ValueError):
     """Fail-closed validation failure; no effect aggregate may be produced."""
 
+    def __init__(self, message: str, diagnostic: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
 
 _VALIDATED_ENVIRONMENT_SEAL = object()
 
@@ -310,6 +314,27 @@ def _revision(repo: Path, approved_repo: Path, ref: str = "HEAD") -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _git_failure(stage: str, operation: str, result: subprocess.CompletedProcess,
+                 invocation: dict[str, Any], workspace: Path | None = None) -> FormalDataError:
+    """Make a fail-closed Git failure reproducible without writing formal evidence."""
+    cell = invocation["cell"]
+    argv = result.args if isinstance(result.args, list) else [str(result.args)]
+    return FormalDataError(f"Git failure during {stage}", {
+        "schema": "d9-c6-a4c-git-failure-v1",
+        "stage": stage,
+        "operation": operation,
+        "cell_id": cell["cell_id"],
+        "execution_binding_sha256": invocation.get("binding_sha256"),
+        "source_repo": invocation.get("approved_source_repository"),
+        "target_workspace": str(workspace) if workspace else None,
+        "expected_base_commit": cell["base_commit"],
+        "git_argv": argv,
+        "git_returncode": result.returncode,
+        "git_stdout": result.stdout,
+        "git_stderr": result.stderr,
+    })
+
+
 def materialize_workspace(artifact_root: Path, invocation: dict[str, Any]) -> Path:
     """Create one clean detached workspace, permanently bound to one cell."""
     cell = invocation["cell"]
@@ -320,18 +345,32 @@ def materialize_workspace(artifact_root: Path, invocation: dict[str, Any]) -> Pa
     if _canonical(source) != _canonical(approved_source) or _canonical(workspace.parent) != _canonical(workspace_root):
         raise FormalDataError("source or workspace path is outside dispatcher contract")
     if workspace.exists():
-        raise FormalDataError("workspace already exists; cell cannot be reused")
+        raise FormalDataError("workspace already exists; cell cannot be reused", {
+            "schema": "d9-c6-a4c-git-failure-v1", "stage": "detached-worktree materialization",
+            "operation": "workspace existence check", "cell_id": cell["cell_id"],
+            "execution_binding_sha256": invocation.get("binding_sha256"), "source_repo": str(approved_source),
+            "target_workspace": str(workspace), "expected_base_commit": cell["base_commit"],
+            "git_returncode": None, "git_stdout": "", "git_stderr": "workspace already exists",
+        })
     source_status = _git(source, ["status", "--porcelain"], approved_source)
-    if source_status.returncode != 0 or source_status.stdout.strip():
-        raise FormalDataError("source repository is dirty")
-    if not _revision(source, approved_source, cell["base_commit"]):
-        raise FormalDataError("frozen base commit is unavailable")
+    if source_status.returncode != 0:
+        raise _git_failure("source clean-state validation", "git status --porcelain", source_status, invocation, workspace)
+    if source_status.stdout.strip():
+        raise _git_failure("source clean-state validation", "git status --porcelain", source_status, invocation, workspace)
+    base_check = _git(source, ["rev-parse", cell["base_commit"]], approved_source)
+    if base_check.returncode != 0:
+        raise _git_failure("frozen base-commit validation", "git rev-parse", base_check, invocation, workspace)
     added = _git(source, ["worktree", "add", "--detach", str(workspace), cell["base_commit"]], approved_source)
     if added.returncode != 0:
-        raise FormalDataError("workspace materialization failed")
+        raise _git_failure("detached-worktree materialization", "git worktree add", added, invocation, workspace)
+    workspace_head = _git(workspace, ["rev-parse", "HEAD"], workspace)
     workspace_status = _git(workspace, ["status", "--porcelain"], workspace)
-    if _revision(workspace, workspace) != cell["base_commit"] or workspace_status.returncode != 0 or workspace_status.stdout.strip():
-        raise FormalDataError("workspace commit or cleanliness validation failed")
+    if workspace_head.returncode != 0:
+        raise _git_failure("workspace HEAD validation", "git rev-parse HEAD", workspace_head, invocation, workspace)
+    if workspace_head.stdout.strip() != cell["base_commit"]:
+        raise _git_failure("workspace HEAD validation", "git rev-parse HEAD", workspace_head, invocation, workspace)
+    if workspace_status.returncode != 0 or workspace_status.stdout.strip():
+        raise _git_failure("workspace clean-state validation", "git status --porcelain", workspace_status, invocation, workspace)
     binding = artifact_root / "worktree-bindings" / f"{artifact_key(cell['cell_id'])}.json"
     binding.parent.mkdir(parents=True, exist_ok=True)
     _atomic_json(binding, {"cell_id": cell["cell_id"], "workspace": str(workspace), "base_commit": cell["base_commit"], "dispatcher_version": DISPATCHER_VERSION})

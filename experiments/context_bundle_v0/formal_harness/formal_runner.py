@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-from formal_harness import (construct_formal_invocation, dispatch_cell,
+from formal_harness import (FormalDataError, construct_formal_invocation, dispatch_cell,
                             load_canonical_bundle, preflight_formal_execution,
                             prepare_cell_execution, validate_frozen_execution_binding,
                             subprocess_executor, write_materialization_readiness)
@@ -58,4 +59,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except FormalDataError as exc:
+        print(json.dumps({"state": "FORMAL_PREPARE_FAILED", "message": str(exc),
+                          "diagnostic": exc.diagnostic}), file=sys.stderr)
+        raise SystemExit(2)

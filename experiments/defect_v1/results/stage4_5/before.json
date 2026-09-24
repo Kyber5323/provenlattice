@@ -1,0 +1,252 @@
+{
+ "instrument": "experiments/defect_v1/coverage.py",
+ "label": "stage4.5 before: stage-4 code + stage-4 database",
+ "population_limit": 1000000,
+ "repositories": {
+  "llama69": {
+   "candidates_returned": 1000743,
+   "coverage": {
+    "lock_order": {
+     "candidates": 0,
+     "candidates_by_key": {},
+     "disqualified_no_threads": 0,
+     "inverted_pairs": 0,
+     "lock_pairs": 3,
+     "lock_points": 255,
+     "max_hops": 64,
+     "methods_with_locks": 218,
+     "points_by_type": {
+      "ALLOC": 1792,
+      "ATOMIC": 56,
+      "BRANCH": 39755,
+      "CALL": 208128,
+      "CHECK": 4451,
+      "DEREFERENCE": 115945,
+      "EXIT": 14959,
+      "LOCK": 255,
+      "RELEASE": 368,
+      "RETURN": 22011,
+      "THREAD_JOIN": 317,
+      "THREAD_SPAWN": 318,
+      "THROW": 3471,
+      "UNLOCK": 26
+     },
+     "reentrant_acquires": 0,
+     "semantic_edges": 421647,
+     "semantic_points": 411852,
+     "spawn_points": 318,
+     "unidentified_lock_points": 231
+    },
+    "race_condition": {
+     "candidates": 1463722,
+     "candidates_by_key": {
+      "1.1": 1463722
+     },
+     "disqualified_atomic_both_sides": 0,
+     "disqualified_same_lock": 0,
+     "join_points": 317,
+     "max_hops": 64,
+     "may_parallel_decided": true,
+     "points_by_type": {
+      "ALLOC": 1792,
+      "ATOMIC": 56,
+      "BRANCH": 39755,
+      "CALL": 208128,
+      "CHECK": 4451,
+      "DEREFERENCE": 115945,
+      "EXIT": 14959,
+      "LOCK": 255,
+      "RELEASE": 368,
+      "RETURN": 22011,
+      "THREAD_JOIN": 317,
+      "THREAD_SPAWN": 318,
+      "THROW": 3471,
+      "UNLOCK": 26
+     },
+     "read_read_pairs": 1948264,
+     "resolved_thread_functions": 7,
+     "semantic_edges": 421647,
+     "semantic_points": 411852,
+     "spawn_points": 318,
+     "subjects_considered": 267544,
+     "subjects_multi_method": 6793,
+     "synchronization_subjects": 43
+    },
+    "resource_lifetime": {
+     "acquire_points": 2047,
+     "candidates": 743,
+     "candidates_by_key": {
+      "4.1": 713,
+      "4.6": 30
+     },
+     "excluded_raii_locks": 49,
+     "include_locks": true,
+     "max_hops": 64,
+     "max_paths": 8,
+     "paths": 1357,
+     "points_by_type": {
+      "ALLOC": 1792,
+      "ATOMIC": 56,
+      "BRANCH": 39755,
+      "CALL": 208128,
+      "CHECK": 4451,
+      "DEREFERENCE": 115945,
+      "EXIT": 14959,
+      "LOCK": 255,
+      "RELEASE": 368,
+      "RETURN": 22011,
+      "THREAD_JOIN": 317,
+      "THREAD_SPAWN": 318,
+      "THROW": 3471,
+      "UNLOCK": 26
+     },
+     "semantic_edges": 421647,
+     "semantic_points": 411852,
+     "subjects": 158
+    }
+   },
+   "database": "D:/代码理解/测试代码仓/llama.cpp-69/.provenlattice/codegraph.db",
+   "database_size": 1279168512,
+   "edges": 421647,
+   "events": 396893,
+   "limits": {
+    "lock_order": {
+     "population_capped": false,
+     "recall_truncated": false
+    },
+    "race_condition": {
+     "population_capped": true,
+     "recall_truncated": true
+    },
+    "resource_lifetime": {
+     "population_capped": false,
+     "recall_truncated": true
+    }
+   },
+   "query_time_ms": 130399.68189998763,
+   "repo_id": "repo:ef2ce98ec6a9d679827780cf3c5d1cbd8d6827d7ad987ac23fad22c00f903f8f"
+  },
+  "redis50": {
+   "candidates_returned": 557372,
+   "coverage": {
+    "lock_order": {
+     "candidates": 2,
+     "candidates_by_key": {
+      "1.4": 2
+     },
+     "disqualified_no_threads": 0,
+     "inverted_pairs": 0,
+     "lock_pairs": 0,
+     "lock_points": 44,
+     "max_hops": 64,
+     "methods_with_locks": 40,
+     "points_by_type": {
+      "ALLOC": 41,
+      "BRANCH": 21189,
+      "CALL": 55231,
+      "CHECK": 4304,
+      "DEREFERENCE": 44928,
+      "EXIT": 6640,
+      "LOCK": 44,
+      "RELEASE": 77,
+      "RETURN": 11900,
+      "THREAD_JOIN": 38,
+      "THREAD_SPAWN": 36,
+      "THROW": 1519,
+      "UNLOCK": 43
+     },
+     "reentrant_acquires": 2,
+     "semantic_edges": 162268,
+     "semantic_points": 145990,
+     "spawn_points": 36,
+     "unidentified_lock_points": 1
+    },
+    "race_condition": {
+     "candidates": 557315,
+     "candidates_by_key": {
+      "1.1": 557315
+     },
+     "disqualified_atomic_both_sides": 0,
+     "disqualified_same_lock": 2,
+     "join_points": 38,
+     "max_hops": 64,
+     "may_parallel_decided": true,
+     "points_by_type": {
+      "ALLOC": 41,
+      "BRANCH": 21189,
+      "CALL": 55231,
+      "CHECK": 4304,
+      "DEREFERENCE": 44928,
+      "EXIT": 6640,
+      "LOCK": 44,
+      "RELEASE": 77,
+      "RETURN": 11900,
+      "THREAD_JOIN": 38,
+      "THREAD_SPAWN": 36,
+      "THROW": 1519,
+      "UNLOCK": 43
+     },
+     "read_read_pairs": 1137753,
+     "resolved_thread_functions": 22,
+     "semantic_edges": 162268,
+     "semantic_points": 145990,
+     "spawn_points": 36,
+     "subjects_considered": 97579,
+     "subjects_multi_method": 1987,
+     "synchronization_subjects": 17
+    },
+    "resource_lifetime": {
+     "acquire_points": 85,
+     "candidates": 55,
+     "candidates_by_key": {
+      "4.1": 35,
+      "4.6": 20
+     },
+     "excluded_raii_locks": 0,
+     "include_locks": true,
+     "max_hops": 64,
+     "max_paths": 8,
+     "paths": 114,
+     "points_by_type": {
+      "ALLOC": 41,
+      "BRANCH": 21189,
+      "CALL": 55231,
+      "CHECK": 4304,
+      "DEREFERENCE": 44928,
+      "EXIT": 6640,
+      "LOCK": 44,
+      "RELEASE": 77,
+      "RETURN": 11900,
+      "THREAD_JOIN": 38,
+      "THREAD_SPAWN": 36,
+      "THROW": 1519,
+      "UNLOCK": 43
+     },
+     "semantic_edges": 162268,
+     "semantic_points": 145990,
+     "subjects": 37
+    }
+   },
+   "database": "D:/代码理解/测试代码仓/redis-50/.provenlattice/codegraph.db",
+   "database_size": 398163968,
+   "edges": 162268,
+   "events": 139350,
+   "limits": {
+    "lock_order": {
+     "population_capped": false,
+     "recall_truncated": false
+    },
+    "race_condition": {
+     "population_capped": false,
+     "recall_truncated": false
+    },
+    "resource_lifetime": {
+     "population_capped": false,
+     "recall_truncated": true
+    }
+   },
+   "query_time_ms": 23564.77199998335,
+   "repo_id": "repo:b7bfa28657886ca3a28f4bb63099b839bea5a41fcaf36bba0cfd94360956bf8d"
+  }
+ }
+}

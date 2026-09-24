@@ -1,0 +1,75 @@
+# Semantic event vocabulary for Python.
+#
+# Python is here to exercise the extraction, incremental and parity machinery
+# against this repository itself, not because its defect families are valuable
+# (appendix B.3: GC and the GIL remove most of what C/C++ vocabularies target).
+# Read the absences below as findings, not as gaps to be filled.
+#
+# Matcher axes are the same three as cpp.toml; `syntax` names are tree-sitter
+# Python node types.
+
+language = "python"
+display = "Python"
+extensions = [".py", ".pyi"]
+
+call_syntax = ["call"]
+# Left empty on purpose. Python has no RAII: `with open(p) as f:` acquires by
+# entering a block, which is a `with_statement`, not a declaration. Teaching
+# this file to read that is a separate job, so until then the implicit acquire
+# of a `with` is simply not extracted -- visibly missing rather than assumed.
+declaration_syntax = []
+
+[events.CALL]
+syntax = ["call"]
+
+[events.RETURN]
+syntax = ["return_statement"]
+
+[events.THROW]
+syntax = ["raise_statement"]
+calls = ["exit", "quit", "abort"]
+qualified = ["sys.exit", "os._exit", "os.abort"]
+
+# Python has no explicit heap allocation to match on -- object construction is
+# implicit and reclamation is the GC's job. `list()`, `dict()` and `object()`
+# are the literal translations of `malloc` and would match nearly every line of
+# every file. The handle-allocating operations that do matter for lifetime
+# analysis (open, socket, Popen) belong to OPEN, which is level 1 and therefore
+# not extracted in stage 2.
+[events.ALLOC]
+absent = "no explicit heap allocation in the language; reclamation is the GC's job"
+
+# `close()` is the release that matters for handles. It is listed here rather
+# than under CLOSE so that a leak query written against the C/C++ shape --
+# "acquire, then never release" -- keeps working unchanged in Python.
+[events.RELEASE]
+calls = ["close"]
+
+[events.LOCK]
+calls = ["acquire"]
+qualified = [
+  "threading.Lock", "threading.RLock", "threading.Semaphore",
+  "threading.BoundedSemaphore", "threading.Condition",
+  "multiprocessing.Lock", "multiprocessing.RLock",
+]
+
+[events.UNLOCK]
+calls = ["release"]
+
+# CPython offers no atomic primitive that a pure-Python caller can reach; the
+# interpreter's own guarantees live behind the GIL, not behind an API. A
+# non-empty list here would be inventing evidence.
+[events.ATOMIC]
+absent = "no atomic primitive is reachable from pure Python; the GIL is not an API"
+
+[events.THREAD_SPAWN]
+calls = ["submit", "start"]
+qualified = [
+  "threading.Thread", "threading.Timer",
+  "multiprocessing.Process", "multiprocessing.Pool",
+  "concurrent.futures.ThreadPoolExecutor",
+  "concurrent.futures.ProcessPoolExecutor",
+]
+
+[events.THREAD_JOIN]
+calls = ["join", "shutdown", "wait"]

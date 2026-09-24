@@ -8,9 +8,12 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
+from provenlattice import storage
 from provenlattice.graph import full_index
+from provenlattice.identity import repository_id
 from provenlattice.incremental import incremental_update
 from provenlattice.query import GraphQuery
+from provenlattice.storage import SQLiteStorage
 
 
 REVISION_A = """from module_b.util import helper
@@ -120,6 +123,24 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(updated["delta"]["boundary_dirty"], [])
         self.assertEqual(len(updated["delta"]["shards_updated"]), 1)
         self.assertGreater(updated["delta"]["references_reused"], 0)
+
+    def test_subgraph_parity_across_id_binding_strategies(self) -> None:
+        """Above ID_BIND_LIMIT ids, traversal switches from bound placeholders to
+        a temp-table join. No other test reaches that branch — the fixtures are
+        all far below the limit — so force it and require identical results."""
+        database = Path(self.temp.name) / "graph.db"
+        full_index(self.root, database)
+        with GraphQuery(database) as query:
+            bound = query.get_subgraph("module_a.service.run", max_hops=2, max_nodes=50)
+        original = storage.ID_BIND_LIMIT
+        storage.ID_BIND_LIMIT = 1
+        try:
+            with GraphQuery(database) as query:
+                joined = query.get_subgraph("module_a.service.run", max_hops=2, max_nodes=50)
+        finally:
+            storage.ID_BIND_LIMIT = original
+        self.assertTrue(bound["data"]["nodes"])
+        self.assertEqual(bound["data"], joined["data"])
 
     def test_full_incremental_parity_for_required_changes(self) -> None:
         incremental_db = Path(self.temp.name) / "incremental.db"
@@ -257,6 +278,178 @@ class IntegrationTests(unittest.TestCase):
             boundary_refs = query.get_boundary_references("module_b.util.helper")
         self.assertTrue(any(item["path"] == "module_b" for item in dependencies["data"]))
         self.assertTrue(boundary_refs["data"])
+
+
+class TargetedLoaderTests(unittest.TestCase):
+    """The 0.3 loaders (appendix A) must return exactly what the old full-table
+    dumps returned after Python filtering. Each test pins one loader against
+    that ground truth, computed from the same database."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "repo"
+        write(self.root / "module_a" / "service.py", REVISION_A)
+        write(
+            self.root / "module_b" / "util.py",
+            "def helper(value: int) -> int:\n    return value + 1\n\n"
+            "def second() -> int:\n    return helper(1)\n",
+        )
+        write(self.root / "module_c" / "api.py", "def extra(value: int) -> int:\n    return value - 1\n")
+        self.database = Path(self.temp.name) / "graph.db"
+        full_index(self.root, self.database)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_snapshot_columns_reads_exactly_the_named_columns(self) -> None:
+        with SQLiteStorage(self.database) as store:
+            full = store.snapshot_ids("nodes")
+            slim = store.snapshot_columns("nodes", ("id", "kind", "source_hash"))
+        self.assertEqual(set(slim), set(full))
+        for node_id, row in slim.items():
+            self.assertEqual(set(row), {"id", "kind", "source_hash"})
+            self.assertEqual(row["kind"], full[node_id]["kind"])
+
+    def test_nodes_for_files_equals_the_full_scan_filtered(self) -> None:
+        with SQLiteStorage(self.database) as store:
+            full = store.snapshot_ids("nodes")
+            wanted = {row["id"] for row in full.values() if row["kind"] == "File"}
+            changed = set(list(wanted)[:2])  # two arbitrary files
+            targeted = store.nodes_for_files(changed)
+        shared = ("file_id", "shard_id", "kind", "name", "qualified_name")
+        expected = {
+            row["id"]: {key: row[key] for key in shared}
+            for row in full.values() if row["file_id"] in changed
+        }
+        self.assertTrue(targeted)
+        self.assertEqual(
+            expected,
+            {row["id"]: {key: row[key] for key in shared} for row in targeted},
+        )
+        # Slim: no fat metadata column tags along.
+        self.assertTrue(all("metadata" not in row for row in targeted))
+
+    def test_nodes_metadata_covers_every_non_file_node_and_no_file_node(self) -> None:
+        with SQLiteStorage(self.database) as store:
+            full = store.snapshot_ids("nodes")
+            metadata = store.nodes_metadata()
+        file_ids = {row["id"] for row in full.values() if row["kind"] == "File"}
+        symbol_ids = set(full) - file_ids
+        self.assertTrue(file_ids.isdisjoint(metadata))
+        self.assertEqual(set(metadata), symbol_ids)
+        for node_id, raw in metadata.items():
+            self.assertEqual(json.loads(raw), json.loads(full[node_id]["metadata"]))
+
+    def test_boundary_edges_equals_the_full_scan_filtered(self) -> None:
+        with SQLiteStorage(self.database) as store:
+            full = store.snapshot_ids("edges")
+            boundary = store.boundary_edges()
+        shared = ("src_id", "dst_id", "metadata")
+        expected = {
+            edge_id: {key: row[key] for key in shared} for edge_id, row in full.items()
+            if json.loads(row["metadata"]).get("scope") == "boundary"
+        }
+        self.assertEqual(
+            {edge_id: {key: row[key] for key in shared} for edge_id, row in boundary.items()},
+            expected,
+        )
+        self.assertEqual(set(boundary), set(expected))
+
+
+    def test_boundary_edges_matches_the_old_substring_check(self) -> None:
+        with SQLiteStorage(self.database) as store:
+            full = store.snapshot_ids("edges")
+            boundary = store.boundary_edges()
+        substring_ids = {
+            edge_id for edge_id, row in full.items()
+            if '"scope": "boundary"' in row.get("metadata", "")
+            or '"scope":"boundary"' in row.get("metadata", "")
+        }
+        self.assertEqual(set(boundary), substring_ids)
+
+    def test_raw_reference_cache_exclusions_equal_full_then_filtered(self) -> None:
+        repo_id = repository_id(self.root)
+        with SQLiteStorage(self.database) as store:
+            full = store.raw_reference_cache(repo_id)
+        all_rows = list(full.values())
+        excluded_files = {all_rows[0]["file_id"]}
+        excluded_ids = {all_rows[1]["id"]}
+        with SQLiteStorage(self.database) as store:
+            targeted = store.raw_reference_cache(
+                repo_id,
+                exclude_file_ids=excluded_files,
+                exclude_ids=excluded_ids,
+            )
+        expected = {
+            row["id"]: row for row in all_rows
+            if row["file_id"] not in excluded_files and row["id"] not in excluded_ids
+        }
+        self.assertEqual(targeted, expected)
+
+
+class ExpressionIndexTests(unittest.TestCase):
+    """Stage 0.4 (appendix A): `layer` lives inside the metadata JSON but is
+    queried as a column, so the SCHEMA carries expression indexes. These tests
+    pin the planner, not just the DDL: the knowledge layer's exact spellings
+    must be answered by the indexes without reading the fat metadata blobs.
+    Every EXPLAIN opens a fresh connection -- a cached statement keeps the
+    plan it was compiled with even after the schema changed."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "repo"
+        write(self.root / "module_a" / "service.py", REVISION_A)
+        write(
+            self.root / "module_b" / "util.py",
+            "def helper(value: int) -> int:\n    return value + 1\n\n"
+            "def second() -> int:\n    return helper(1)\n",
+        )
+        write(self.root / "module_c" / "api.py", "def extra(value: int) -> int:\n    return value - 1\n")
+        self.database = Path(self.temp.name) / "graph.db"
+        full_index(self.root, self.database)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def plans(self, sql: str) -> list[str]:
+        with closing(sqlite3.connect(self.database)) as connection:
+            return [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql)]
+
+    def test_bare_layer_predicate_searches_instead_of_scanning(self) -> None:
+        # knowledge.py spells the predicate without whitespace; the planner
+        # matches on the parsed expression, so this must share the index.
+        plan = self.plans(
+            "SELECT id FROM nodes WHERE json_extract(metadata,'$.layer')='knowledge'"
+        )
+        self.assertTrue(any(
+            p.startswith("SEARCH nodes USING INDEX idx_nodes_layer (") for p in plan
+        ), plan)
+        spaced = self.plans(
+            "SELECT id FROM nodes WHERE json_extract(metadata, '$.layer') = 'knowledge'"
+        )
+        self.assertTrue(any(
+            p.startswith("SEARCH nodes USING INDEX idx_nodes_layer (") for p in spaced
+        ), spaced)
+
+    def test_edges_layer_predicate_searches_instead_of_scanning(self) -> None:
+        plan = self.plans(
+            "SELECT id FROM edges WHERE json_extract(metadata,'$.layer')='knowledge'"
+        )
+        self.assertTrue(any(
+            p.startswith("SEARCH edges USING INDEX idx_edges_layer (") for p in plan
+        ), plan)
+
+    def test_coalesced_count_is_answered_by_the_index_alone(self) -> None:
+        # The != predicate cannot do an equality lookup, but the COALESCE
+        # index covers the expression, so the COUNT must still be answered
+        # from the index -- never by scanning the ~95%-of-the-table metadata.
+        plan = self.plans(
+            "SELECT COUNT(*) FROM nodes "
+            "WHERE COALESCE(json_extract(metadata, '$.layer'), 'code') != 'knowledge'"
+        )
+        self.assertTrue(any(
+            "USING COVERING INDEX idx_nodes_layer_coalesced" in p for p in plan
+        ), plan)
 
 
 if __name__ == "__main__":

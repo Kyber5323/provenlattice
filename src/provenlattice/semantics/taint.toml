@@ -1,0 +1,209 @@
+# Declared taint vocabulary: which calls bring untrusted input in, and which
+# positions of which calls are dangerous to hand it to.
+#
+# This is the one part of the taint layer that cannot be read out of the graph:
+# that `getenv`'s return value is a byte string the program did not author, or
+# that `memcpy`'s second argument is a source buffer rather than a destination.
+# Everything else about a taint path is read from the graph -- the DATA_FLOW_TO
+# rows stage 5B mints carry the value from a definition to the call argument
+# that consumes it, and `raw_references` carries the callee's spelling.
+#
+# Every entry carries `evidence`: paths into a corpus, lines, and a statement a
+# reader can check against the source. An entry without checkable evidence is
+# folklore, and folklore that silently *creates* findings is worse than no entry
+# at all. The loader refuses a file where one is missing.
+#
+# Two scope statements, made openly because the alternative is pretending:
+#
+#   1. There is no sanitiser model. A path that passes through a validation or
+#      escaping function is still reported. `defect-evidence-matrix-v1.md` puts
+#      a full taint analysis -- SOURCE/SINK + DATA_FLOW_TO + sanitiser
+#      identification -- outside V2 (:286, "needs complete taint analysis ...
+#      outside V2 scope"). This file is the registered minimum the roadmap
+#      (B.4 stage 6) asked for, and a registered minimum is not that analysis:
+#      its candidate rule is structurally weak and its precision is expected to
+#      be poor. That is a property of the design, not a bug to be papered over.
+#
+#   2. A name is matched as the *global function* it is, never as a method that
+#      happens to end in the same word. Two facts have to hold: `raw_name` is
+#      exactly one of the declared `spellings`, and `target_module` is empty.
+#      The corpus shows why both are needed. Module-qualified calls arrive with
+#      the attribute in `raw_name` and the module in `target_module`, so C's
+#      `system(...)` and Python's `platform.system()` are both spelled `system`
+#      -- in llama.cpp-69, exactly 2 of the 7 `system` rows have an empty
+#      `target_module` (app/llama.cpp:33,35) and the other 5 carry
+#      `target_module = platform` (scripts/snapdragon/build.py:37,73,85 and two
+#      more). Matching the bare word alone would read a platform query as shell
+#      execution. Namespace qualifiers are *not* module qualifiers: the
+#      extractor renders `::` as `.`, so `std::getenv` arrives as `std.getenv`
+#      with an empty `target_module` and is declared as its own spelling.
+#
+#   3. Positions are checked against the graph's *rooted* argument list, which
+#      is compacted: `_call_arguments` keeps only the arguments that have a
+#      root identifier, so `redisFormatCommand(&cmd, "LRANGE %s", tag)` arrives
+#      as two entries and a literal format string leaves no trace. An index in
+#      that list is the true argument position only when nothing before it was
+#      dropped -- which is why every entry declares `arity` (the argument count
+#      a call must have, which proves the list is complete) and why the one
+#      variadic entry declares position 0 only. The residual is registered, not
+#      hidden: a call whose argument list is shorter than the arity, or a
+#      variadic sink whose format is not the first argument, produces no
+#      candidate at all. A positional argument fact would lift the restriction;
+#      this file declares what the graph can currently prove.
+#
+# `ordinals` are 0-based argument positions. A callee can have more than one
+# dangerous position and they are not interchangeable: `memcpy`'s source and
+# its length are both sinks for different reasons, while its destination is not
+# a sink at all. A call whose argument root does not sit at a declared ordinal
+# produces no candidate -- the position is what makes the claim checkable.
+
+note = """
+The evidence column is what makes a candidate auditable: a reader who disagrees
+with an entry can open the cited line and see whether the claim holds.
+
+What each side claims is deliberately narrow.
+
+A `source` claims only that the bytes the call returns were not written by the
+program: the environment it inherited, the contents of a stream or descriptor.
+It does not claim the bytes are *hostile* -- whether a given environment
+variable or file is attacker-controlled is a deployment question the graph
+cannot answer, and that question is left to the reader (`_MISSING_SOURCE_TRUST`
+in the defect layer's evidence bundle says so in as many words).
+
+A `sink` claims only that the declared position is interpreted rather than
+merely read: a format string, a copy length, a buffer to read into, a command
+line handed to a shell. Handing untrusted bytes to a *data* argument of the
+same call is the correct use of that call and is deliberately not declared.
+
+Neither side says anything about a path between them. A candidate means "a
+value from a source reached a sink position"; it does not mean the path is
+reachable, that the value is still tainted on arrival, or that anything
+exploitable happens. Those are exactly the questions the matrix leaves to the
+AI side, and the candidate's evidence bundle names them.
+"""
+
+# ---------------------------------------------------------------------------
+# Sources: calls whose return value the program did not author.
+
+[[source]]
+name = "getenv"
+spellings = ["getenv", "std.getenv"]
+evidence = """
+redis-50 src/redis-cli.c:363 `path = getenv(envoverride);` -- the returned
+pointer addresses the environment the process inherited, which no code in this
+corpus wrote. Line 364 tests it for NULL and emptiness and line 365 compares it
+against "/dev/null", so the value is not merely read, it decides behaviour.
+llama.cpp-69 common/arg.cpp:137 `char * value = std::getenv(env);` stores the
+result into `output` (line 139) and returns it to the caller as a parameter
+value; the neighbouring line 131 does the same for the LLAMA_ARG_NO_ form.
+Both sites are why the claim is about provenance and not about hostility: an
+environment variable is as trustworthy as the process that spawned this one.
+"""
+
+[[source]]
+name = "fread"
+spellings = ["fread", "std.fread"]
+evidence = """
+redis-50 modules/vector-sets/w2v.c:242-244 reads a two-byte length
+(`fread(&wlen,2,1,fp)`) and then that many bytes into a heap buffer
+(`fread(word,wlen,1,fp)`): the file decides both the size and the contents, and
+the buffer is allocated from the size the file gave. llama.cpp-69
+examples/convert-llama2c-to-ggml/convert-llama2c-to-ggml.cpp:158-161 fills the
+weight tensors the same way from a checkpoint file. A stream's contents are the
+definitional untrusted input for a program that opens files it did not write.
+"""
+
+[[source]]
+name = "read"
+spellings = ["read"]
+evidence = """
+redis-50 src/childinfo.c:131 `read(server.child_info_pipe[0], (char *)&buffer +
+server.child_info_nread, wlen - server.child_info_nread)` fills a buffer from a
+file descriptor and src/cli_common.c:203 `read(fileno(stdin),buf,1024)` reads
+stdin into a caller buffer; src/bio.c:428 drains a descriptor the same way.
+Only the global `read` is declared. The corpora spell a dozen other `read`s --
+`f.read` (34 calls in llama.cpp-69), `io.read` (54), `in.read` (15),
+`conn->type->read` (1 in redis-50) -- and each is an I/O object's own method
+whose semantics the evidence above says nothing about. A name that means a
+different thing in a different receiver cannot be declared by the bare word,
+which is why the spelling list is exact and `target_module` must be empty.
+"""
+
+[[source]]
+name = "fgets"
+spellings = ["fgets"]
+evidence = """
+redis-50 src/aof.c:290 `if (fgets(buf, MANIFEST_MAX_LINE+1, fp) == NULL)` and
+src/acl.c:2379 `while(fgets(buf,sizeof(buf),fp) != NULL)` read a line from a
+file into a caller-supplied buffer. llama.cpp-69
+ggml/src/ggml-cpu/ggml-cpu.cpp:303 reads /proc/cpuinfo this way and then
+`strchr`s the line for a colon -- file contents deciding control flow.
+"""
+
+# ---------------------------------------------------------------------------
+# Sinks: calls with a position that is interpreted rather than read.
+
+[[sink]]
+name = "memcpy"
+spellings = ["memcpy", "std.memcpy"]
+ordinals = [1, 2]
+arity = 3
+evidence = """
+Position 1 is the source buffer and position 2 the byte count: llama.cpp-69
+common/common.cpp:2131 `memcpy(data + idata*ne_datapoint, tokens.data() +
+idata*stride + 0, ne_datapoint*sizeof(llama_token))` reads exactly those two
+positions, and redis-50 modules/vector-sets/fastjson_test.c:349
+`memcpy(safe_page + offset, temp_json, truncated_len)` takes its length from a
+computed value. A value from outside that arrives at position 2 sets how many
+bytes are written (a write-length overflow); arriving at position 1 it sets
+what is read and written from it (an over-read). Position 0 is the destination
+and is deliberately not declared: a tainted destination is a write into
+attacker-influenced storage, which is a different claim than a taint sink.
+"""
+
+[[sink]]
+name = "printf"
+spellings = ["printf"]
+ordinals = [0]
+arity = 1
+variadic = true
+evidence = """
+Position 0 is the format string. llama.cpp-69 app/download.cpp:50
+`printf("%s\\n", params.models_preset.c_str())` shows the shape the corpus
+actually uses -- a literal at position 0 and data after it -- which is why the
+corpus produces no candidate here. The entry exists because the position is
+what a taint path would have to reach: a format string that came from outside
+the program has its conversion specifiers interpreted rather than printed
+(CWE-134), and the same call is perfectly safe when only its data arguments are
+untrusted. Positions >= 1 are not declared for exactly that reason.
+"""
+
+# `snprintf` is deliberately NOT declared, and the reason is the compaction
+# above rather than the call. Its dangerous position is 2, the format string --
+# llama.cpp-69 common/common.cpp:502 `snprintf(timestamp_ns, 11, "%09" PRId64,
+# ns)` and redis-50 modules/vector-sets/fastjson_test.c:134
+# `snprintf(buffer, max_len, "%.6g", num)` both put it there. In the rooted
+# argument list those calls arrive as two entries, because the literal format
+# was dropped, and so does the far more common `snprintf(buf, n, "%s", str)`:
+# its `str` lands at index 2 and would be read as the format position. A
+# variadic sink's position cannot be proven from a compacted list, and an entry
+# that silently creates findings is worse than no entry. The declaration comes
+# back the day the argument list carries positions.
+
+[[sink]]
+name = "system"
+spellings = ["system"]
+ordinals = [0]
+arity = 1
+evidence = """
+Position 0 is the command string, handed to a shell rather than executed
+directly. llama.cpp-69 app/llama.cpp:33 `return system("powershell -NoProfile
+-ExecutionPolicy Bypass -Command \\"irm https://llama.app/install.ps1 | iex\\"")`
+and line 35 `return system("curl -fsSL https://llama.app/install.sh | sh")` are
+the only two global `system` calls in either corpus, and both pass a literal --
+so no candidate is produced from this corpus, which is the honest outcome for
+an entry whose sites are all constants. The five other `system` rows in
+llama.cpp-69 carry `target_module = platform` (scripts/snapdragon/build.py:37
+and four more): they are Python's `platform.system()`, not this call, and the
+`target_module` rule is what keeps them out.
+"""

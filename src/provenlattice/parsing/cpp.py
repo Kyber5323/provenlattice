@@ -6,7 +6,12 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from ..models import ParsedFile, ParsedImport, ParsedReference, ParsedSymbol
+from ..semantics.vocabulary import Vocabulary
+from ..sparsecfg import CPP_PROFILE, SparseCfgBuilder
 from .base import ParseOutcome
+from .declarations import DeclarationIndex
+from .events import EventExtractor, OwnerIndex, OwnerSpan
+from .tree_sitter import event_vocabulary
 
 try:  # Keep the Python-only installation usable until C grammars are installed.
     import tree_sitter_c
@@ -27,9 +32,10 @@ def module_name(relative_path: str) -> str:
 class CppExtractor:
     """Normalize the conservative, syntax-only C/C++ Tree-sitter facts."""
 
-    def __init__(self, source: bytes, relative_path: str, language: str = "cpp") -> None:
+    def __init__(self, source: bytes, relative_path: str, language: str = "cpp", vocabulary: Vocabulary | None = None) -> None:
         self.source = source
         self.line_starts = [0, *(index + 1 for index, value in enumerate(source) if value == 10)]
+        self.relative_path = relative_path
         self.module = module_name(relative_path)
         self.language = language
         self.scope: list[tuple[str, str]] = []
@@ -40,6 +46,12 @@ class CppExtractor:
         self.callable_typedefs: set[str] = set()
         self.local_callables: set[str] = set()
         self.function_names: set[str] = set()
+        self.vocabulary = vocabulary
+        # Every symbol that can own events, recorded as it is created so the
+        # event layer reads the same identity the symbol layer published.
+        self.owner_spans: list[OwnerSpan] = []
+        self.skipped_events = 0
+        self.demoted_prototypes = 0
 
     def text(self, node: Any | None) -> str:
         return "" if node is None else self.source[node.start_byte:node.end_byte].decode("utf-8", "replace")
@@ -73,6 +85,35 @@ class CppExtractor:
             ]
             if references:
                 reference.metadata["function_reference_args"] = references[:4]
+        events = []
+        cfg = None
+        # Zero when there is no vocabulary: the declaration index is built from
+        # the same hits the events come from, so without them there is nothing
+        # to resolve against either.
+        recovered_qualifiers = 0
+        if self.vocabulary is not None:
+            owners = OwnerIndex(self.owner_spans)
+            line_of = lambda offset, end: bisect_right(self.line_starts, offset)  # noqa: E731
+            extractor = EventExtractor(self.source, self.vocabulary, owners, line_of)
+            # One matcher feeds both layers: the events and the CFG edges come
+            # from the same hits, so an operation cannot appear in one and be
+            # missing from the other.
+            hits = extractor.extract_hits(root)
+            events = [hit.event for hit in hits]
+            self.skipped_events = extractor.skipped_outside_owner
+            # The declarations are read from the same tree by a walker of their
+            # own, and handed to the CFG builder as a fact rather than looked up
+            # by it: the builder consumes facts, it does not produce them.
+            declarations = DeclarationIndex.build(self.source, self.relative_path, root)
+            recovered_qualifiers = declarations.recovered_qualifiers
+            # C and C++ share one profile today: they agree on every grammar
+            # fact the walker reads, and the two that differ (condition
+            # wrapper, subscript index field) are handled by trying
+            # alternatives. When they drift, the parser factory must hand each
+            # dialect its own profile.
+            cfg = SparseCfgBuilder(
+                self.source, owners, hits, line_of, CPP_PROFILE, declarations
+            ).build(root)
         deduplicated: dict[tuple[str, str, str], ParsedSymbol] = {}
         for symbol in self.symbols:
             key = (symbol.kind, symbol.qualified_name, symbol.signature)
@@ -85,7 +126,12 @@ class CppExtractor:
             if symbol.metadata.get("definition"):
                 symbol.metadata["declaration_lines"] = sorted(set(declaration_lines))
                 deduplicated[key] = symbol
-        return ParsedFile(list(deduplicated.values()), self.references, self.imports, parser="tree-sitter-cpp")
+        return ParsedFile(
+            list(deduplicated.values()), self.references, self.imports,
+            parser="tree-sitter-cpp", events=events, unowned_events=self.skipped_events,
+            demoted_local_prototypes=self.demoted_prototypes, cfg=cfg,
+            recovered_qualifier_parameters=recovered_qualifiers,
+        )
 
     def _walk(self, node: Any) -> None:
         kind = node.type
@@ -140,6 +186,35 @@ class CppExtractor:
         declarator = node.child_by_field_name("declarator")
         if declarator is None:
             declarator = next((child for child in node.named_children if "declarator" in child.type), None)
+        # A declaration only names a function when its declarator really is a
+        # function declarator. A variable's identifier is just as easy to read,
+        # so without this check `int x = 1;` becomes a Function symbol named
+        # `f.x` -- and returning True here stops the walk, which silently drops
+        # every call in the initialiser (`Foo *p = create();` produced no CALLS
+        # edge at all).
+        if node.type != "function_definition":
+            if self._find_function_declarator(declarator) is None:
+                return False
+            if node.type == "declaration" and self._in_function_body():
+                # Most-vexing-parse. Inside a body, `std::lock_guard<std::mutex>
+                # lock(mutex);` *is* a declaration whose declarator is a
+                # function declarator -- `lock(mutex)` reads as a prototype --
+                # but it declares a variable, and the parenthesised name is a
+                # constructor argument, not a parameter list. Promoting it made
+                # a one-line phantom Function symbol that then owned the
+                # declaration's byte span: the RAII acquisition inside it was
+                # attributed to the phantom, so every query that groups by owner
+                # could not see the lock at all (`llama.cpp` had 101 of these,
+                # named `lock`, `lk`, `guard`). A real prototype inside a body
+                # is rare and was itself a one-line phantom, so nothing of value
+                # is given up here.
+                #
+                # Counted only here, after the declarator check: the counter is
+                # the price of the heuristic, and `int n = 1;` -- a declaration
+                # in a body that was never going to become a symbol -- is not
+                # part of that price.
+                self.demoted_prototypes += 1
+                return False
         name = self._declarator_name(declarator)
         if not name:
             return False
@@ -160,6 +235,7 @@ class CppExtractor:
             self.local_callables.add(short_name)
         if node.type == "function_definition":
             self._collect_parameter_callables(declarator)
+        self.owner_spans.append(OwnerSpan(node.start_byte, node.end_byte, kind, qualified, signature))
         self.scope.append((short_name, kind))
         body = node.child_by_field_name("body")
         if body:
@@ -210,6 +286,17 @@ class CppExtractor:
                 return True
             stack.extend(current.named_children)
         return False
+    def _in_function_body(self) -> bool:
+        """Whether the walk is currently inside a function or method body.
+
+        The *innermost* scope is what decides, not any scope on the stack: a
+        class defined inside a function (`void f() { struct S { void g(); }; }`)
+        puts `S` on top, and `void g();` there is a real declaration that must
+        stay a symbol. Blocks are not scopes in this stack, so
+        `if (x) { void g(); }` still reads as being inside `f` -- which is the
+        one case this heuristic gives up, a local prototype in C.
+        """
+        return bool(self.scope) and self.scope[-1][1] in {"Function", "Method"}
 
     def _type(self, node: Any) -> None:
         name_node = node.child_by_field_name("name") or node.child_by_field_name("declarator")
@@ -365,4 +452,7 @@ class CppTreeSitterParser:
             changed_ranges = [{"start_byte": item.start_byte, "end_byte": item.end_byte,
                                "start_point": tuple(item.start_point), "end_point": tuple(item.end_point)}
                               for item in old_tree.changed_ranges(tree)]
-        return ParseOutcome(CppExtractor(source, relative_path, self.language).extract(tree.root_node), tree, changed_ranges)
+        # The C and C++ vocabularies are one file by design: the same POSIX and
+        # C11 calls appear in both, so `language` being "c" still means "cpp".
+        parsed = CppExtractor(source, relative_path, self.language, event_vocabulary("cpp")).extract(tree.root_node)
+        return ParseOutcome(parsed, tree, changed_ranges)

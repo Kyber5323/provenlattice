@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import time
 import uuid
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -369,17 +370,20 @@ class GraphView:
                     effective[delta.entity_id] = dict(delta.new_value or {})
         return list(effective.values())
 
+    def id_filter(self, values: Iterable[str]) -> AbstractContextManager[tuple[str, tuple]]:
+        return self.base.id_filter(values)
+
     def by_ids(self, entity_type: str, ids: Iterable[str]) -> list[dict]:
         values = sorted(set(ids))
         if not values:
             return []
         table, key = ENTITY_TABLES[entity_type]
-        placeholders = ",".join("?" for _ in values)
         wanted = set(values)
-        return self.query(
-            entity_type, f"SELECT * FROM {table} WHERE {key} IN ({placeholders})", tuple(values),
-            lambda row: row.get(key) in wanted,
-        )
+        with self.id_filter(values) as (sql, params):
+            return self.query(
+                entity_type, f"SELECT * FROM {table} WHERE {key} IN ({sql})", params,
+                lambda row: row.get(key) in wanted,
+            )
 
     def all(self, entity_type: str) -> list[dict]:
         table, _ = ENTITY_TABLES[entity_type]

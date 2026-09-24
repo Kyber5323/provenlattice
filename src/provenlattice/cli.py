@@ -4,15 +4,18 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from pprint import pprint
 
+from .defect import QUERY_NAMES
 from .graph import full_index
 from .incremental import incremental_update
 from .knowledge import index_knowledge
 from .analysis_query import query_analysis
 from .orchestrator import AnalysisRequestError, analyze_scope
 from .query import GraphQuery
+from .semantics import load_defect_patterns
 from .shard import BuildAwareShardStrategy, DirectoryShardStrategy, StructuralShardStrategy
 
 
@@ -38,6 +41,33 @@ def _database(args: argparse.Namespace) -> Path:
         return Path(args.database)
     repo = Path(getattr(args, "repo", ".")).resolve()
     return repo / ".provenlattice" / "codegraph.db"
+
+
+def defect_matrix() -> dict:
+    """The defect matrix as the pipeline sees it, without opening a database.
+
+    This is stage 4's acceptance question in machine-readable form: per pattern,
+    what *confirmation* still needs (`missing_events` / `missing_relations`) is
+    separate from what *candidate generation* needs
+    (`candidate_coverable_now`). 1.1 answering "no" and "yes" at once is the
+    point, not a contradiction.
+    """
+    return {
+        "patterns": [
+            {
+                "key": pattern.key, "name": pattern.name, "grade": pattern.grade,
+                "query": pattern.query, "expanded": pattern.expanded,
+                "coverable_now": pattern.coverable_now(),
+                "candidate_coverable_now": pattern.candidate_coverable_now(),
+                "missing_events": list(pattern.missing_events()),
+                "missing_relations": list(pattern.missing_relations()),
+                "candidate_missing_events": list(pattern.candidate_missing_events()),
+                "candidate_missing_relations": list(pattern.candidate_missing_relations()),
+            }
+            for pattern in load_defect_patterns()
+        ],
+        "queries": list(QUERY_NAMES),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -98,6 +128,32 @@ def build_parser() -> argparse.ArgumentParser:
     subgraph.add_argument("anchor")
     subgraph.add_argument("--max-hops", type=int, default=2)
     subgraph.add_argument("--max-nodes", type=int, default=100)
+
+    # Choices come from the matrix file, so a typo is a usage error while an
+    # unexpanded key (4.2) still reaches the query layer and gets its own
+    # "not expanded yet" message -- the two failures are different things.
+    defect = command("defect")
+    defect.add_argument(
+        "--type", default="all",
+        choices=["all", *[pattern.key for pattern in load_defect_patterns()], *QUERY_NAMES],
+        help="matrix key (4.1), query name (resource_lifetime), or all",
+    )
+    defect.add_argument("--subject")
+    defect.add_argument("--max-hops", type=int, default=64)
+    defect.add_argument("--max-paths", type=int, default=8)
+    defect.add_argument("--max-candidates", type=int, default=20)
+    defect.add_argument("--list", action="store_true",
+                        help="print the matrix and its coverage gaps; needs no database")
+    # The control column for stage 5C: the same code and the same database with
+    # the ownership layer off has to reproduce the pre-5C numbers exactly.
+    defect.add_argument("--no-contracts", action="store_true",
+                        help="disable the ownership/contract layer (control column)")
+    events = command("events")
+    events.add_argument("--type", dest="event_type")
+    events.add_argument("--owner")
+    events.add_argument("--file")
+    events.add_argument("--limit", type=int, default=200)
+    events.add_argument("--edges", action="store_true")
 
     def evidence_command(name: str, aliases: list[str] | None = None) -> argparse.ArgumentParser:
         child = subparsers.add_parser(name, aliases=aliases or [])
@@ -185,6 +241,10 @@ def run(args: argparse.Namespace) -> dict:
             return {"version": "task-context-v0", "status": "stale", "anchor": args.symbol,
                     "expected_base_commit": expected, "actual_base_commit": result.get("base_commit")}
         return result
+    if args.command == "defect" and args.list:
+        # Handled before the graph is opened: what a pattern needs is a fact
+        # about the vocabulary and the matrix, not about any repository.
+        return defect_matrix()
     with GraphQuery(database) as query:
         if args.command == "status":
             return query.status()
@@ -222,6 +282,17 @@ def run(args: argparse.Namespace) -> dict:
             }
         if args.command == "subgraph":
             return query.get_subgraph(args.anchor, args.max_hops, args.max_nodes)
+        if args.command == "defect":
+            return query.get_defect_candidates(
+                defect_type=args.type, subject=args.subject, max_hops=args.max_hops,
+                max_paths=args.max_paths, max_candidates=args.max_candidates,
+                use_contracts=not args.no_contracts,
+            )
+        if args.command == "events":
+            return query.get_semantic_events(
+                event_type=args.event_type, owner=args.owner, file=args.file,
+                limit=args.limit, include_edges=args.edges,
+            )
         budget = {"max_evidence": args.max_evidence, "max_symbols": args.max_symbols,
                   "max_edges": args.max_edges, "max_sections": args.max_sections}
         def configured(name: str, explicit):
@@ -254,6 +325,14 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = run(args)
     if args.json:
+        # A redirected stdout would otherwise be encoded in the console's
+        # locale (cp936 here), producing a JSON artifact the tool that wrote
+        # it cannot read back. Interactive output keeps the console's own
+        # encoding, which is the one the console can actually draw. Streams
+        # that cannot be reconfigured (a caller's StringIO) are left alone.
+        reconfigure = getattr(sys.stdout, "reconfigure", None)
+        if reconfigure is not None and not sys.stdout.isatty():
+            reconfigure(encoding="utf-8")
         print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
     else:
         pprint(result, sort_dicts=False)

@@ -1,0 +1,199 @@
+========================================================================
+loading after-db ...
+events 171553, edges 162268, access events 32203
+
+4.4.1 zero edges:
+  [OK] no READ/WRITE id among 162268 edge endpoints (leaked=0)
+
+running 1.1 on the after-db (max_candidates=BIG) ...
+candidates 281800 (truncated=False)
+
+4.3 evidence bundle, seven items per candidate:
+------------------------------------------------------------------------
+identity: name:server
+  [OK] event event:e78ffa926f... resolves to a row
+  side symbol:00659cfe0...  kind=write decided=True
+  [OK] identity facts reconcile with the candidate token: decl='' member='stat_active_defrag_hits' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: activeDefragFreeRaw
+  [OK] event span L192..L192 in src/defrag.c
+    expression: 'server.stat_active_defrag_hits'
+  [OK] event event:0005fe9e88... resolves to a row
+  side symbol:75a83a867...  kind=read decided=True
+  [OK] reader event has id and span (4339..4339)
+  [OK] identity facts reconcile with the candidate token: decl='' member='clients' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: getAllClientsInfoString
+  [OK] event span L4339..L4339 in src/networking.c
+    expression: 'server.clients'
+  [OK] anchor span src/networking.c:4339
+  [OK] two PROTECTED_BY facts (one per side)
+    protection: ambiguous  activeDefragFreeRaw  lock=''  no lock in this method
+    protection: ambiguous  getAllClientsInfoString  lock=''  no lock in this method
+  [OK] parallelism status: the repository starts threads somewhere, so neither method is ordered
+------------------------------------------------------------------------
+identity: name:server
+  [OK] event event:06a6d6fcea... resolves to a row
+  side symbol:019496ff6...  kind=write decided=True
+  [OK] identity facts reconcile with the candidate token: decl='' member='aof_buf' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: feedAppendOnlyFile
+  [OK] event span L1701..L1701 in src/aof.c
+    expression: 'server.aof_buf'
+  [OK] event event:0005fe9e88... resolves to a row
+  side symbol:75a83a867...  kind=read decided=True
+  [OK] reader event has id and span (4339..4339)
+  [OK] identity facts reconcile with the candidate token: decl='' member='clients' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: getAllClientsInfoString
+  [OK] event span L4339..L4339 in src/networking.c
+    expression: 'server.clients'
+  [OK] anchor span src/networking.c:4339
+  [OK] two PROTECTED_BY facts (one per side)
+    protection: ambiguous  feedAppendOnlyFile  lock=''  no lock in this method
+    protection: ambiguous  getAllClientsInfoString  lock=''  no lock in this method
+  [OK] parallelism status: the repository starts threads somewhere, so neither method is ordered
+------------------------------------------------------------------------
+identity: name:server
+  [OK] event event:141881af92... resolves to a row
+  side symbol:025cf6206...  kind=write decided=True
+  [OK] identity facts reconcile with the candidate token: decl='' member='repl_state' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: replicationSetMaster
+  [OK] event span L3665..L3665 in src/replication.c
+    expression: 'server.repl_state'
+  [OK] event event:0005fe9e88... resolves to a row
+  side symbol:75a83a867...  kind=read decided=True
+  [OK] reader event has id and span (4339..4339)
+  [OK] identity facts reconcile with the candidate token: decl='' member='clients' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: getAllClientsInfoString
+  [OK] event span L4339..L4339 in src/networking.c
+    expression: 'server.clients'
+  [OK] anchor span src/networking.c:4339
+  [OK] two PROTECTED_BY facts (one per side)
+    protection: ambiguous  replicationSetMaster  lock=''  no lock in this method
+    protection: ambiguous  getAllClientsInfoString  lock=''  no lock in this method
+  [OK] parallelism status: the repository starts threads somewhere, so neither method is ordered
+------------------------------------------------------------------------
+identity: name:server
+  [OK] event event:173aac96ba... resolves to a row
+  side symbol:02f507de7...  kind=write decided=True
+  [OK] identity facts reconcile with the candidate token: decl='' member='cmd_time_snapshot' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: processEventsWhileBlocked
+  [OK] event span L5771..L5771 in src/networking.c
+    expression: 'server.cmd_time_snapshot'
+  [OK] event event:0005fe9e88... resolves to a row
+  side symbol:75a83a867...  kind=read decided=True
+  [OK] reader event has id and span (4339..4339)
+  [OK] identity facts reconcile with the candidate token: decl='' member='clients' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: getAllClientsInfoString
+  [OK] event span L4339..L4339 in src/networking.c
+    expression: 'server.clients'
+  [OK] anchor span src/networking.c:4339
+  [OK] two PROTECTED_BY facts (one per side)
+    protection: ambiguous  processEventsWhileBlocked  lock=''  no lock in this method
+    protection: ambiguous  getAllClientsInfoString  lock=''  no lock in this method
+  [OK] parallelism status: the repository starts threads somewhere, so neither method is ordered
+------------------------------------------------------------------------
+identity: name:server
+  [OK] event event:3f88ea13f0... resolves to a row
+  side symbol:0430b84dc...  kind=write decided=True
+  [OK] identity facts reconcile with the candidate token: decl='' member='verbosity' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: sentinelConfigSetCommand
+  [OK] event span L3283..L3283 in src/sentinel.c
+    expression: 'server.verbosity'
+  [OK] event event:0005fe9e88... resolves to a row
+  side symbol:75a83a867...  kind=read decided=True
+  [OK] reader event has id and span (4339..4339)
+  [OK] identity facts reconcile with the candidate token: decl='' member='clients' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: getAllClientsInfoString
+  [OK] event span L4339..L4339 in src/networking.c
+    expression: 'server.clients'
+  [OK] anchor span src/networking.c:4339
+  [OK] two PROTECTED_BY facts (one per side)
+    protection: ambiguous  sentinelConfigSetCommand  lock=''  no lock in this method
+    protection: ambiguous  getAllClientsInfoString  lock=''  no lock in this method
+  [OK] parallelism status: the repository starts threads somewhere, so neither method is ordered
+------------------------------------------------------------------------
+identity: name:server
+  [OK] event event:aebd97b856... resolves to a row
+  side symbol:048ad02fc...  kind=write decided=True
+  [OK] identity facts reconcile with the candidate token: decl='' member='dirty' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: arringCommand
+  [OK] event span L1721..L1721 in src/t_array.c
+    expression: 'server.dirty'
+  [OK] event event:0005fe9e88... resolves to a row
+  side symbol:75a83a867...  kind=read decided=True
+  [OK] reader event has id and span (4339..4339)
+  [OK] identity facts reconcile with the candidate token: decl='' member='clients' storage='unknown'
+  [OK] candidate carries the identity token
+  [OK] owner method: getAllClientsInfoString
+  [OK] event span L4339..L4339 in src/networking.c
+    expression: 'server.clients'
+  [OK] anchor span src/networking.c:4339
+  [OK] two PROTECTED_BY facts (one per side)
+    protection: ambiguous  arringCommand  lock=''  no lock in this method
+    protection: ambiguous  getAllClientsInfoString  lock=''  no lock in this method
+  [OK] parallelism status: the repository starts threads somewhere, so neither method is ordered
+
+the new no-CFG-point protection reason, seen in 2 of the scanned candidates (sampled first 2):
+  identity name:server  method sendPendingClientsToIOThreadIfNeeded  status=ambiguous
+  identity name:server  method sendPendingClientsToIOThreads  status=ambiguous
+  [OK] the no-CFG-point reason exists in the wild with status=ambiguous
+  [OK] no-CFG-point reason is never resolved
+  [OK] no-CFG-point reason is never resolved
+
+4.4.2 zero protection upgrades (frozen before-db, read-only):
+  before candidates 28523, shared keys 28523
+  [OK] no shared key upgraded to resolved (upgrades=0)
+  [OK] protection statuses bit-identical on shared keys (changed=0)
+
+4.4.3 the unknown bucket is visible:
+  candidates_by_identity_storage: {'file_static': 1525, 'global': 1350, 'unknown': 278925}
+  [OK] unknown bucket reported
+  [OK] the storage breakdown covers every candidate
+
+4.4.4 the proxy count is honest:
+  access_events=32203  access_decided_pairs=281283  access_proxy_pairs=517
+  [OK] coverage access_events equals the database's READ/WRITE row count
+  [OK] coverage proxy pairs equals the scan (517)
+  [OK] proxy pairs are nonzero and reported, not hidden
+  [OK] decided pairs exist
+  sides still decided by the proxy: 517 (of 563600 sides)
+
+4.4.5 p->buf[i] emits exactly one event:
+vocabulary events: 3   cfg points: 11 = 4 structural + 7 access
+
+vocabulary events (type, line):
+  RETURN       L13 
+  RETURN       L26 
+  CALL         L26 
+
+access points (kind, line, subject, decl, storage, member):
+  READ  L19  subject='g_total'    decl='global:g_total'               storage='global'   member=''      
+  READ  L23  subject='g_flag'     decl='global:g_flag'                storage='global'   member=''      
+  WRITE L19  subject='g_total'    decl='global:g_total'               storage='global'   member=''      
+  WRITE L20  subject='s_counter'  decl='file_static:fixture/access.c:s_counter' storage='file_static' member=''      
+  WRITE L21  subject='g_pairs'    decl='global:g_pairs'               storage='global'   member='buf[index]'
+  WRITE L22  subject='g_flag'     decl='global:g_flag'                storage='global'   member=''      
+  WRITE L24  subject='g_pairs'    decl='global:g_pairs'               storage='global'   member='flag'  
+
+structural points (type, line, subject):
+  BRANCH      L23  subject=''
+  DEREFERENCE L21  subject='g_pairs'
+  DEREFERENCE L21  subject='g_pairs'
+  DEREFERENCE L24  subject='g_pairs'
+
+CFG edges: 8  (event-only points must contribute none)
+  access ids among edge endpoints: 0  (clean)
+  edge set identical with the rule off: True  (off=8, on=8)
+  [OK] exactly one WRITE carries member buf[index] (found [('WRITE', 21)])
+  [OK] no READ on the same line (no double counting)
+========================================================================
+failure count: 0

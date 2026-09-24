@@ -4,8 +4,20 @@ import time
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 
-from .identity import edge_id, path_id, repository_id, symbol_id
-from .models import Edge, Metrics, Node, ParsedFile, ParsedImport, ParsedReference, ParsedSymbol
+from .identity import cfg_exit_id, edge_id, event_id, path_id, repository_id, semantic_edge_id, symbol_id
+from .semantics.events import SemanticEdge, SemanticEvent
+from .sparsecfg import CONTROL_REACHES
+from .sparsedfg import mint_dataflow_edges
+from .models import (
+    Edge,
+    Metrics,
+    Node,
+    ParsedFile,
+    ParsedImport,
+    ParsedReference,
+    ParsedSymbol,
+    PointKey,
+)
 from .parser import parse_file_with_diagnostics
 from .resolver import ReferenceResolver
 from .scanner import SourceFile, scan_repository
@@ -14,6 +26,17 @@ from .storage import SQLiteStorage
 
 
 def parsed_to_dict(parsed: ParsedFile) -> dict:
+    """The parse cache, deliberately without events or CFG.
+
+    Events are not cached here (appendix B.2.3). `parsed` is already written
+    twice -- into `nodes.metadata.parsed` and into the `parser_cache` table --
+    and it is 94.8% of the nodes table as it is. Caching the event list as well
+    would store every event three times: once here, once in the cache, and once
+    in `semantic_events`, which is the only copy anything reads. A changed file
+    is re-extracted anyway, so the cache buys nothing here. The same reasoning
+    covers `parsed.cfg` (stage 3): a dataclass with no dict representation
+    cannot leak into the cache, and it is rebuilt from source in one walk.
+    """
     return {
         "symbols": [asdict(item) for item in parsed.symbols],
         "references": [asdict(item) for item in parsed.references],
@@ -43,6 +66,8 @@ def parsed_from_dict(data: dict) -> ParsedFile:
         references=[ParsedReference(**item) for item in references],
         imports=[ParsedImport(**item) for item in imports],
         parser=data.get("parser", "legacy-ast"),
+        # No events: see parsed_to_dict. A file restored from the cache carries
+        # none, and its events come from the semantic_events table instead.
     )
 
 
@@ -61,11 +86,12 @@ def build_graph(
     *,
     strategy: ShardStrategy | None = None,
     old_fingerprints: dict[str, str] | None = None,
+    old_semantic_fingerprints: dict[str, str] | None = None,
     cached_references: dict[str, dict] | None = None,
     changed_file_ids: set[str] | None = None,
     affected_reference_ids: set[str] | None = None,
     repository_id_override: str | None = None,
-) -> tuple[str, list[dict], list[Node], list[Edge], list, object]:
+) -> tuple[str, list[dict], list[Node], list[Edge], list, object, list[SemanticEvent], list[SemanticEdge]]:
     root = root.resolve()
     repo_id = repository_id_override or repository_id(root)
     strategy = strategy or DirectoryShardStrategy()
@@ -75,6 +101,8 @@ def build_graph(
     nodes: list[Node] = []
     edges: list[Edge] = []
     file_records: list[dict] = []
+    semantic_events: list[SemanticEvent] = []
+    semantic_edges: list[SemanticEdge] = []
 
     repo_node_id = path_id(repo_id, "Repository", ".")
     nodes.append(
@@ -149,6 +177,123 @@ def build_graph(
                 )
             )
 
+        # Every published event -- vocabulary and structural -- is a CFG point,
+        # and the CFG's edges name their endpoints by PointKey. The id map is
+        # built here, in publication order, so edge resolution goes through
+        # published ids and never through list position.
+        id_by_key: dict[PointKey, str] = {}
+        # Vocabulary hits and structural points share one annotation channel
+        # (models.ParsedCfg.annotations): `subject` is what lets the pattern
+        # queries pair a RELEASE with the ALLOC it frees, and it has nowhere
+        # else to travel but the event's metadata column.
+        annotations = parsed.cfg.annotations if parsed.cfg is not None else {}
+
+        for draft in parsed.events:
+            # The owner id is recomputed rather than looked up, and it is the
+            # same pure function of (kind, qualified_name, signature) that
+            # produced the symbol node -- so an event can only ever point at a
+            # symbol that exists, or at one that was deduplicated away under
+            # the identical id.
+            owner_id = symbol_id(
+                repo_id, source.relative_path,
+                draft.owner_kind, draft.owner_qualified_name, draft.owner_signature,
+            )
+            key = PointKey(
+                draft.owner_kind, draft.owner_qualified_name, draft.owner_signature,
+                draft.event_type, draft.ordinal,
+            )
+            id_by_key[key] = event_id(repo_id, owner_id, draft.event_type, draft.ordinal)
+            semantic_events.append(
+                SemanticEvent(
+                    event_id=id_by_key[key],
+                    event_type=draft.event_type,
+                    owner_symbol_id=owner_id,
+                    file_id=file_id,
+                    ordinal=draft.ordinal,
+                    start_line=draft.start_line,
+                    end_line=draft.end_line,
+                    matched_name=draft.matched_name,
+                    matched_via=draft.matched_via,
+                    flags=draft.flags,
+                    metadata={
+                        "relative_path": source.relative_path, "shard_path": shard_path,
+                        **annotations.get(key, {}),
+                    },
+                )
+            )
+
+        cfg = parsed.cfg
+        if cfg is not None:
+            for point in cfg.points:
+                owner_id = symbol_id(
+                    repo_id, source.relative_path,
+                    point.owner_kind, point.owner_qualified_name, point.owner_signature,
+                )
+                key = point.key()
+                id_by_key[key] = event_id(repo_id, owner_id, point.event_type, point.ordinal)
+                semantic_events.append(
+                    SemanticEvent(
+                        event_id=id_by_key[key],
+                        event_type=point.event_type,
+                        owner_symbol_id=owner_id,
+                        file_id=file_id,
+                        ordinal=point.ordinal,
+                        start_line=point.start_line,
+                        end_line=point.end_line,
+                        matched_name=point.matched_name,
+                        matched_via=point.matched_via,
+                        flags=point.flags,
+                        metadata={
+                            "relative_path": source.relative_path, "shard_path": shard_path,
+                            **annotations.get(key, {}),
+                        },
+                    )
+                )
+            for edge in cfg.edges:
+                src_id = id_by_key.get(edge.src)
+                if src_id is None:
+                    raise ValueError(f"CFG edge source was never published: {edge.src}")
+                owner_id = symbol_id(
+                    repo_id, source.relative_path,
+                    edge.src.owner_kind, edge.src.owner_qualified_name, edge.src.owner_signature,
+                )
+                if edge.dst is None:
+                    # The synthetic exit: an edge endpoint with no event row,
+                    # identified by the source point's owner (every edge is
+                    # intra-method, so the source owner is the method).
+                    dst_id = cfg_exit_id(repo_id, owner_id)
+                else:
+                    dst_id = id_by_key.get(edge.dst)
+                    if dst_id is None:
+                        raise ValueError(f"CFG edge target was never published: {edge.dst}")
+                flags = tuple(sorted(edge.flags))
+                semantic_edges.append(
+                    SemanticEdge(
+                        edge_id=semantic_edge_id(
+                            src_id, dst_id, CONTROL_REACHES, ";".join(flags)
+                        ),
+                        src_event_id=src_id,
+                        dst_event_id=dst_id,
+                        relation=CONTROL_REACHES,
+                        owner_symbol_id=owner_id,
+                        file_id=file_id,
+                        flags=flags,
+                        metadata={"relative_path": source.relative_path, "shard_path": shard_path},
+                    )
+                )
+
+            # Stage 5B: the data-flow edges ride the same publication pass.
+            # This runs after this source's events are in `id_by_key` (the
+            # per-source resolution timing the control edges already rely
+            # on) and consumes the union of the vocabulary events and the
+            # CFG points plus the one annotation channel.
+            semantic_edges.extend(
+                mint_dataflow_edges(
+                    repo_id, parsed, id_by_key, file_id,
+                    relative_path=source.relative_path, shard_path=shard_path,
+                )
+            )
+
     nodes.extend(directory_nodes.values())
     nodes.extend(file_nodes.values())
     symbol_nodes = list(symbol_nodes_by_id.values())
@@ -167,8 +312,18 @@ def build_graph(
     unique_edges = {edge.id: edge for edge in edges}
     edges = sorted(unique_edges.values(), key=lambda edge: edge.id)
     nodes = sorted(nodes, key=lambda node: node.id)
-    shards = build_shards(repo_id, nodes, edges, generation, old_fingerprints)
-    return repo_id, file_records, nodes, edges, shards, resolution
+    shards = build_shards(
+        repo_id, nodes, edges, generation, old_fingerprints, old_semantic_fingerprints
+    )
+    semantic_events.sort(key=lambda event: event.event_id)
+    # Same discipline as `unique_edges`: two identical reachability facts are
+    # one row, and id order is the order anything downstream reads.
+    unique_semantic_edges = {edge.edge_id: edge for edge in semantic_edges}
+    semantic_edges = sorted(unique_semantic_edges.values(), key=lambda edge: edge.edge_id)
+    return (
+        repo_id, file_records, nodes, edges, shards, resolution,
+        semantic_events, semantic_edges,
+    )
 
 
 def full_index(
@@ -196,7 +351,7 @@ def full_index(
     repo_id = repository_id_override or repository_id(root)
     with SQLiteStorage(database) as storage:
         generation = storage.current_generation(repo_id) + 1
-        repo_id, files, nodes, edges, shards, resolution = build_graph(
+        repo_id, files, nodes, edges, shards, resolution, semantic_events, semantic_edges = build_graph(
             root, sources, parsed_files, generation, strategy=strategy,
             repository_id_override=repo_id,
         )
@@ -213,11 +368,24 @@ def full_index(
             unresolved_references=status_counts["unresolved"],
             shards_created=len(shards),
             boundary_edges=sum(edge.metadata.get("scope") == "boundary" for edge in edges),
+            semantic_points_created=len(semantic_events),
+            semantic_edges_created=len(semantic_edges),
         )
         storage.replace_snapshot(
             repo_id=repo_id, root=root, generation=generation, mode="full", files=files,
             nodes=nodes, edges=edges, shards=shards, raw_references=resolution.references,
-            metrics=metrics,
+            metrics=metrics, semantic_events=semantic_events, semantic_edges=semantic_edges,
+            semantic_fingerprints=[
+                {
+                    "shard_id": shard.shard_id,
+                    "fingerprint": shard.semantic_fingerprint,
+                    "metadata": {
+                        "api_fingerprint": shard.api_fingerprint,
+                        "semantic_dirty": shard.semantic_dirty,
+                    },
+                }
+                for shard in shards
+            ],
         )
         metrics.database_size = storage.database_size
         metrics.index_time_ms = (time.perf_counter() - started) * 1000

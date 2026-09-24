@@ -109,12 +109,34 @@ def fingerprint(nodes: list[Node]) -> tuple[list[str], str]:
     return public, digest
 
 
+def semantic_fingerprint(nodes: list[Node]) -> str:
+    """A digest that moves whenever any source in the shard moves.
+
+    Appendix B.2.2, minimal viable form. `fingerprint` above reads only public
+    API signatures, so editing a function body leaves it byte-identical. That
+    is correct for the code graph -- the topology really did not change -- and
+    fatal for the event layer, because every event lives inside a body.
+
+    This is deliberately coarse: it says "something in here changed", not
+    "the semantics changed". The appendix's advice is to start here and refine
+    once measurement shows the over-read cost, on the grounds that recomputing
+    too much is recoverable and missing a change is not.
+    """
+    sources = sorted(
+        f"{node.metadata.get('relative_path', '')}|{node.source_hash or ''}"
+        for node in nodes
+        if node.kind == "File"
+    )
+    return hashlib.sha256("\n".join(sources).encode("utf-8")).hexdigest()
+
+
 def build_shards(
     repo_id: str,
     nodes: list[Node],
     edges: list[Edge],
     generation: int,
     old_fingerprints: dict[str, str] | None = None,
+    old_semantic_fingerprints: dict[str, str] | None = None,
 ) -> list[Shard]:
     grouped: dict[str, list[Node]] = defaultdict(list)
     for node in nodes:
@@ -136,10 +158,12 @@ def build_shards(
             edge.metadata["dst_shard_id"] = target_shard
 
     old_fingerprints = old_fingerprints or {}
+    old_semantic_fingerprints = old_semantic_fingerprints or {}
     result: list[Shard] = []
     for sid, shard_nodes in sorted(grouped.items()):
         path = shard_nodes[0].metadata.get("shard_path", ".")
         public, api_hash = fingerprint(shard_nodes)
+        semantic_hash = semantic_fingerprint(shard_nodes)
         result.append(
             Shard(
                 shard_id=sid,
@@ -151,6 +175,11 @@ def build_shards(
                 api_fingerprint=api_hash,
                 generation=generation,
                 boundary_dirty=sid in old_fingerprints and old_fingerprints[sid] != api_hash,
+                semantic_fingerprint=semantic_hash,
+                semantic_dirty=(
+                    sid in old_semantic_fingerprints
+                    and old_semantic_fingerprints[sid] != semantic_hash
+                ),
             )
         )
     return result

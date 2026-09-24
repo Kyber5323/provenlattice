@@ -9,6 +9,7 @@ from typing import Any, Iterable
 EVIDENCE_KINDS = {
     "CODE_DEFINITION", "CALL_RELATION", "REFERENCE", "DEPENDENCY",
     "SHARD_RELATION", "DOCUMENT_SECTION", "CROSS_LAYER_LINK",
+    "DEFECT_CANDIDATE",
 }
 BUNDLE_PROFILES = {
     "generic", "document_to_code", "code_to_document", "module_understanding",
@@ -17,7 +18,7 @@ EVIDENCE_ROLES = {"PRIMARY", "SUPPORTING", "CONTEXTUAL", "SUPPRESSED_CANDIDATE"}
 PREFIXES = {
     "CODE_DEFINITION": "CODE", "CALL_RELATION": "CALL", "REFERENCE": "REF",
     "DEPENDENCY": "DEP", "SHARD_RELATION": "SHARD", "DOCUMENT_SECTION": "DOC",
-    "CROSS_LAYER_LINK": "XLINK",
+    "CROSS_LAYER_LINK": "XLINK", "DEFECT_CANDIDATE": "DEFECT",
 }
 
 
@@ -253,7 +254,59 @@ class EvidenceBundle:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class DefectEvidenceBundle:
+    """One defect candidate's evidence, in the shape design doc §15 froze.
+
+    The first eight members are §15's verbatim -- `facts` are what the graph
+    proved, `uncertain_facts` what it could not, and `missing_evidence` names
+    what a stronger analysis would have to add. The bookkeeping keys follow,
+    because a reader comparing a bundle against §15 should meet the same block
+    first.
+
+    This is a parallel type, not a subclass of `EvidenceBundle`. That one is a
+    *retrieval* bundle: it ranks and truncates heterogeneous evidence under a
+    `QueryBudget`. Here the evidence is one candidate and its path, the
+    truncation already happened inside the query (`max_candidates`,
+    `max_paths`), and inheriting would force §15's members into fields that
+    mean something else.
+    """
+
+    defect_type: str
+    defect_key: str
+    subject: dict[str, Any]
+    facts: tuple[dict[str, Any], ...]
+    uncertain_facts: tuple[dict[str, Any], ...]
+    paths: tuple[dict[str, Any], ...]
+    source_evidence: tuple[str, ...]
+    missing_evidence: tuple[str, ...]
+    candidate_id: str
+    anchor: str
+    resolution_status: str
+    confidence: float
+    generation: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-native throughout: this goes straight into a query result's
+        `data` and out through the CLI's `json.dumps` without a second pass."""
+        return {
+            "defect_type": self.defect_type,
+            "defect_key": self.defect_key,
+            "subject": dict(self.subject),
+            "facts": [dict(fact) for fact in self.facts],
+            "uncertain_facts": [dict(fact) for fact in self.uncertain_facts],
+            "paths": [dict(path) for path in self.paths],
+            "source_evidence": list(self.source_evidence),
+            "missing_evidence": list(self.missing_evidence),
+            "candidate_id": self.candidate_id,
+            "anchor": self.anchor,
+            "resolution_status": self.resolution_status,
+            "confidence": self.confidence,
+            "generation": self.generation,
+        }
+
+
 def parse_evidence_citations(text: str) -> list[str]:
     import re
-    pattern = r"\bE-(?:CODE|CALL|REF|DEP|SHARD|DOC|XLINK)-[0-9a-f]{24}\b"
+    pattern = r"\bE-(?:CODE|CALL|REF|DEP|SHARD|DOC|XLINK|DEFECT)-[0-9a-f]{24}\b"
     return list(dict.fromkeys(re.findall(pattern, text)))

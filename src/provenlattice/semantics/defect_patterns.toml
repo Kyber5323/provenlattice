@@ -1,0 +1,224 @@
+# What each defect pattern needs, split into two questions that stage 4
+# finally separated:
+#
+#   requires / relations                     -> what *confirming* the defect needs
+#   candidate_requires / candidate_relations -> what *proposing* a candidate needs
+#
+# The two are not the same, and the gap between them is the answer to the
+# stage 4 acceptance question "is Event + CFG enough?". `1.1` is the sharp
+# case: proposing a race candidate reads only events the pipeline already
+# produces, while confirming one needs READ/WRITE, which the DFG will have to
+# add. Before the split, `missing_events()` conflated the two and could only
+# say "not attackable" about a pattern stage 4 does attack.
+#
+# Keys are the numbering from defect-evidence-matrix-v1.md; `grade` is that
+# table's A/B/C grade, repeated here so a coverage report can be read without
+# opening the matrix. `requires` and `relations` are that matrix's "Required
+# Events" / "Required Relations" columns for the five rows its priority-family
+# block expanded (1.1, 3.1, 4.1, 4.2, 4.3). The rows it did not expand
+# (1.3, 1.4, 4.5, 4.6, 9.1) keep their seeded events and, where a query exists,
+# take their relations from design doc §9 -- the table that maps each defect
+# family to the relations it needs.
+#
+# `query` names the typed query that produces candidates. A pattern with no
+# `query` is unexpanded: that is a third value, distinct from "expanded and
+# needs nothing", which is why the key is simply absent rather than empty.
+#
+# `missing_events()` / `missing_relations()` report what *confirmation* still
+# lacks; `candidate_missing_events()` / `candidate_missing_relations()` report
+# what *candidate generation* still lacks. Every list below is sorted.
+#
+# One query has no row here at all: `taint_path`. Its defect key is `taint`,
+# which is a name and not a matrix number, and every key in this file is a
+# matrix number. Giving it a row would mean either inventing a number or
+# filing it under one it does not answer, so the query is addressed by its
+# query name (`--type taint_path`) and not by a key -- a deliberate asymmetry,
+# pinned by a test. The matrix's own line on taint (:286) puts the analysis
+# this query approximates outside V2, and that line is not changed by an
+# implementation existing.
+#
+# The 9.2/9.3/9.4 rows below carry no `requires`, and that emptiness is not the
+# claim "nothing is needed": the matrix expanded its required-events column for
+# only five priority rows (1.1, 3.1, 4.1, 4.2, 4.3) and left the rest as a
+# grade table, so there is no column to copy and none is invented here. What
+# the rows record is that the patterns exist and are not expanded, and why.
+
+[patterns."1.1"]
+name = "共享数据竞态"
+grade = "A"
+query = "race_condition"
+requires = ["ATOMIC", "LOCK", "READ", "THREAD_JOIN", "THREAD_SPAWN", "UNLOCK", "WRITE"]
+relations = ["EXECUTES_IN", "MAY_PARALLEL", "PROTECTED_BY", "READS", "WRITES"]
+candidate_requires = ["ATOMIC", "LOCK", "THREAD_JOIN", "THREAD_SPAWN", "UNLOCK"]
+candidate_relations = ["CONTROL_REACHES"]
+
+[patterns."1.3"]
+name = "死锁 / 锁序错误"
+grade = "B"
+query = "lock_order"
+requires = ["LOCK", "UNLOCK"]
+relations = ["ACQUIRES", "CONTROL_REACHES"]
+candidate_requires = ["LOCK", "UNLOCK"]
+candidate_relations = ["CONTROL_REACHES"]
+
+[patterns."1.4"]
+name = "重复加锁 / 锁不可重入"
+grade = "A"
+query = "lock_order"
+requires = ["LOCK", "UNLOCK"]
+relations = ["ACQUIRES", "CONTROL_REACHES"]
+candidate_requires = ["LOCK", "UNLOCK"]
+candidate_relations = ["CONTROL_REACHES"]
+
+# Stage 6 expands 3.1 with the first of the DFG-consuming queries. Proposing a
+# candidate reads a definition (WRITE, or ALLOC for the allocation-failure
+# shape), the dereference that consumes it, and the CHECK points that decide
+# whether a guard covers it -- all producible since stage 5A. The decisive
+# predicate is a control-flow question asked about a flow edge, so both
+# candidate relations are ones the graph holds: the flow edge says the value
+# reached the dereference, and CONTROL_REACHES says whether the definition can
+# reach it at all.
+#
+# `relations` is the matrix's Required Relations column, restored here because
+# the row was missing it, and it is what keeps the two questions apart after
+# this stage: candidate generation needs neither `CHECKS` nor
+# `DOMINATES_CHECK` -- the guard test is a reverse seeding of the CFG walker's
+# null arms, not a relation anybody built -- and confirmation still needs both,
+# so `missing_relations()` does not reach zero. `RETURNS` is the null-propagated-
+# through-a-return-value half, which the graph has no edge for either.
+[patterns."3.1"]
+name = "空指针解引用"
+grade = "B"
+query = "null_flow"
+requires = ["CALL", "READ", "RETURN", "THROW", "WRITE"]
+relations = ["CHECKS", "DATA_FLOW_TO", "DOMINATES_CHECK", "RETURNS"]
+candidate_requires = ["ALLOC", "CHECK", "DEREFERENCE", "WRITE"]
+candidate_relations = ["CONTROL_REACHES", "DATA_FLOW_TO"]
+
+[patterns."4.1"]
+name = "内存泄漏"
+grade = "A"
+query = "resource_lifetime"
+requires = ["ALLOC", "RELEASE", "RETURN", "THROW"]
+relations = ["CONSUMES", "CONTROL_REACHES", "PRODUCES", "RELEASES", "RETURNS"]
+candidate_requires = ["ALLOC", "RELEASE", "RETURN"]
+candidate_relations = ["CONTROL_REACHES"]
+
+# 4.2 pairs two RELEASE points and reads no flow edge: stage 5B mints none
+# between a release and a release, because there is no def-use relation between
+# them. `ALLOC` and `WRITE` are named in the candidate column anyway, and not
+# as decoration -- they are the intervening-definition test, which is the rule
+# that tells a double free from `free(p); p = malloc(n); free(p)`.
+# `DATA_FLOW_TO` is absent from the *candidate* column for the reason above: the
+# query's evidence is control flow and point identity, not a flow edge, and
+# naming a relation it does not read would overstate what proposing a candidate
+# needs. It stays in the confirmation column, where the matrix puts it, along
+# with the two `RELEASES` to one resource and `MAY_ALIAS` -- none of which the
+# graph holds as relations, so confirmation is as far away as it was.
+[patterns."4.2"]
+name = "双重释放"
+grade = "B"
+query = "double_free"
+requires = ["ALLOC", "RELEASE", "THROW"]
+relations = ["CONTROL_REACHES", "DATA_FLOW_TO", "MAY_ALIAS", "RELEASES"]
+candidate_requires = ["ALLOC", "RELEASE", "WRITE"]
+candidate_relations = ["CONTROL_REACHES"]
+
+# 4.3 reads both halves: stage 5B's `free_to_use` edges, and a query-time
+# composition for `free(p); sink(p)` -- the shape the DFG does not mint an edge
+# for, because CALL is not a USE event. The composition is why CALL is in the
+# candidate event list: the query scans call arguments itself. `CHECK` is
+# named because a comparison against a released pointer is eliminated rather
+# than reported -- the graph can tell a value comparison from a dereference
+# even though it cannot tell which one the source meant.
+#
+# The matrix's Disqualifying column also names the `free(p); p = NULL` idiom as
+# a guard, which this query does not implement as one: the intervening-def rule
+# excludes that shape for the reason it is written (`p` is redefined, so the
+# use is of a new value), and the two agree on the outcome without agreeing on
+# the mechanism. That is why `CHECKS` stays in the confirmation column.
+[patterns."4.3"]
+name = "释放后使用"
+grade = "B"
+query = "use_after_free"
+requires = ["CALL", "READ", "RELEASE", "RETURN", "THROW", "WRITE"]
+relations = ["CHECKS", "CONTROL_REACHES", "DATA_FLOW_TO", "MAY_ALIAS"]
+candidate_requires = ["CALL", "CHECK", "DEREFERENCE", "READ", "RELEASE", "RETURN", "WRITE"]
+candidate_relations = ["CONTROL_REACHES", "DATA_FLOW_TO"]
+
+# The one pattern whose stage-2 coverage is decided by an omission rather than
+# by design: it needs OPEN/CLOSE, which the design doc §23 lists as node types
+# but the stage 2 level 0 list in appendix B.4 leaves out. It is graded A in
+# the matrix, so this is a real conflict between the two documents, not a
+# scheduling choice.
+[patterns."4.5"]
+name = "非内存资源泄漏与关闭不当"
+grade = "A"
+requires = ["CLOSE", "OPEN", "RETURN"]
+
+[patterns."4.6"]
+name = "错误路径清理不完整（含锁未释放）"
+grade = "A"
+query = "resource_lifetime"
+requires = ["ALLOC", "LOCK", "RELEASE", "RETURN", "THROW", "UNLOCK"]
+relations = ["ACQUIRES", "CONTROL_REACHES", "PRODUCES", "RELEASES"]
+candidate_requires = ["ALLOC", "LOCK", "RETURN", "UNLOCK"]
+candidate_relations = ["CONTROL_REACHES"]
+
+# Expanded in stage 6, and the row whose confirmation column is worth reading
+# carefully. `relations` here is design doc §9's "Missing Error Check" row
+# (`PRODUCES, CHECKS, CONTROL_REACHES`), which is where this file says the
+# unexpanded rows get their relations. Two of the three are still missing, so
+# `coverable_now()` is False and `missing_relations()` is `("CHECKS",
+# "PRODUCES")`: the pipeline can propose candidates for this pattern and cannot
+# confirm one. `PRODUCES` is the relation the stage 6 plan would have
+# half-delivered with a `result_of` annotation; the user's ruling dropped that
+# extraction change in favour of a fact the graph already held, so it stays
+# missing rather than being claimed.
+#
+# `CHECK` is in `requires` and the candidate rule does not read a CHECK as a
+# check. A CHECK point is a *null comparison* -- `fd == -1` and `ret != 0` are
+# not CHECKs at all -- so "was the result examined" is answered by branch
+# dominance instead: control that branches between the call and the next use of
+# the stored value. That is a strictly weaker test and its false negative is
+# registered: an unrelated branch counts as an examination. `candidate_requires`
+# therefore names the events the candidate rule actually reads, which includes
+# every event that can close the window.
+[patterns."9.1"]
+name = "未检查返回值"
+grade = "A"
+query = "error_handling"
+requires = ["CALL", "CHECK", "RETURN"]
+relations = ["CHECKS", "CONTROL_REACHES", "PRODUCES"]
+candidate_requires = ["BRANCH", "CALL", "CHECK", "DEREFERENCE", "READ", "RETURN"]
+candidate_relations = ["CONTROL_REACHES"]
+
+# The three 9.x rows the pipeline does not attack, with the reason each is
+# unexpanded. All three are named rather than omitted so a coverage report can
+# say "unexpanded" instead of leaving a reader to wonder whether the matrix has
+# them at all -- and all three carry no `requires`, for the reason in the
+# header: there is no expanded column to copy.
+#
+# 9.2 needs the AI side's API semantics twice over: which calls report an error
+# *condition* rather than a return value, and which of those conditions this
+# call site must handle. The graph holds neither, and the second is the same
+# kind of question `_MISSING_MUST_CHECK` names for 9.1.
+[patterns."9.2"]
+name = "错误条件未处理"
+grade = "B"
+
+# 9.3 is the one 9.x row graded A that stays unexpanded, and the reason is
+# structural rather than a scheduling choice: propagation is a cross-method
+# fact, and the graph holds no cross-method control edge. `CONTROL_REACHES` is
+# method-local by construction (a `PointKey` carries its owner), so "this
+# callee's failure is reported to its caller" is not expressible at all today.
+[patterns."9.3"]
+name = "缺少错误传播 / 报告"
+grade = "A"
+
+# 9.4 needs THROW/TRY modelling: the graph holds THROW events (stage 3) but no
+# handler, no catch clause and no unwind path, so "this exception is
+# uncaught" has no predicate to evaluate.
+[patterns."9.4"]
+name = "异常未捕获与异常安全"
+grade = "B"

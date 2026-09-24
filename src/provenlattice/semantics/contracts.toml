@@ -1,0 +1,123 @@
+# Declared ownership contracts.
+#
+# This is the one part of the contract layer that cannot be read out of the
+# graph: that a particular callee takes ownership of a particular argument, or
+# that a particular type owns what it points at. Everything else is inferred
+# from the corpus (`contracts.py`), so this file is deliberately small.
+#
+# Every entry carries `evidence`: a path into a corpus, a line, and a statement
+# a reader can check against the source. An entry without checkable evidence is
+# folklore, and folklore that silently deletes findings is worse than no entry
+# at all. `load_declared()` refuses to load a file where one is missing.
+#
+# Stage 5C-1 only ever *eliminates* a candidate with these entries. Nothing here
+# can raise a candidate's confidence.
+
+note = """
+The evidence column is what makes an elimination auditable: a reader who
+disagrees with an entry can open the cited line and see whether the claim holds.
+
+Corpus-specific `wrapper` entries below are `std::unique_ptr` aliases spelled in
+the corpus (`mtmd_image_tokens_ptr`, ...). They are listed separately from the
+standard types because the *spelling* is what the extractor sees in
+`subject_type`, and a spelling is only as good as the corpus it was read from --
+`event_ptr` is `std::unique_ptr<ggml_backend_event, ...>` in
+`ggml/include/ggml-cpp.h:38` and a raw `sycl::event *` in
+`ggml/src/ggml-sycl/dpct/helper.hpp:104`, so it is deliberately NOT listed: a
+name that means two things cannot eliminate anything.
+
+`unique_ptr` and `shared_ptr` are listed under the spellings the extractor
+produces (it drops the `std::` qualifier).
+"""
+
+[[sink]]
+name = "RedisModule_SetKeyMeta"
+ordinal = 2
+evidence = """
+redis-50 tests/modules/keymeta_notify.c:56 passes a heap pointer as the third
+argument -- RedisModule_SetKeyMeta(meta_class_id, k, (uint64_t)new_str) -- and
+never frees it afterwards. The ownership moves into the key metadata slot:
+the module frees the *previous* value before overwriting it (same file, line 50,
+`free((char *)existing)` guarded by RedisModule_GetKeyMeta at 47-52), and the
+keymeta class registers config.free = MetaFreeCallback (line 115), which frees
+the stored value (line 70). The API signature at src/redismodule.h:1532 --
+(id, key, uint64_t metadata) -- confirms the third parameter is the slot that
+owns it. So the callee takes ownership of argument index 2, and the
+`free(new_str)` on the error path (line 59) is the only path that keeps it.
+"""
+
+# Standard-library owning pointers. The claim is the same for both: the smart
+# pointer destroys what it points at, on every path out of the scope, including
+# exception unwinding -- so a `new` kept in one is not this frame's leak.
+[[wrapper]]
+type = "unique_ptr"
+expands = "std::unique_ptr<T, D>"
+evidence = """
+llama.cpp-69 ggml/src/ggml-opencl/ggml-opencl.cpp:194 constructs
+`std::unique_ptr<char[]> param_storage(new char[param_size]);` and the
+enclosing function never deletes it -- the array is freed by the unique_ptr's
+destructor. ggml/src/ggml-cann/ggml-cann.cpp:763-772 shows the same ownership
+moving out through a return, which is a transfer rather than a leak.
+"""
+
+[[wrapper]]
+type = "shared_ptr"
+expands = "std::shared_ptr<T>"
+evidence = """
+llama.cpp-69 tools/server/server-stream.cpp:441 returns
+`std::shared_ptr<stream_pipe_consumer>(new stream_pipe_consumer(...))` -- the
+shared_ptr owns the object and frees it when the last reference goes away, so
+the frame that allocated it is not the frame that releases it.
+"""
+
+# Corpus spellings of std::unique_ptr. Each is listed only because the corpus
+# defines it that way, cited below.
+[[wrapper]]
+type = "mtmd_image_tokens_ptr"
+expands = "std::unique_ptr<mtmd_image_tokens>"
+evidence = """
+llama.cpp-69 tools/mtmd/mtmd.cpp:286 `using mtmd_image_tokens_ptr =
+std::unique_ptr<mtmd_image_tokens>;` -- and line 1502 shows it adopting a bare
+`new mtmd_image_tokens` that is never manually freed.
+"""
+
+[[wrapper]]
+type = "input_chunk_ptr"
+expands = "std::unique_ptr<mtmd_input_chunk, mtmd_input_chunk_deleter>"
+evidence = """
+llama.cpp-69 tools/mtmd/mtmd.h:483 `using input_chunk_ptr =
+std::unique_ptr<mtmd_input_chunk, mtmd_input_chunk_deleter>;` -- an explicit
+custom deleter, which is the corpus stating the ownership in so many words.
+"""
+
+[[wrapper]]
+type = "common_init_result_ptr"
+expands = "std::unique_ptr<common_init_result>"
+evidence = """
+llama.cpp-69 common/common.h:946 `using common_init_result_ptr =
+std::unique_ptr<common_init_result>;`
+"""
+
+[[wrapper]]
+type = "common_chat_templates_ptr"
+expands = "std::unique_ptr<struct common_chat_templates, common_chat_templates_deleter>"
+evidence = """
+llama.cpp-69 common/chat.h:314 `typedef std::unique_ptr<struct
+common_chat_templates, common_chat_templates_deleter> common_chat_templates_ptr;`
+"""
+
+[[wrapper]]
+type = "common_speculative_ptr"
+expands = "std::unique_ptr<common_speculative, common_speculative_deleter>"
+evidence = """
+llama.cpp-69 common/speculative.h:99 `typedef std::unique_ptr<common_speculative,
+common_speculative_deleter> common_speculative_ptr;`
+"""
+
+[[wrapper]]
+type = "mtmd_audio_tokens_ptr"
+expands = "std::unique_ptr<mtmd_audio_tokens>"
+evidence = """
+llama.cpp-69 tools/mtmd/mtmd.cpp:323 `using mtmd_audio_tokens_ptr =
+std::unique_ptr<mtmd_audio_tokens>;`
+"""

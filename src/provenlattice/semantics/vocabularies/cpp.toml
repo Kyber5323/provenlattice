@@ -1,0 +1,140 @@
+# Semantic event vocabulary for C / C++.
+#
+# Keywords here are CANDIDATE GENERATORS, not judges (design doc §8). A hit
+# proposes an event; tree-sitter structure confirms its shape -- that it really
+# is a call_expression, a new_expression, a return_statement. Nothing in this
+# file decides that a defect exists.
+#
+# Three matcher axes:
+#   syntax    tree-sitter node types, matched exactly
+#   calls     the final name component of a call's callee. One list covers free
+#             functions (`malloc`), member calls (`m.lock()`) and qualified
+#             calls (`std::atomic_load`).
+#   qualified a full qualified name, for the cases where the bare name is too
+#             generic to be safe. Matched in two positions: as a callee
+#             (`std::async(...)`) and as a declared type (`std::thread t(f);`),
+#             because both are the same event wearing different syntax.
+#
+# A name claimed by two events is reported by the loader, not resolved here.
+# `WaitForSingleObject` really is both a lock acquisition and a thread join, and
+# silently picking one would hide that from every downstream consumer.
+
+language = "cpp"
+display = "C / C++"
+extensions = [".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".inl"]
+
+call_syntax = ["call_expression"]
+# Where a RAII acquisition shows up: `std::lock_guard<std::mutex> guard(m);` is
+# a declaration whose type is the thing that acquires. Only local declarations
+# are listed -- a `field_declaration` declares a member, which acquires nothing.
+declaration_syntax = ["declaration"]
+
+[events.CALL]
+syntax = ["call_expression"]
+
+[events.RETURN]
+syntax = ["return_statement"]
+
+# Non-local exits. `assert` and `exit` are not exceptions, but for a lifetime
+# query they behave the same way: control leaves the method and any ALLOC on
+# the path is never matched by a RELEASE.
+[events.THROW]
+syntax = ["throw_statement"]
+calls = ["abort", "terminate", "exit", "_exit", "quick_exit", "longjmp", "assert"]
+qualified = ["std::terminate", "std::abort", "std::exit", "std::quick_exit"]
+
+[events.ALLOC]
+syntax = ["new_expression"]
+calls = [
+  # C standard
+  "malloc", "calloc", "realloc", "reallocarray", "aligned_alloc",
+  "memalign", "posix_memalign", "valloc", "pvalloc",
+  # allocate-by-copy
+  "strdup", "strndup", "strdupa", "asprintf", "vasprintf", "getline", "realpath",
+  # Win32
+  "HeapAlloc", "LocalAlloc", "GlobalAlloc", "VirtualAlloc", "CoTaskMemAlloc",
+  # GLib
+  "g_malloc", "g_malloc0", "g_new", "g_new0", "g_object_new", "g_strdup",
+]
+
+[events.RELEASE]
+syntax = ["delete_expression"]
+calls = [
+  "free", "cfree",
+  "HeapFree", "LocalFree", "GlobalFree", "VirtualFree", "CoTaskMemFree",
+  "g_free",
+]
+
+[events.LOCK]
+calls = [
+  # POSIX
+  "pthread_mutex_lock", "pthread_mutex_trylock", "pthread_mutex_timedlock",
+  "pthread_rwlock_rdlock", "pthread_rwlock_wrlock",
+  "pthread_rwlock_tryrdlock", "pthread_rwlock_trywrlock",
+  "pthread_spin_lock", "pthread_spin_trylock",
+  "sem_wait", "sem_trywait", "sem_timedwait",
+  # C11 threads
+  "mtx_lock", "mtx_trylock", "cnd_wait",
+  # Win32
+  "EnterCriticalSection", "TryEnterCriticalSection",
+  "WaitForSingleObject", "WaitForMultipleObjects",
+  "AcquireSRWLockExclusive", "AcquireSRWLockShared",
+  # GLib
+  "g_mutex_lock", "g_rec_mutex_lock", "g_rw_lock_writer_lock", "g_rw_lock_reader_lock",
+  # member calls: m.lock(), lk.try_lock(), m.lock_shared()
+  "lock", "try_lock", "lock_shared", "try_lock_shared",
+]
+# The RAII wrappers acquire in their constructor, so the acquisition is the
+# construction site rather than any call the body makes.
+qualified = ["std::lock_guard", "std::unique_lock", "std::scoped_lock", "std::shared_lock"]
+
+[events.UNLOCK]
+calls = [
+  "pthread_mutex_unlock", "pthread_rwlock_unlock", "pthread_spin_unlock",
+  "sem_post",
+  "mtx_unlock", "cnd_signal", "cnd_broadcast",
+  "LeaveCriticalSection", "ReleaseMutex", "SetEvent",
+  "ReleaseSRWLockExclusive", "ReleaseSRWLockShared",
+  "g_mutex_unlock", "g_rec_mutex_unlock", "g_rw_lock_writer_unlock", "g_rw_lock_reader_unlock",
+  "unlock", "unlock_shared",
+]
+
+# Bare `load` and `store` are deliberately absent. They are the obvious member
+# names on std::atomic, but they are equally the member names on caches,
+# configs and buffers, and would match a large fraction of every codebase.
+# Only the names that are atomic by construction are listed.
+[events.ATOMIC]
+calls = [
+  # C11
+  "atomic_load", "atomic_store", "atomic_exchange",
+  "atomic_fetch_add", "atomic_fetch_sub", "atomic_fetch_or",
+  "atomic_fetch_and", "atomic_fetch_xor",
+  "atomic_compare_exchange_strong", "atomic_compare_exchange_weak",
+  "atomic_flag_test_and_set", "atomic_flag_clear",
+  # GCC / Clang builtins
+  "__atomic_load_n", "__atomic_store_n", "__atomic_exchange_n",
+  "__atomic_fetch_add", "__atomic_fetch_sub",
+  "__atomic_compare_exchange_n",
+  "__sync_fetch_and_add", "__sync_fetch_and_sub",
+  "__sync_bool_compare_and_swap", "__sync_val_compare_and_swap",
+  "__sync_lock_test_and_set",
+  # member calls on std::atomic
+  "fetch_add", "fetch_sub", "fetch_or", "fetch_and", "fetch_xor",
+  "compare_exchange_strong", "compare_exchange_weak", "exchange",
+]
+
+[events.THREAD_SPAWN]
+calls = [
+  "pthread_create", "thrd_create",
+  "CreateThread", "_beginthread", "_beginthreadex",
+  "g_thread_new", "g_thread_try_new",
+]
+qualified = ["std::thread", "std::jthread", "std::async"]
+
+[events.THREAD_JOIN]
+calls = [
+  "pthread_join", "pthread_detach", "thrd_join",
+  "WaitForSingleObject", "WaitForMultipleObjects",
+  # member calls: t.join(), t.detach()
+  "join", "detach",
+]

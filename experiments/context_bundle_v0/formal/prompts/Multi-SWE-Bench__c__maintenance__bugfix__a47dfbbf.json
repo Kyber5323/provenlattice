@@ -1,0 +1,12 @@
+{
+  "case_id": "Multi-SWE-Bench__c__maintenance__bugfix__a47dfbbf",
+  "problem_statement": "[lib] Add ZSTD_d_stableOutBuffer + fix single-pass mode for empty frames\n\nThis flag allows users to skip the output buffer allocation + memcpy if they guarantee that the `ZSTD_outBuffer*` passed to `ZSTD_decompressStream()` is large enough to fit the entire frame, and is never modified by the user.\r\n\r\nAlso fixes a bug where empty frames weren't eligible for single-pass mode. It caused a small allocation (4 bytes), and is a little bit slower.\r\n\r\nAdds tests for single-pass and stable output buffer modes.\r\n\r\nFuzz tests `ZSTD_d_stableOutput` to ensure it never crashes.\r\n\r\nFixes #2093",
+  "problem_statement_sha256": "59119b73c4b13b427c1748e471766894de22eb4148f281bf62953bcc6410a482",
+  "schema": "d9-c5-formal-prompt-v1",
+  "source": {
+    "dataset_revision": "c2855792b006af41c67202d33883fb9d46362853",
+    "field": "problem_statement",
+    "file": "data/full.parquet",
+    "sha256": "2f56535bdc73eb8a68bf4ebb49789d8e9cd4f219ea60df6290b85278aee61ca8"
+  }
+}

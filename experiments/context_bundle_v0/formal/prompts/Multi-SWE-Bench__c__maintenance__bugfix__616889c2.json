@@ -1,0 +1,12 @@
+{
+  "case_id": "Multi-SWE-Bench__c__maintenance__bugfix__616889c2",
+  "problem_statement": "Add rsyncable mode\n\n- Factor out LDM's hash function for reuse\r\n- Add rsyncable mode to zstdmt and expose it via the advanced API\r\n- Fix `-B`/`--block-size` to actually set the job size\r\n- Add rsyncable tests to `zstreamtest` and `playTests.sh`\r\n\r\nTested by:\r\n\r\n```\r\n> cat A.100MB B.100MB C.100MB D.100MB E.100MB | zstd --rsyncable -fo src/file.zst\r\n/*stdin*\\            : 48.22%   (524288000 => 252837782 bytes, src/file.zst)\r\n> rsync -rc --stats src devbigvm:/data/users/terrelln/rsync-test\r\nTotal bytes sent: 252868779\r\ntotal size is 252837782  speedup is 1.00\r\n> echo test > test\r\n> cat test A.100MB test B.100MB test C.100MB test D.100MB test E.100MB | zstd --rsyncable -fo src/file.zst\r\n/*stdin*\\            : 48.23%   (524288025 => 252838025 bytes, src/unicorn.tar.zst)\r\n> rsync -rc --stats src devbigvm:/data/users/terrelln/rsync-test\r\nTotal bytes sent: 4605696\r\ntotal size is 252838025  speedup is 53.60\r\n```\r\n\r\nClose #1155.",
+  "problem_statement_sha256": "41e20a9518048cbee34e88b87e34fd686ec5582df92baf3a8948c613e91f4cfd",
+  "schema": "d9-c5-formal-prompt-v1",
+  "source": {
+    "dataset_revision": "c2855792b006af41c67202d33883fb9d46362853",
+    "field": "problem_statement",
+    "file": "data/full.parquet",
+    "sha256": "2f56535bdc73eb8a68bf4ebb49789d8e9cd4f219ea60df6290b85278aee61ca8"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "case_id": "Multi-SWE-Bench__c__maintenance__bugfix__9a7be8ba",
+  "problem_statement": "[libzstd] Rename ZSTD_CCtxParam_* to ZSTD_CCtxParams_*\n\n* Renames functions to `ZSTD_CCtxParams_*`.\r\n* The CI will test that everything still builds, and that I didn't miss a call-site.\r\n* I've left the `ZSTDMT_` functions alone, since they are only here for compatibility, so it would be silly to rename them. Side question, when do we want to deprecate/delete these?\r\n\r\nFixes #1529.",
+  "problem_statement_sha256": "af0b3ad149724258dba4f9c4b81746a6a72533ffa4106996d511ab21d9247cac",
+  "schema": "d9-c5-formal-prompt-v1",
+  "source": {
+    "dataset_revision": "c2855792b006af41c67202d33883fb9d46362853",
+    "field": "problem_statement",
+    "file": "data/full.parquet",
+    "sha256": "2f56535bdc73eb8a68bf4ebb49789d8e9cd4f219ea60df6290b85278aee61ca8"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "case_id": "Multi-SWE-Bench__c__maintenance__bugfix__21d59e43",
+  "problem_statement": "Decoding buffer size min\n\nfix #835 : \r\ngives ability to users of bufferless streaming API `ZSTD_decompressContinue()`\r\nto size their own decoding buffer, using same methodology as `ZSTD_decompressStream()`,\r\naka a round buffer of minimal size, taking into consideration current limitations of reference decoder.\r\n\r\nTo this end, add prototype `ZSTD_decodingBufferSize_min()`,\r\nwhich is now also used in `ZSTD_decompressStream()`.",
+  "problem_statement_sha256": "10524efcafa99cb0a4e52e52b5b18e185f427384c1700d68f3789d6c003fa3af",
+  "schema": "d9-c5-formal-prompt-v1",
+  "source": {
+    "dataset_revision": "c2855792b006af41c67202d33883fb9d46362853",
+    "field": "problem_statement",
+    "file": "data/full.parquet",
+    "sha256": "2f56535bdc73eb8a68bf4ebb49789d8e9cd4f219ea60df6290b85278aee61ca8"
+  }
+}

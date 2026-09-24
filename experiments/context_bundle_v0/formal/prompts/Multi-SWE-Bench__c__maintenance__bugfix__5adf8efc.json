@@ -1,0 +1,12 @@
+{
+  "case_id": "Multi-SWE-Bench__c__maintenance__bugfix__5adf8efc",
+  "problem_statement": "Fix #3719 : mixing -c, -o and --rm\n\n`-c` disables `--rm`, but only if it's selected.\r\nIn situations where `-o` is in the same command and happens to be present after `-c`, `-o` ends up being the selected one, and the different rules of `-o` become applicable (essentially `-o` respects `--rm` if there is only 1 input file).\r\n\r\nfix #3719",
+  "problem_statement_sha256": "875d599e4b41a96370a3bc3b4010a357145cfbbf6dd0ccb58091302f2d4d3208",
+  "schema": "d9-c5-formal-prompt-v1",
+  "source": {
+    "dataset_revision": "c2855792b006af41c67202d33883fb9d46362853",
+    "field": "problem_statement",
+    "file": "data/full.parquet",
+    "sha256": "2f56535bdc73eb8a68bf4ebb49789d8e9cd4f219ea60df6290b85278aee61ca8"
+  }
+}

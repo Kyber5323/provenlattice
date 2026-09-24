@@ -1,0 +1,12 @@
+{
+  "case_id": "Multi-SWE-Bench__c__maintenance__bugfix__2b5e5e23",
+  "problem_statement": "Clean up parameter code\n\n* Move all ZSTDMT parameter setting code to ZSTD_CCtxParams_*Parameter().\r\n  ZSTDMT now calls these functions, so we can keep all the logic in the\r\n  same place.\r\n* Make setting `ZSTD_c_nbWorkers` not clear overlap log / job size.\r\n* Clean up `ZSTD_CCtx_setParameter()` to only add extra checks where needed.\r\n* Clean up `ZSTDMT_initJobCCtxParams()` by copying all parameters by default,\r\n  and then zeroing the ones that need to be zeroed. We've missed adding several\r\n  parameters here, and it makes more sense to only have to update it if you\r\n  change something in ZSTDMT.\r\n* Add `ZSTDMT_cParam_clampBounds()` to clamp a parameter into its valid\r\n  range. Use this to keep backwards compatibility when setting ZSTDMT parameters,\r\n  which clamp into the valid range.\r\n* Add test cases to to cover the `ZSTD_c_nbWorkers` bug and the `ZSTDMT_initJobCCtxParams()` bug, which both fail before this patch.\r\n\r\nFixes #1524.",
+  "problem_statement_sha256": "7c447d6f4b4ae196dbeafc168c8431f10f95ba4813158816ac926992ac46a41b",
+  "schema": "d9-c5-formal-prompt-v1",
+  "source": {
+    "dataset_revision": "c2855792b006af41c67202d33883fb9d46362853",
+    "field": "problem_statement",
+    "file": "data/full.parquet",
+    "sha256": "2f56535bdc73eb8a68bf4ebb49789d8e9cd4f219ea60df6290b85278aee61ca8"
+  }
+}

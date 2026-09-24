@@ -47,14 +47,13 @@ class FormalHarnessTests(unittest.TestCase):
         trace = h.normalize_trace(cell, "raw/trace.jsonl", [{"kind":"tool_use","tool":"Grep","detail":{}}, {"kind":"tool_result","tool":"Bash","detail":{"result":{"version":"task-context-v0","facts":[{"fact_id":"symbol:x"}]}}}], "patch", "answer")
         self.assertEqual("raw/trace.jsonl", trace["raw_trace_pointer"]); self.assertEqual("symbol:x", trace["returned_facts"][0]["fact_id"])
         with self.assertRaises(h.FormalDataError): h.normalize_trace(cell, "PILOT_ONLY/x", [], "", "")
-    def test_runner_execution_readiness_has_zero_agent_invocations(self):
+    def test_runner_execution_preflight_has_zero_agent_invocations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); cfg=root/"config.json"; cfg.write_text(json.dumps(config()), encoding="utf-8")
             runner=Path(__file__).parent/"formal_runner.py"
             result=subprocess.run([sys.executable, str(runner), "--config", str(cfg), "--output", str(root/"out")], capture_output=True, text=True)
             self.assertEqual(0, result.returncode); self.assertIn('"planned_cells": 36', result.stdout)
-            execute=subprocess.run([sys.executable, str(runner), "--config", str(cfg), "--output", str(root/"ready"), "--execute"], capture_output=True, text=True)
-            self.assertEqual(0, execute.returncode); self.assertIn('"mode": "EXECUTION_READY"', execute.stdout); self.assertIn('"agent_invocation_count": 0', execute.stdout)
+            self.assertFalse((root/"out"/"cells").exists())
     def test_packet_is_blind(self):
         cell = next(c for c in self.matrix if c["arm"] == "B")
         trace = h.normalize_trace(cell, "raw/x", [], "patch", "answer")
@@ -78,7 +77,7 @@ class FormalHarnessTests(unittest.TestCase):
     def test_gate_and_machine_human_independence(self):
         records=[]
         for c in self.matrix:
-            records.append({"cell_id":c["cell_id"], "provenance_sha256":c["provenance_sha256"], "trace_parse_pass":True, "evaluator":{}, "returned_fact_ids":[], "final_reviews":[], "machine_metrics":{"retrieval_replacement_events":1, "redundant_read_events":2, "grep_calls":3, "read_calls":4}})
+            records.append({"cell_id":c["cell_id"], "provenance_sha256":c["provenance_sha256"], "dispatcher_version":h.DISPATCHER_VERSION, "attempt_count":1, "trace_parse_pass":True, "evaluator":{}, "returned_fact_ids":[], "final_reviews":[], "machine_metrics":{"retrieval_replacement_events":1, "redundant_read_events":2, "grep_calls":3, "read_calls":4}})
         self.assertEqual("PASS", h.completeness_gate(self.matrix, records)["state"])
         result=h.aggregate(self.matrix, records); self.assertEqual(0, result["human"]["consumed_fact_count"]); self.assertEqual(36, result["machine"]["retrieval_replacement_events"])
         bad=records[:-1]; self.assertEqual("FORMAL_DATA_INCOMPLETE", h.completeness_gate(self.matrix,bad)["state"])
@@ -95,5 +94,44 @@ class FormalHarnessTests(unittest.TestCase):
             with self.assertRaises(h.FormalDataError): h.preflight_execution(self.matrix, root)
         bad=[dict(c) for c in self.matrix]; bad[0]["review_protocol_version"]="drift"
         with self.assertRaises(h.FormalDataError): h.preflight_execution(bad, Path("does-not-exist"))
+    def test_dispatcher_lifecycle_is_atomic_and_never_retries(self):
+        cell=next(c for c in self.matrix if c["arm"] == "B")
+        invocation={"dispatcher_version":h.DISPATCHER_VERSION, "cell":cell, "runtime_root":"synthetic", "target_repository":"synthetic", "agent_argv":["fake"], "prompt":"synthetic", "environment":{}, "timeout_s":1}
+        calls=[]
+        def fake(_):
+            calls.append(1); return {"stdout":"out", "stderr":"err", "raw_trace":"trace", "events":[], "exit_code":0, "completion_state":"completed"}
+        with tempfile.TemporaryDirectory() as tmp:
+            result=h.dispatch_cell(Path(tmp), invocation, fake); self.assertEqual("completed", result["state"]); self.assertEqual(1,len(calls))
+            self.assertTrue((Path(tmp)/"cells"/h.artifact_key(cell["cell_id"])/"raw"/"stdout.txt").exists())
+            with self.assertRaises(h.FormalDataError): h.dispatch_cell(Path(tmp), invocation, fake)
+    def test_dispatcher_preserves_raw_on_failure(self):
+        cell=next(c for c in self.matrix if c["arm"] == "A")
+        invocation={"dispatcher_version":h.DISPATCHER_VERSION, "cell":cell, "runtime_root":"synthetic", "target_repository":"synthetic", "agent_argv":["fake"], "prompt":"synthetic", "environment":{}, "timeout_s":1}
+        cases=[
+            {"stdout":"o", "stderr":"e", "raw_trace":"t", "events":None},
+            {"stdout":"o", "stderr":"e", "raw_trace":"t", "events":[{"kind":"tool_result", "detail":{"result":{"version":"task-context-v0", "facts":[{}]}}}]},
+            {"stdout":"o", "stderr":"e", "raw_trace":None, "events":[]},
+        ]
+        for outcome in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                result=h.dispatch_cell(Path(tmp), invocation, lambda _: outcome); self.assertEqual("incomplete",result["state"])
+                root=Path(tmp)/"cells"/h.artifact_key(cell["cell_id"]); self.assertTrue((root/"incomplete.json").exists()); self.assertFalse((root/"cell-record.json").exists())
+    def test_dispatcher_records_task_failure_but_stops_infrastructure_failure(self):
+        cell=next(c for c in self.matrix if c["arm"] == "A")
+        invocation={"dispatcher_version":h.DISPATCHER_VERSION, "cell":cell, "runtime_root":"synthetic", "target_repository":"synthetic", "agent_argv":["fake"], "prompt":"synthetic", "environment":{}, "timeout_s":1}
+        task_failure={"stdout":"o", "stderr":"e", "raw_trace":"t", "events":[], "exit_code":9, "completion_state":"completed"}
+        timeout={"stdout":"o", "stderr":"e", "raw_trace":"t", "events":[], "completion_state":"timeout", "infrastructure_failure":True}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual("completed", h.dispatch_cell(Path(tmp), invocation, lambda _: task_failure)["state"])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual("incomplete", h.dispatch_cell(Path(tmp), invocation, lambda _: timeout)["state"])
+        bad=deepcopy(invocation); bad["cell"]=dict(cell, runtime_sha="wrong")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(h.FormalDataError): h.dispatch_cell(Path(tmp), bad, lambda _: task_failure)
+    def test_production_adapter_checks_revision_before_agent(self):
+        cell=next(c for c in self.matrix if c["arm"] == "A")
+        invocation={"cell":cell, "runtime_root":"missing", "target_repository":"missing", "agent_argv":["must-not-run"], "prompt":"synthetic", "environment":{}, "timeout_s":1}
+        result=h.subprocess_executor(invocation)
+        self.assertTrue(result["infrastructure_failure"]); self.assertEqual("preflight_failed", result["completion_state"])
 
 if __name__ == "__main__": unittest.main()

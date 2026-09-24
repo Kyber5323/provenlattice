@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import time
 from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
@@ -20,6 +23,7 @@ ARM_SHA = {
     "B": "e385681146f9d70b08466093060b8cc8204c65a8",
 }
 PROTOCOL_VERSION = "d9-c5-review-v1"
+DISPATCHER_VERSION = "d9-c6-a2-dispatcher-v1"
 FROZEN_INVENTORY_A = frozenset({"analysis", "analyze", "callees", "callers", "definition", "dependencies", "dependents", "document", "evidence", "explain-module", "explain-symbol", "explain_module", "explain_symbol", "find-related-code", "find-related-documents", "find_related_code", "find_related_documents", "implemented", "index", "knowledge", "references", "requirements", "shard", "status", "subgraph", "symbol", "trace-evidence", "trace_evidence", "update"})
 FROZEN_INVENTORY_B = FROZEN_INVENTORY_A | {"task-context"}
 YES_REASONS = {"EXPLICIT_REASONING_USE", "TOOL_SELECTION_USE", "CODE_NAVIGATION_USE", "PATCH_ACTION_USE"}
@@ -45,6 +49,11 @@ def digest(value: Any) -> str:
 
 def cell_id(case_id: str, arm: str, repeat: int) -> str:
     return f"{case_id}::{arm}::r{repeat}"
+
+
+def artifact_key(cell_identifier: str) -> str:
+    """Windows-safe stable directory identity; the full cell ID remains metadata."""
+    return "cell-" + hashlib.sha256(cell_identifier.encode("utf-8")).hexdigest()[:24]
 
 
 def generate_matrix(run_config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -107,12 +116,126 @@ def write_manifest(root: Path, matrix: list[dict[str, Any]], run_config: dict[st
     root.mkdir(parents=True, exist_ok=False)
     manifest = {"namespace": "D9-C5-FORMAL", "pilot_artifacts": 0, "matrix": matrix,
                 "run_config_sha256": digest({k: v for k, v in run_config.items() if k != "case_prompts"}),
+                "dispatch_contract_sha256": digest(run_config.get("dispatch", {})),
                 "schema": "d9-c5-formal-manifest-v1"}
     path = root / "formal-manifest.json"
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return path
 
 
+def load_manifest(path: Path) -> dict[str, Any]:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest.get("namespace") != "D9-C5-FORMAL" or manifest.get("pilot_artifacts") != 0 or manifest.get("schema") != "d9-c5-formal-manifest-v1":
+        raise FormalDataError("invalid or pilot formal manifest")
+    validate_matrix(manifest.get("matrix", []))
+    return manifest
+
+
+def construct_invocation(manifest: dict[str, Any], run_config: dict[str, Any], selected_cell_id: str) -> dict[str, Any]:
+    """Build an immutable invocation from a manifest cell, never CLI overrides."""
+    matrix = generate_matrix(run_config)
+    if matrix != manifest.get("matrix") or digest(run_config.get("dispatch", {})) != manifest.get("dispatch_contract_sha256"):
+        raise FormalDataError("manifest/config identity drift")
+    cell = next((c for c in matrix if c["cell_id"] == selected_cell_id), None)
+    if cell is None:
+        raise FormalDataError("selected cell is not in frozen manifest")
+    dispatch = run_config.get("dispatch")
+    if not isinstance(dispatch, dict) or not {"runtime_roots", "target_repositories", "agent_argv"} <= set(dispatch):
+        raise FormalDataError("dispatch contract missing")
+    runtime_root = dispatch["runtime_roots"].get(cell["arm"])
+    target_repo = dispatch["target_repositories"].get(cell["case_id"])
+    if not runtime_root or not target_repo:
+        raise FormalDataError("dispatch target missing")
+    return {"dispatcher_version": DISPATCHER_VERSION, "cell": cell, "runtime_root": runtime_root,
+            "target_repository": target_repo, "agent_argv": list(dispatch["agent_argv"]),
+            "prompt": run_config["case_prompts"][cell["case_id"]],
+            "environment": deepcopy(dispatch.get("environment", {})), "timeout_s": cell["timeout_s"]}
+
+
+def _atomic_json(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def dispatch_cell(artifact_root: Path, invocation: dict[str, Any], executor) -> dict[str, Any]:
+    """Execute exactly once through an injected executor and atomically record it.
+
+    ``executor`` is the sole runtime boundary: production will use a subprocess
+    adapter; qualification injects a fake. It must return raw strings/events and
+    never receives a caller-overridable cell field.
+    """
+    cell = invocation["cell"]
+    if cell["runtime_sha"] != ARM_SHA[cell["arm"]] or invocation.get("dispatcher_version") != DISPATCHER_VERSION:
+        raise FormalDataError("runtime or dispatcher identity mismatch before Agent start")
+    cell_root = artifact_root / "cells" / artifact_key(cell["cell_id"])
+    if cell_root.exists():
+        raise FormalDataError("completed or incomplete cell cannot be rerun")
+    raw_root = cell_root / "raw"
+    raw_root.mkdir(parents=True)
+    started = time.time()
+    outcome = executor(deepcopy(invocation))  # exactly one call: no implicit retry
+    ended = time.time()
+    for name in ("stdout", "stderr", "raw_trace"):
+        value = outcome.get(name)
+        if not isinstance(value, str):
+            _atomic_json(cell_root / "incomplete.json", {"state": "infrastructure_failure", "reason": f"missing {name}", "attempt_count": 1})
+            return {"state": "incomplete", "attempt_count": 1}
+        (raw_root / f"{name}.txt").write_text(value, encoding="utf-8")
+    metadata = {"cell_id": cell["cell_id"], "runtime_sha": cell["runtime_sha"], "attempt_count": 1,
+                "started_at": started, "ended_at": ended, "exit_code": outcome.get("exit_code"),
+                "completion_state": outcome.get("completion_state"), "invocation_sha256": digest(invocation)}
+    _atomic_json(raw_root / "metadata.json", metadata)
+    if outcome.get("infrastructure_failure"):
+        _atomic_json(cell_root / "incomplete.json", {"state": "infrastructure_failure", "attempt_count": 1})
+        return {"state": "incomplete", "attempt_count": 1}
+    try:
+        normalized = normalize_trace(cell, str(raw_root / "raw_trace.txt"), outcome.get("events"),
+                                     outcome.get("final_patch", ""), outcome.get("final_result", ""))
+        _atomic_json(cell_root / "normalized-trace.json", normalized)
+        record = {"cell_id": cell["cell_id"], "provenance_sha256": cell["provenance_sha256"],
+                  "dispatcher_version": DISPATCHER_VERSION, "attempt_count": 1, "trace_parse_pass": True,
+                  "raw_artifacts": str(raw_root), "normalized_trace": str(cell_root / "normalized-trace.json"),
+                  "returned_fact_ids": [f["fact_id"] for f in normalized["returned_facts"]],
+                  "final_reviews": [], "machine_metrics": {}, "evaluator": None,
+                  "execution": metadata}
+        _atomic_json(cell_root / "cell-record.json", record)
+        return {"state": "completed", "attempt_count": 1, "record": record}
+    except Exception as exc:
+        _atomic_json(cell_root / "incomplete.json", {"state": "normalization_failure", "reason": str(exc), "attempt_count": 1})
+        return {"state": "incomplete", "attempt_count": 1}
+
+
+def subprocess_executor(invocation: dict[str, Any]) -> dict[str, Any]:
+    """The sole production adapter; called only by formal_runner --execute."""
+    runtime = Path(invocation["runtime_root"])
+    target = Path(invocation["target_repository"])
+    expected_runtime = invocation["cell"]["runtime_sha"]
+    expected_target = invocation["cell"]["base_commit"]
+    def revision(path: Path) -> str:
+        result = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return result.stdout.strip() if result.returncode == 0 else ""
+    if revision(runtime) != expected_runtime or revision(target) != expected_target:
+        return {"stdout": "", "stderr": "runtime or target revision mismatch", "raw_trace": "", "events": [], "completion_state": "preflight_failed", "infrastructure_failure": True}
+    environment = {**os.environ, **invocation["environment"], "PYTHONPATH": str(runtime / "src")}
+    try:
+        result = subprocess.run(invocation["agent_argv"], cwd=target, input=invocation["prompt"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=invocation["timeout_s"], env=environment)
+        raw_trace = result.stdout
+        events = []
+        for line in raw_trace.splitlines():
+            try:
+                decoded = json.loads(line)
+                if isinstance(decoded, dict): events.append(decoded)
+            except json.JSONDecodeError:
+                continue
+        return {"stdout": result.stdout, "stderr": result.stderr, "raw_trace": raw_trace, "events": events,
+                "exit_code": result.returncode, "completion_state": "completed"}
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""; stderr = exc.stderr or ""
+        if isinstance(stdout, bytes): stdout = stdout.decode("utf-8", "replace")
+        if isinstance(stderr, bytes): stderr = stderr.decode("utf-8", "replace")
+        return {"stdout": stdout, "stderr": stderr, "raw_trace": stdout, "events": [],
+                "completion_state": "timeout", "infrastructure_failure": True}
 def preflight_execution(matrix: list[dict[str, Any]], artifact_root: Path) -> dict[str, Any]:
     """Validate a frozen manifest before dispatch; never starts an Agent."""
     validate_matrix(matrix)
@@ -236,7 +359,7 @@ def completeness_gate(matrix: list[dict[str, Any]], records: list[dict[str, Any]
             if record.get("marking") == "PILOT_ONLY" or "PILOT_ONLY" in str(record):
                 raise FormalDataError("pilot artifact in formal aggregation")
             cell = expected[record["cell_id"]]
-            if record.get("provenance_sha256") != cell["provenance_sha256"] or not record.get("trace_parse_pass") or "evaluator" not in record:
+            if record.get("provenance_sha256") != cell["provenance_sha256"] or record.get("dispatcher_version") != DISPATCHER_VERSION or record.get("attempt_count") != 1 or not record.get("trace_parse_pass") or "evaluator" not in record:
                 raise FormalDataError("record provenance, trace, or evaluator missing")
             returned = set(record.get("returned_fact_ids", []))
             reviewed = set()

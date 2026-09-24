@@ -14,7 +14,7 @@ import subprocess
 import time
 from collections import Counter
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -41,6 +41,31 @@ FROZEN_CASES = {
 
 class FormalDataError(ValueError):
     """Fail-closed validation failure; no effect aggregate may be produced."""
+
+
+_VALIDATED_ENVIRONMENT_SEAL = object()
+
+
+@dataclass(frozen=True)
+class ValidatedExecutionEnvironment:
+    """Resolver-issued paths for the formal route only.
+
+    The private seal deliberately prevents a plain mapping (or a casually
+    constructed dataclass) from standing in for resolver output.
+    """
+    binding_sha256: str
+    source_repository: str
+    runtimes: tuple[tuple[str, str], ...]
+    _seal: object = field(repr=False, compare=False, default=None)
+
+    def runtime_for(self, arm: str) -> str:
+        values = dict(self.runtimes)
+        if arm not in values:
+            raise FormalDataError("validated environment has no runtime for arm")
+        return values[arm]
+
+    def is_resolver_issued(self) -> bool:
+        return self._seal is _VALIDATED_ENVIRONMENT_SEAL
 
 
 def digest(value: Any) -> str:
@@ -129,6 +154,73 @@ def load_manifest(path: Path) -> dict[str, Any]:
         raise FormalDataError("invalid or pilot formal manifest")
     validate_matrix(manifest.get("matrix", []))
     return manifest
+
+
+def load_canonical_bundle(root: Path) -> dict[str, Any]:
+    """Load only the formal, hash-closed artifact class (never synthetic input)."""
+    manifest_path, contract_path = root / "formal-manifest.json", root / "dispatch-contract.json"
+    manifest, contract = json.loads(manifest_path.read_text(encoding="utf-8")), json.loads(contract_path.read_text(encoding="utf-8"))
+    if manifest.get("experiment_id") != "D9-C5-FORMAL" or manifest.get("artifact_class") != "formal" or manifest.get("schema") != "d9-c5-formal-manifest-v1" or len(manifest.get("cells", [])) != 36:
+        raise FormalDataError("not a canonical formal manifest")
+    if contract.get("experiment_id") != "D9-C5-FORMAL" or contract.get("artifact_class") != "formal" or contract.get("schema") != "d9-c5-formal-dispatch-contract-v1":
+        raise FormalDataError("not a canonical formal dispatch contract")
+    if digest(manifest) != (root / "formal-manifest.sha256").read_text().strip() or digest(contract) != (root / "dispatch-contract.sha256").read_text().strip() or manifest.get("dispatch_contract_sha256") != digest(contract):
+        raise FormalDataError("canonical artifact hash mismatch")
+    prompts = {}
+    for case, expected in manifest["prompt_config_sha256"].items():
+        payload = json.loads((root / "prompts" / f"{case}.json").read_text(encoding="utf-8"))
+        if digest(payload) != expected: raise FormalDataError("prompt artifact hash mismatch")
+        prompts[case] = payload["problem_statement"]
+    expected_cells = {cell_id(case, arm, repeat) for case in FROZEN_CASES for arm in ("A", "B") for repeat in (1, 2, 3)}
+    if {cell.get("cell_id") for cell in manifest["cells"]} != expected_cells:
+        raise FormalDataError("canonical formal matrix drift")
+    for cell in manifest["cells"]:
+        expected_original, expected_commit = FROZEN_CASES[cell["case_id"]]
+        if cell.get("source_repo") != contract.get("source_repo") or cell.get("original_instance_id") != expected_original or cell.get("base_commit") != expected_commit or cell.get("runtime_sha") != contract["runtime_sha"].get(cell.get("arm")):
+            raise FormalDataError("canonical formal cell identity drift")
+    return {"manifest": manifest, "contract": contract, "prompts": prompts, "manifest_sha256": digest(manifest), "dispatch_sha256": digest(contract)}
+
+
+def resolve_execution_environment(bundle: dict[str, Any], binding_path: Path) -> ValidatedExecutionEnvironment:
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    if binding.get("artifact_class") != "execution_environment_binding" or binding.get("schema") != "d9-c5-execution-binding-v1":
+        raise FormalDataError("not an environment binding")
+    forbidden = {"prompt", "model", "timeout", "case", "repeat", "inventory"}
+    if forbidden & set(binding): raise FormalDataError("binding contains experiment semantics")
+    source = binding.get("source_repositories", {}).get("facebook/zstd")
+    runtimes = binding.get("runtime_roots", {})
+    if not source or set(runtimes) != {"A", "B"}: raise FormalDataError("missing unique environment binding")
+    source_path = Path(source["path"]); remote = _git(source_path, ["remote", "get-url", "origin"], source_path)
+    if remote.returncode or remote.stdout.strip().replace(".git", "") != source["expected_origin"].replace(".git", ""): raise FormalDataError("source remote mismatch")
+    required_commits = set(source.get("required_base_commits", []))
+    manifest_commits = {cell["base_commit"] for cell in bundle["manifest"]["cells"]}
+    if required_commits != manifest_commits:
+        raise FormalDataError("binding base-commit contract mismatch")
+    for commit in required_commits:
+        if not _revision(source_path, source_path, commit): raise FormalDataError("base commit unavailable")
+    resolved_runtimes = []
+    for arm, expected in bundle["contract"]["runtime_sha"].items():
+        item = runtimes[arm]; path = Path(item["path"])
+        if item.get("expected_sha") != expected or _revision(path, path) != expected: raise FormalDataError("runtime identity mismatch")
+        resolved_runtimes.append((arm, str(_canonical(path))))
+    return ValidatedExecutionEnvironment(binding_sha256=digest(binding), source_repository=str(_canonical(source_path)),
+                                         runtimes=tuple(sorted(resolved_runtimes)), _seal=_VALIDATED_ENVIRONMENT_SEAL)
+
+
+def construct_formal_invocation(bundle: dict[str, Any], environment: ValidatedExecutionEnvironment, selected_cell_id: str) -> dict[str, Any]:
+    """Formal-only invocation: raw paths are impossible at this interface."""
+    cell = next((c for c in bundle["manifest"]["cells"] if c["cell_id"] == selected_cell_id), None)
+    if cell is None or cell["runtime_sha"] != bundle["contract"]["runtime_sha"][cell["arm"]]:
+        raise FormalDataError("formal cell/runtime mismatch")
+    if not isinstance(environment, ValidatedExecutionEnvironment) or not environment.is_resolver_issued() or cell["source_repo"] != "facebook/zstd":
+        raise FormalDataError("validated environment required")
+    runtime_root = environment.runtime_for(cell["arm"])
+    formal_cell = {**cell, "provenance_sha256": digest({"manifest_sha256": bundle["manifest_sha256"], "cell": cell})}
+    return {"dispatcher_version": DISPATCHER_VERSION, "cell": formal_cell, "runtime_root": runtime_root,
+            "approved_runtime_root": runtime_root, "target_repository": environment.source_repository,
+            "approved_source_repository": environment.source_repository, "binding_sha256": environment.binding_sha256,
+            "agent_argv": bundle["contract"]["agent_adapter"].split(), "prompt": bundle["prompts"][cell["case_id"]],
+            "environment": {}, "timeout_s": bundle["contract"]["timeout_s"]}
 
 
 def construct_invocation(manifest: dict[str, Any], run_config: dict[str, Any], selected_cell_id: str) -> dict[str, Any]:
@@ -332,6 +424,21 @@ def preflight_execution(matrix: list[dict[str, Any]], artifact_root: Path, curre
                                 "trace": "d9-c5-normalized-trace-v1",
                                 "packet": "d9-c5-blinded-packet-v1",
                                 "review": PROTOCOL_VERSION}}
+
+
+def preflight_formal_execution(bundle: dict[str, Any], artifact_root: Path, current_cell_id: str) -> dict[str, Any]:
+    """Preflight the canonical formal route without accepting raw path config."""
+    cells = bundle["manifest"]["cells"]
+    if not any(cell["cell_id"] == current_cell_id for cell in cells):
+        raise FormalDataError("selected cell is not in canonical formal manifest")
+    if artifact_root.exists():
+        cell_root = artifact_root / "cells" / artifact_key(current_cell_id)
+        if cell_root.exists():
+            raise FormalDataError("current cell already completed or incomplete")
+    return {"state": "EXECUTION_READY", "agent_invocation_count": 0,
+            "planned_cells": len(cells), "binding_required": True,
+            "manifest_sha256": bundle["manifest_sha256"],
+            "dispatch_sha256": bundle["dispatch_sha256"]}
 
 
 def normalize_trace(cell: dict[str, Any], raw_trace_pointer: str, events: list[dict[str, Any]],

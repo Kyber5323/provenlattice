@@ -59,12 +59,12 @@ class FormalHarnessTests(unittest.TestCase):
         trace = h.normalize_trace(cell, "raw/trace.jsonl", [{"kind":"tool_use","tool":"Grep","detail":{}}, {"kind":"tool_result","tool":"Bash","detail":{"result":{"version":"task-context-v0","facts":[{"fact_id":"symbol:x"}]}}}], "patch", "answer")
         self.assertEqual("raw/trace.jsonl", trace["raw_trace_pointer"]); self.assertEqual("symbol:x", trace["returned_facts"][0]["fact_id"])
         with self.assertRaises(h.FormalDataError): h.normalize_trace(cell, "PILOT_ONLY/x", [], "", "")
-    def test_runner_execution_preflight_has_zero_agent_invocations(self):
+    def test_runner_rejects_legacy_config_formal_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); cfg=root/"config.json"; cfg.write_text(json.dumps(config()), encoding="utf-8")
             runner=Path(__file__).parent/"formal_runner.py"
             result=subprocess.run([sys.executable, str(runner), "--config", str(cfg), "--output", str(root/"out")], capture_output=True, text=True)
-            self.assertEqual(0, result.returncode); self.assertIn('"planned_cells": 36', result.stdout)
+            self.assertNotEqual(0, result.returncode); self.assertIn("error:", result.stderr)
             self.assertFalse((root/"out"/"cells").exists())
     def test_packet_is_blind(self):
         cell = next(c for c in self.matrix if c["arm"] == "B")

@@ -10,18 +10,21 @@ root `formal-manifest.json` contains the 36 planned provenance records.
 `d9-c5-review-v1`. Qualification tests use synthetic strings only and never
 open, checkout, or execute a frozen ContextBench case.
 
-`formal_runner.py --config config.json --output artifacts/formal` first creates
-the immutable plan. Its `--execute --cell-id <id>` path loads that plan, calls
-the single `dispatch_cell` lifecycle, and accepts no caller overrides of cell
-identity or runtime. Qualification uses a fake executor; the production adapter
-must be explicitly installed before a formal run can start.
+`formal_runner.py` has no `--config` mode. Its only formal input route is
+`--formal-root <canonical-formal-root> --binding <execution-binding> --output
+<artifacts> --cell-id <id>` followed by either `--execute` or
+`--materialize-only`. `--validate-invocation` uses the same canonical and
+binding validation but stops before workspace materialization. The runner verifies the canonical artifact hashes, then
+resolves the local binding into a sealed environment before it constructs an
+invocation. Raw `runtime_roots` and `target_repositories` are never formal CLI
+inputs. Synthetic qualification helpers remain internal to `formal_harness.py`.
 
 Each dispatch materializes `worktrees/<stable-cell-hash>/` as a detached, clean
 checkout at the manifest base commit. Existing workspaces and either completed
 or incomplete artifacts for the selected cell fail closed; completed artifacts
 for other cells do not block a later cell.
 
-`--materialize-only --manifest <frozen-manifest> --cell-id <id>` invokes the
+`--materialize-only --formal-root <canonical-formal-root> --binding <binding> --cell-id <id>` invokes the
 same `prepare_cell_execution()` lifecycle used by dispatch, then writes a
 readiness artifact under `readiness/materialization/`. It does not enter the
 executor branch and never writes `cells/*/cell-record.json` or `incomplete.json`.

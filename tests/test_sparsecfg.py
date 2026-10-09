@@ -615,6 +615,185 @@ void hard_exit(void) {
         self.assertTrue(is_exit(outs[0]))
         self.assertEqual(outs[0].flags, ())
 
+    def test_a_noreturn_call_ends_the_chain(self) -> None:
+        """`GGML_ABORT` is llama.cpp's `ggml_abort(__FILE__, __LINE__, ...)`, so
+        it never comes back and the statements after it in the same arm do not
+        run. A walker that reads the arm as falling through is how two arms
+        that are in fact exclusive come to look like they both execute -- the
+        shape stage 6's review sheet read as a false double free."""
+        source = """extern void g(void);
+
+void f(int c) {
+  char *p = (char *)malloc(8);
+  if (c) { GGML_ABORT("bad"); g(); }
+  free(p);
+}
+"""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        events, edges = publish(Path(temp.name), "src/abort.c", source)
+        throw = by_type(events)["THROW"][0]
+        outs = out_edges(edges, throw)
+        # Same target as a syntactic `throw`, but unflagged: `abort()` is not
+        # an exception, and only a `throw` earns that flag.
+        self.assertEqual(len(outs), 1)
+        self.assertTrue(is_exit(outs[0]))
+        self.assertEqual(outs[0].flags, ())
+        # `g()` sits after the abort inside the same arm, so nothing reaches it.
+        after = next(event for event in events
+                     if event.event_type == "CALL" and event.start_line == 5)
+        self.assertEqual([edge for edge in edges if edge.dst_event_id == after.event_id], [])
+        # And the code after the `if` is still reachable through the false arm.
+        release = by_type(events)["RELEASE"][0]
+        self.assertTrue([edge for edge in edges if edge.dst_event_id == release])
+
+    def test_a_project_assertion_macro_still_falls_through(self) -> None:
+        """`GGML_ASSERT(x)` expands to `if (!(x)) GGML_ABORT(...)`, so it
+        returns whenever the condition holds. It is a branch, not a
+        terminator, and ending the chain there would invent paths to the exit
+        the source does not have."""
+        source = """extern void g(void);
+
+void f(int c) {
+  char *p = (char *)malloc(8);
+  GGML_ASSERT(c);
+  g();
+  free(p);
+}
+"""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        events, edges = publish(Path(temp.name), "src/assert.c", source)
+        throw = by_type(events)["THROW"][0]
+        self.assertEqual(
+            next(event.matched_name for event in events if event.event_id == throw),
+            "GGML_ASSERT",
+        )
+        outs = out_edges(edges, throw)
+        self.assertEqual(len(outs), 1)
+        self.assertFalse(is_exit(outs[0]))
+        after = next(event for event in events
+                     if event.event_type == "CALL" and event.start_line == 6)
+        self.assertEqual(outs[0].dst_event_id, after.event_id)
+
+    def test_an_assignment_bound_lambda_does_not_lend_its_target(self) -> None:
+        """`auto compute = [&]() { ... };` binds a name to a closure, not to
+        what the body computes, so a call inside the body acts on what the
+        body says and not on `compute`.
+
+        `_plain_generic` carries the bound name down the whole statement as
+        `_assign_target`, which is what names `p` in `p = malloc(n)` -- and a
+        lambda body is a subtree of the statement that binds the closure, so
+        every call inside it used to be reported as acting on the closure's
+        name. The stage 7 review read `lock.unlock()` inside such a body as
+        releasing the closure."""
+        source = """#include <mutex>
+static std::mutex m;
+void f(void) {
+  auto compute = [&]() { m.unlock(); };
+  compute();
+}
+"""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        events, edges = publish(Path(temp.name), "src/lambda.cpp", source)
+        points = materialize_points(events, edges)
+        unlock = next(info for info in points.values() if info["event_type"] == "UNLOCK")
+        self.assertEqual(unlock["subject"], "m")
+        self.assertEqual(unlock["subject_from"], "receiver")
+        self.assertEqual(unlock["subject_decl"], "file_static:src/lambda.cpp:m")
+
+    def test_an_assignment_inside_the_lambda_body_still_applies(self) -> None:
+        """The boundary is the closure, not the walk: one assignment inside
+        the body is the body's own, and the name it binds is what the
+        expressions under it act on. Without this half, the narrowing could
+        pass by giving up on every assignment a lambda contains."""
+        source = """#include <stdlib.h>
+void f(void) {
+  auto compute = [&]() { auto q = (char *)malloc(8); return q; };
+  compute();
+}
+"""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        events, edges = publish(Path(temp.name), "src/inner.cpp", source)
+        points = materialize_points(events, edges)
+        alloc = next(info for info in points.values() if info["event_type"] == "ALLOC")
+        self.assertEqual(alloc["subject"], "q")
+        self.assertEqual(alloc["subject_from"], "assignment")
+        self.assertEqual(alloc["subject_decl"], "local:q")
+
+    def test_a_write_through_allocator_names_what_its_argument_addresses(self) -> None:
+        """`posix_memalign(&base, ...)` does not return the buffer -- it
+        returns an error code and writes the pointer through its first
+        argument. The assignment rule would name `rc`, which is an int and
+        never a resource, so for the callees the vocabulary lists as
+        `out_param` the argument rule runs first."""
+        source = """#include <stdlib.h>
+int f(size_t n) {
+  void *base = 0;
+  int rc = posix_memalign(&base, 16, n);
+  return rc;
+}
+"""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        events, edges = publish(Path(temp.name), "src/aligned.cpp", source)
+        points = materialize_points(events, edges)
+        alloc = next(info for info in points.values() if info["event_type"] == "ALLOC")
+        self.assertEqual(alloc["subject"], "base")
+        self.assertEqual(alloc["subject_from"], "out_argument")
+        self.assertEqual(alloc["subject_decl"], "local:base")
+        # The call itself is still a stored call result: the rule is scoped to
+        # the allocation, and `error_handling` reads exactly that fact.
+        call = next(info for info in points.values() if info["event_type"] == "CALL")
+        self.assertEqual(call["subject"], "rc")
+        self.assertEqual(call["subject_from"], "assignment")
+
+    def test_the_cast_around_an_out_argument_keeps_the_member_path(self) -> None:
+        """`(void **)&c->send_mem` is the argument's type, not its object, so
+        it is stepped over: without that the member path would be lost and the
+        send and receive buffers of one context would read as one object."""
+        source = """#include <stdlib.h>
+struct S { void *send_mem; void *recv_mem; };
+void f(struct S *c) {
+  if (posix_memalign((void **)&c->send_mem, 4096, 64) != 0) c->send_mem = 0;
+  if (posix_memalign((void **)&c->recv_mem, 4096, 64) != 0) c->recv_mem = 0;
+}
+"""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        events, edges = publish(Path(temp.name), "src/ring.cpp", source)
+        points = materialize_points(events, edges)
+        allocs = [info for info in points.values() if info["event_type"] == "ALLOC"]
+        self.assertEqual(
+            sorted((info["subject"], info["subject_member"]) for info in allocs),
+            [("c", "recv_mem"), ("c", "send_mem")],
+        )
+        for info in allocs:
+            self.assertEqual(info["subject_from"], "out_argument")
+            self.assertEqual(info["subject_exact"], "false")
+
+    def test_a_returning_allocator_keeps_the_assignment_rule(self) -> None:
+        """`memalign` sits in the same word list as `posix_memalign` and
+        returns the pointer, so the declaration binds the object and nothing
+        about it changes. Widening the rule to the name's neighbours would
+        take the buffer away from `block` and give it to the alignment."""
+        source = """#include <stdlib.h>
+void *f(size_t n) {
+  void *block = memalign(16, n);
+  return block;
+}
+"""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        events, edges = publish(Path(temp.name), "src/memalign.cpp", source)
+        points = materialize_points(events, edges)
+        alloc = next(info for info in points.values() if info["event_type"] == "ALLOC")
+        self.assertEqual(alloc["subject"], "block")
+        self.assertEqual(alloc["subject_from"], "assignment")
+        self.assertEqual(alloc["subject_decl"], "local:block")
+
     def test_exit_is_created_only_for_methods_with_points(self) -> None:
         source = """int proto(int x);
 

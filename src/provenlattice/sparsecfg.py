@@ -27,7 +27,7 @@ import json
 import re
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Collection, Iterable
+from typing import Any, Callable, Collection, Iterable, Mapping
 
 from .identity import CFG_EXIT_PREFIX
 from .models import (
@@ -64,6 +64,14 @@ SUBJECT_FROM_ARGUMENT = "argument"
 SUBJECT_FROM_RECEIVER = "receiver"
 SUBJECT_FROM_RAII = "raii"
 SUBJECT_FROM_RETURN = "return"
+# The subject a write-through allocator names: `posix_memalign(&p, ...)`
+# allocates `p`, and the name is recovered from what the first argument
+# addresses rather than from the call's value. Its own spelling and not
+# `argument`, because the two are different claims: `free(p)` acts on the
+# expression the argument *is*, while this acts on the expression the
+# argument *points at*, and a reader of the annotation has to be able to
+# tell which one produced the name.
+SUBJECT_FROM_OUT_ARGUMENT = "out_argument"
 
 # The event types that get a subject recovered for them. Stage 3 covered
 # ALLOC/RELEASE/CALL; the typed queries need the lock, atomic, spawn and
@@ -73,6 +81,12 @@ SUBJECT_FROM_RETURN = "return"
 _ANNOTATED_EVENT_TYPES = frozenset(
     {"ALLOC", "RELEASE", "CALL", "LOCK", "UNLOCK", "ATOMIC", "THREAD_SPAWN", "RETURN"}
 )
+
+# The two node types that bind a name to a value. `_plain_generic` carries the
+# bound name down the whole subtree as `_assign_target`, which is what makes
+# `p = malloc(n)` name the allocation `p`; `_assign_target_applies` reads the
+# same set back off the tree to decide how far that carrying may reach.
+_ASSIGNMENT_NODES = frozenset({"init_declarator", "assignment_expression"})
 
 # The event types that are published but never connected (stage 5A). An access
 # is a fact about an expression, not a position control flow can reach: giving
@@ -297,6 +311,7 @@ class SparseCfgBuilder:
         line_of: Callable[[int, bool], int],
         profile: LanguageProfile,
         declarations: Any = None,
+        out_param: Iterable[str] = (),
     ) -> None:
         """`owners` is a parsing.events.OwnerIndex; `line_of(byte, is_end)`.
 
@@ -304,12 +319,19 @@ class SparseCfgBuilder:
         the language has none (Python today). It is handed in rather than built
         here because this class consumes facts and does not produce them: the
         same reason `owners` is handed in.
+
+        `out_param` is the vocabulary's list of allocation callees that hand
+        the pointer back through their first argument, as last name
+        components. It arrives as a fact for the same reason `declarations`
+        does: which C functions have that shape is a language fact and lives
+        in the vocabulary file, and the walker only reads it.
         """
         self.source = source
         self.owners = owners
         self.line_of = line_of
         self.profile = profile
         self.declarations = declarations
+        self._out_param = frozenset(out_param)
         # The hits grouped by the span of the node that produced them. Two
         # events share one span when one node matches two event types
         # (`free(p)` is both CALL and RELEASE); they chain in type order.
@@ -434,12 +456,14 @@ class SparseCfgBuilder:
         `tmp`. The link lands on the allocation, where the lifetime query's
         path-independent rulings read it.
 
-        Only unconditional writes join, and only into storage the access
-        layer itself calls shared: a conditional escape is exactly the shape
-        where the other path still leaks, and the query would have to stay
-        silent about it. A write that does not start after the allocation is
-        not an escape of *this* allocation -- a same-named local in an earlier
-        turn of a loop is a different object with the same spelling.
+        Only unconditional writes join, and only into storage that outlives
+        the frame -- which is shared storage, plus a write *through* a
+        parameter (see `_escapes_the_frame`): a conditional escape is exactly
+        the shape where the other path still leaks, and the query would have
+        to stay silent about it. A write that does not start after the
+        allocation is not an escape of *this* allocation -- a same-named
+        local in an earlier turn of a loop is a different object with the
+        same spelling.
         """
         # `self._points` and `self._annotations` accumulate across methods; the
         # escape of one method's local is only ever written by the same
@@ -452,7 +476,7 @@ class SparseCfgBuilder:
             == owner_key
             and point.annotations.get("write_source")
             and point.annotations.get("unconditional") == "true"
-            and point.annotations.get("subject_storage") in _ESCAPE_TARGET_STORAGES
+            and _escapes_the_frame(point.annotations)
         ]
         if not writes:
             return
@@ -564,6 +588,32 @@ class SparseCfgBuilder:
                 return True
         return False
 
+    def _assign_target_applies(self, node: Any) -> bool:
+        """Whether the enclosing assignment still describes this expression.
+
+        `auto compute = [&]() { ... lock.unlock(); };` walks the lambda body
+        with `_assign_target` set to `compute`, so every call inside the body
+        would be reported as acting on a name the body never mentions -- and
+        `lock.unlock()` would release `compute`. A lambda body runs when the
+        closure is called, which is not a property of this method's paths any
+        more than `_under_conditional_expression`'s two cases are.
+
+        The walk stops at the first enclosing assignment: one inside the body
+        is the body's own and still applies, and only a lambda above that one
+        makes the carried target foreign. A subtree with no enclosing
+        assignment of either kind keeps the answer it has today, which is why
+        this only ever narrows.
+        """
+        while node is not None:
+            node = node.parent
+            if node is None:
+                return True
+            if node.type in _ASSIGNMENT_NODES:
+                return True
+            if node.type == "lambda_expression":
+                return False
+        return True
+
     def _assign_ordinals(self) -> None:
         # Same rule as the event layer: source order, reproducible by reading
         # the file. CHECK/BRANCH/DEREFERENCE never come out of the vocabulary,
@@ -634,7 +684,7 @@ class SparseCfgBuilder:
         return self._plain_generic(node, incoming)
 
     def _plain_generic(self, node: Any, incoming: list[_Open]) -> tuple["_Point | None", list[_Open]]:
-        if node.type in {"init_declarator", "assignment_expression"}:
+        if node.type in _ASSIGNMENT_NODES:
             target_node = node.child_by_field_name("left")
             if target_node is None:
                 target_node = node.child_by_field_name("declarator")
@@ -738,10 +788,20 @@ class SparseCfgBuilder:
         event type, which is the one thing this stage must not do.
         """
         threaded, _event_only = self._own_points(node)
+        noreturn = False
         for point in threaded:
             current = self._connect(current, point)
             if entry is None:
                 entry = point
+            noreturn = noreturn or _never_returns(point)
+        if noreturn:
+            # Nothing after this call on this chain runs, so the chain stops
+            # here. Same shape as `_throw_statement` and the same target, but
+            # the edge is unflagged: `abort()` is not an exception, and only a
+            # syntactic `throw` earns that flag.
+            for open_edge in current:
+                self._emit(open_edge.src, _EXIT, ())
+            current = []
         return entry, current
 
     def _point_from_hit(self, hit: Any, node: Any) -> _Point:
@@ -799,7 +859,9 @@ class SparseCfgBuilder:
         annotations: dict[str, str] = {}
         if event_type in {"LOCK", "UNLOCK"} and node.type == "declaration":
             annotations["raii"] = "true"
-        subject, subject_from, exact = self._subject_for_hit(event_type, node)
+        subject, subject_from, exact = self._subject_for_hit(
+            event_type, event.matched_name, node
+        )
         if subject:
             annotations["subject"] = subject
             annotations["subject_from"] = subject_from
@@ -809,7 +871,9 @@ class SparseCfgBuilder:
             # one, and two different elements of the array would otherwise look
             # like one lock acquired twice.
             annotations["subject_exact"] = "true" if exact else "false"
-            annotations.update(self._subject_facts(self._subject_node(event_type, node), subject))
+            annotations.update(self._subject_facts(
+                self._subject_node(event_type, event.matched_name, node), subject
+            ))
         elif event_type == "ALLOC" and node.type == "new_expression":
             # An anonymous heap object: it has no name, so there is no name to
             # resolve, but it does have an identity -- the allocation site. That
@@ -840,7 +904,7 @@ class SparseCfgBuilder:
             annotations["thread_function"] = thread_function
         return annotations
 
-    def _subject_node(self, event_type: str, node: Any) -> Any:
+    def _subject_node(self, event_type: str, matched_name: str, node: Any) -> Any:
         """The expression the subject name was recovered from.
 
         `_subject_for_hit` returns the name and not the node, because the name
@@ -858,7 +922,10 @@ class SparseCfgBuilder:
             return self._return_value_node(node)
         if event_type == "THREAD_SPAWN" and node.type == "declaration":
             return self._declaration_target_node(node)
-        if self._assign_target:
+        argument = self._out_argument_node(event_type, matched_name, node)
+        if argument is not None:
+            return argument
+        if self._assign_target and self._assign_target_applies(node):
             return self._assign_node
         if event_type == "ALLOC" and node.type == "new_expression":
             return None
@@ -1043,7 +1110,9 @@ class SparseCfgBuilder:
         root = self._root_identifier(node)
         return root, "".join(pieces), False, _names_the_object(whole)
 
-    def _subject_for_hit(self, event_type: str, node: Any) -> tuple[str, str, bool]:
+    def _subject_for_hit(
+        self, event_type: str, matched_name: str, node: Any
+    ) -> tuple[str, str, bool]:
         """The name an operation acts on, how it was recovered, and whether it
         is the whole designation of the object or only the root of a path.
 
@@ -1064,6 +1133,13 @@ class SparseCfgBuilder:
         resolved; an anonymous heap object has no name, so the candidate is
         `unresolved` and the transfer to whatever consumes it is the missing
         fact (recorded in the stage 4 execution record).
+
+        A write-through allocator is the second allocation that the argument
+        rule would answer wrongly, and it is the rule's own subject: the
+        first argument of `posix_memalign(&p, ...)` names `p`, while the
+        assignment binds `rc` -- an error code, which is not a resource. So
+        for the callees the vocabulary lists as `out_param` the rule runs
+        before the assignment rule rather than after it.
         """
         if event_type == "RELEASE":
             value = self._release_argument_node(node)
@@ -1078,7 +1154,13 @@ class SparseCfgBuilder:
             # A declaration binds a name to the handle, so the target is always
             # the whole designation.
             return self._declaration_target(node), SUBJECT_FROM_ASSIGNMENT, True
-        if self._assign_target:
+        argument = self._out_argument_node(event_type, matched_name, node)
+        if argument is not None:
+            return (
+                self._root_identifier(argument), SUBJECT_FROM_OUT_ARGUMENT,
+                _names_the_object(argument),
+            )
+        if self._assign_target and self._assign_target_applies(node):
             return self._assign_target, SUBJECT_FROM_ASSIGNMENT, self._assign_exact
         if event_type == "ALLOC" and node.type == "new_expression":
             return "", "", False
@@ -1487,6 +1569,34 @@ class SparseCfgBuilder:
                 value = node.named_children[-1]
             return value
         return _first_call_argument(node)
+
+    def _out_argument_node(self, event_type: str, matched_name: str, node: Any) -> Any:
+        """The expression a write-through allocator's first argument addresses.
+
+        `posix_memalign(&p, align, size)` hands the allocation to `p`, so the
+        subject is what the argument points at and not the expression the
+        argument is. The `&` needs no unwrapping here: `_root_identifier` and
+        `_member_chain` already treat a `pointer_expression` as transparent,
+        so `&c->send_mem` names `c` with the path `send_mem` left over, which
+        is the object and not the field's address. A cast does need it --
+        `(void **)&c->send_mem` is the argument's *type*, and neither helper
+        steps over a `cast_expression`, so without this the member path would
+        be lost and every element of a struct would read as its root.
+
+        Returns None when the callee is not one of the vocabulary's
+        `out_param` names, or when the call has no first argument at all --
+        the ordinary rules are the right answer for both, and the two callers
+        fall through to them.
+        """
+        if event_type != "ALLOC" or matched_name.rpartition(".")[2] not in self._out_param:
+            return None
+        argument = _first_call_argument(node)
+        while argument is not None and argument.type in {"cast_expression", "parenthesized_expression"}:
+            if argument.type == "cast_expression":
+                argument = argument.child_by_field_name("value")
+            else:
+                argument = argument.named_children[0] if argument.named_children else None
+        return argument
 
     def _alloc_handoff(self, node: Any) -> tuple[str, bool]:
         """`(callee, returned)` for an allocation's own acquiring expression.
@@ -2045,6 +2155,38 @@ _CONTROL_HANDLERS = {
 # facts would rather under-count one write than invent one.
 _CONDITIONAL_STATEMENTS = {"catch_clause", "handler"}
 
+# Calls that do not come back. A fact about the callee, so it is matched on the
+# name rather than on the syntax around it: `std::exit` and `sys.exit` make the
+# same claim `exit` does, and a project's own abort macro (`GGML_ABORT`) makes
+# it too. The walker has always ended the chain at a syntactic `throw`
+# (`_throw_statement`); this is the same statement about a call, and without it
+# the statements after `abort()` read as reachable -- which is how two arms
+# that are in fact exclusive come to look like they both fall through.
+#
+# Matched on the last name component, because that is the axis the vocabulary's
+# `calls` list matches on, and because a qualified spelling of the same name is
+# the same claim. `assert` is deliberately absent: it returns when the
+# condition holds, so it is a branch, not a terminator, and ending the chain
+# there would invent paths to the exit that the source does not have.
+_NORETURN_CALLS = frozenset({
+    "abort", "terminate", "exit", "_exit", "quick_exit", "longjmp", "GGML_ABORT",
+})
+
+
+def _never_returns(point: "_Point") -> bool:
+    """Whether this point is a call the walker knows does not come back.
+
+    Only a `THROW` can be one: that is the event type whose own docstring says
+    it is a non-local exit, and it is the only one that carries the callee's
+    name rather than the node type it was read from. A syntactic `throw`
+    matches the syntax axis and carries `throw_statement`, which is not in the
+    set -- it is already ended by its own handler, and this must not end it
+    twice.
+    """
+    if point.event_type != "THROW":
+        return False
+    return point.matched_name.rpartition(".")[2] in _NORETURN_CALLS
+
 # The storages an escape can land in: the same set the access layer publishes,
 # because the question is the same -- does this object outlive the frame? An
 # `unknown` target is a name the file does not declare, which can never be a
@@ -2055,6 +2197,30 @@ _CONDITIONAL_STATEMENTS = {"catch_clause", "handler"}
 # writes into one is not an escape -- if the value leaves, the RETURN that
 # carries it is the fact that says so, not the write.
 _ESCAPE_TARGET_STORAGES = ACCESS_STORAGES - {STORAGE_PARAMETER}
+
+
+def _escapes_the_frame(annotations: Mapping[str, str]) -> bool:
+    """Whether a write lands somewhere that outlives the frame it is written in.
+
+    Shared storage is the whole answer for every storage but one. A parameter
+    is the storage whose answer depends on the *shape* of the write: `p = q`
+    rebinds this frame's copy of the pointer and the caller sees nothing,
+    while `*out = q`, `param->f = q` and `param[i] = q` write into memory the
+    caller owns -- which is what outliving the frame means. That is the C
+    out-parameter idiom, and reading it as a leak is what the stage 7 review
+    sheet's `*meta = metadata_string` case was.
+
+    The signal is the one the alias rule already reads -- the written
+    expression is not the bare name -- so the two rules agree by construction
+    rather than by two spellings of the same idea drifting apart.
+    """
+    storage = annotations.get("subject_storage", "")
+    if storage in _ESCAPE_TARGET_STORAGES:
+        return True
+    return (
+        storage == STORAGE_PARAMETER
+        and annotations.get("expression", "") != annotations.get("subject", "")
+    )
 
 # The allocations whose escape matters for the lifetime query: a frame-local
 # is the only acquire whose leak claim an escape write can overturn. A

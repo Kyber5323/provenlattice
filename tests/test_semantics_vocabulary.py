@@ -172,6 +172,61 @@ class VocabularyValidationTests(unittest.TestCase):
             load_vocabulary("fake")
         self.assertIn("claims to be absent", str(caught.exception))
 
+    def test_an_absence_may_not_also_list_an_exclusion(self) -> None:
+        """A veto names a function this event is *not*. An event that does not
+        exist cannot have one, and the table would read as a partial one."""
+        self.write("fake", 'language = "fake"\nextensions = [".fk"]\n'
+                           '[events.ALLOC]\nabsent = "no such thing"\n'
+                           'qualified_exclude = ["std::getline"]\n')
+        with self.assertRaises(VocabularyError) as caught:
+            load_vocabulary("fake")
+        self.assertIn("claims to be absent", str(caught.exception))
+
+    def test_an_exclusion_that_can_never_fire_is_rejected(self) -> None:
+        """The veto is checked by the extractor, not the loader, because only
+        the extractor canonicalises names. It has to be checked somewhere: a
+        veto that silently never fires is the one failure this key cannot
+        have."""
+        from provenlattice.parsing.events import EventExtractor, OwnerIndex
+
+        self.write("fake", 'language = "fake"\nextensions = [".fk"]\n'
+                           '[events.ALLOC]\ncalls = ["getline"]\n'
+                           'qualified_exclude = ["std::readline"]\n')
+        with self.assertRaises(ValueError) as caught:
+            EventExtractor(b"", load_vocabulary("fake"), OwnerIndex([]), lambda offset, end: 1)
+        self.assertIn("would never exclude anything", str(caught.exception))
+
+    def test_an_out_param_entry_that_can_never_fire_is_rejected(self) -> None:
+        """The extractor matches an `out_param` entry against what the `calls`
+        axis matched, so an entry none of the table's calls ends in is a key
+        that silently does nothing."""
+        self.write("fake", 'language = "fake"\nextensions = [".fk"]\n'
+                           '[events.ALLOC]\ncalls = ["malloc"]\n'
+                           'out_param = ["posix_memalign"]\n')
+        with self.assertRaises(VocabularyError) as caught:
+            load_vocabulary("fake")
+        self.assertIn("would never fire", str(caught.exception))
+
+    def test_an_out_param_may_not_appear_on_a_non_allocation_table(self) -> None:
+        """Only the ALLOC subject is decoded from a call's argument, so the
+        key anywhere else is a claim the pipeline never reads."""
+        self.write("fake", 'language = "fake"\nextensions = [".fk"]\n'
+                           '[events.CALL]\ncalls = ["f"]\nout_param = ["f"]\n')
+        with self.assertRaises(VocabularyError) as caught:
+            load_vocabulary("fake")
+        self.assertIn("only ALLOC", str(caught.exception))
+
+    def test_an_out_param_list_surfaces_as_last_name_components(self) -> None:
+        """The rule compares against a hit's `matched_name`, which is the
+        callee's last component on the bare axis and the full spelling on the
+        qualified one, so the accessor hands back one shape for both."""
+        self.write("fake", 'language = "fake"\nextensions = [".fk"]\n'
+                           '[events.ALLOC]\ncalls = ["posix_memalign"]\n'
+                           'out_param = ["posix_memalign"]\n')
+        vocabulary = load_vocabulary("fake")
+        self.assertEqual(vocabulary.out_param_names("ALLOC"), frozenset({"posix_memalign"}))
+        self.assertEqual(vocabulary.out_param_names("CALL"), frozenset())
+
     def test_an_absence_must_carry_a_reason(self) -> None:
         self.write("fake", 'language = "fake"\nextensions = [".fk"]\n'
                            '[events.ALLOC]\nabsent = "   "\n')

@@ -13,6 +13,21 @@ VOCABULARY_DIR = Path(__file__).with_name("vocabularies")
 DEFECT_PATTERN_FILE = Path(__file__).with_name("defect_patterns.toml")
 
 MATCHER_AXES = ("syntax", "calls", "qualified")
+# Not a matcher: a veto on one. The `calls` axis reads the last component of a
+# callee, so `std::getline` and POSIX `getline` are the same string to it. This
+# key is where a table names the qualified spellings that are a different
+# function, and the extractor drops the bare hit when it sees one.
+EXCLUSION_KEY = "qualified_exclude"
+# Where a listed callee puts the object it creates. `calls` says a name is an
+# allocation; it does not say how the allocation comes back. Most allocators
+# return the pointer, so the name a declaration binds is the object (`p =
+# malloc(n)` allocates `p`). `posix_memalign` does not: it returns an error
+# code and writes the pointer through its first argument, so the object is
+# what that argument addresses (`int rc = posix_memalign(&p, ...)` allocates
+# `p`, not `rc` -- the return code, which is an int and never a resource).
+# This key is where a table names the callees of the second shape, and the
+# extractor decodes their subject from the argument instead of the call.
+OUT_PARAM_KEY = "out_param"
 # Node types that carry a name the matchers can read. These are grammar facts,
 # so they live in the vocabulary file rather than in the extractor: `call` in
 # Python and `call_expression` in C++ are the same idea spelled differently.
@@ -90,6 +105,18 @@ class EventSpec:
     syntax: frozenset[str]
     calls: frozenset[str]
     qualified: frozenset[str]
+    # Qualified spellings of a listed bare name that name a *different*
+    # function. The `calls` axis matches the last component of the callee, so
+    # `std::getline` hits a table that lists POSIX `getline`; these entries are
+    # how the table says "that one is not me". Empty for every event whose bare
+    # names have no such twin, which is almost all of them.
+    qualified_exclude: frozenset[str] = frozenset()
+    # Listed callees that hand the object they create through their first
+    # argument instead of returning it. Empty for every event whose names
+    # return what they allocate, which is all of them but POSIX's aligned
+    # allocator. Read for ALLOC only: it is that event's subject decoding
+    # that would otherwise name the return code.
+    out_param: frozenset[str] = frozenset()
     # Set only when this language has no such event. The text is the reason,
     # and it is the whole payload -- a spec that is absent carries no matchers.
     absent: str | None = None
@@ -127,6 +154,19 @@ class Vocabulary:
 
     def spec_for(self, event_type: str) -> EventSpec | None:
         return self.events.get(event_type)
+
+    def out_param_names(self, event_type: str) -> frozenset[str]:
+        """The callees whose object arrives through argument 1, as last names.
+
+        Last components, because that is the axis the `calls` list itself
+        matches on: a hit's `matched_name` is the callee's last component on
+        the bare axis and the full spelling on the qualified one, and the two
+        have to be compared on one of them.
+        """
+        spec = self.events.get(event_type)
+        if spec is None:
+            return frozenset()
+        return frozenset(name.rpartition(".")[2] for name in spec.out_param)
 
     def at_level(self, level: int) -> tuple[EventSpec, ...]:
         return tuple(spec for _, spec in sorted(self.events.items()) if spec.level == level)
@@ -200,7 +240,7 @@ def _parse(path: Path) -> Vocabulary:
             )
         if not isinstance(body, dict):
             raise VocabularyError(f"{path.name}: [events.{event_type}] must be a table")
-        expected = (*MATCHER_AXES, ABSENCE_KEY)
+        expected = (*MATCHER_AXES, EXCLUSION_KEY, OUT_PARAM_KEY, ABSENCE_KEY)
         unknown_keys = sorted(set(body) - set(expected))
         if unknown_keys:
             raise VocabularyError(
@@ -217,12 +257,34 @@ def _parse(path: Path) -> Vocabulary:
             syntax=_string_list(body, "syntax", path, event_type),
             calls=_string_list(body, "calls", path, event_type),
             qualified=_string_list(body, "qualified", path, event_type),
+            qualified_exclude=_string_list(body, EXCLUSION_KEY, path, event_type),
+            out_param=_string_list(body, OUT_PARAM_KEY, path, event_type),
             absent=absent,
         )
+        # An `out_param` entry that names nothing in the table's own `calls`
+        # can never fire, for the same reason a `qualified_exclude` entry that
+        # names nothing there cannot: the extractor matches it against what the
+        # `calls` axis matched. A key that silently does nothing is the one
+        # failure mode neither key is allowed to have.
+        if spec.out_param:
+            if spec.event_type != "ALLOC":
+                raise VocabularyError(
+                    f"{path.name}: [events.{event_type}] declares {OUT_PARAM_KEY}, but "
+                    "only ALLOC has a subject the extractor decodes from a call's "
+                    "first argument"
+                )
+            bare = {name.rpartition(".")[2] for name in spec.calls}
+            for name in sorted(spec.out_param):
+                if name.rpartition(".")[2] not in bare:
+                    raise VocabularyError(
+                        f"{path.name}: [events.{event_type}].{OUT_PARAM_KEY} lists "
+                        f"{name!r}, which none of its calls ends in; the entry would "
+                        "never fire"
+                    )
         # The two ways a table can lie about itself. Both are rejected, because
         # a coverage report built on either one would be wrong in a way nobody
         # reading the report could see.
-        if spec.is_absent() and spec.has_matchers():
+        if spec.is_absent() and (spec.has_matchers() or spec.qualified_exclude):
             raise VocabularyError(
                 f"{path.name}: [events.{event_type}] claims to be absent but lists "
                 "matchers; drop one or the other"

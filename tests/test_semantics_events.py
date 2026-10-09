@@ -73,6 +73,42 @@ class CppEventTests(unittest.TestCase):
         self.assertEqual(locks[0].matched_via, "qualified")
         self.assertEqual(locks[0].owner_qualified_name, "f")
 
+    def test_a_qualified_spelling_can_be_excluded_from_the_bare_name_axis(self) -> None:
+        """`std::getline` and POSIX `getline` share a last name component, which
+        is all the `calls` axis reads. The C++ one allocates nothing the caller
+        owns, so the table declares it a different function -- and the POSIX
+        call, which really does allocate, has to survive that."""
+        parsed = cpp_events(
+            b"void f() {\n"
+            b"  std::string line;\n"
+            b"  std::getline(is, line);\n"
+            b"  char *buf = nullptr; size_t n = 0;\n"
+            b"  getline(&buf, &n, fp);\n"
+            b"  std::getline<std::string>(is, line);\n"
+            b"}\n"
+        )
+        allocs = [event for event in parsed.events if event.event_type == "ALLOC"]
+        self.assertEqual([event.start_line for event in allocs], [5])
+        self.assertEqual(allocs[0].matched_name, "getline")
+        # The call is still an event, and still on the chain: only the ALLOC
+        # claim is withdrawn, not the statement.
+        calls = [event for event in parsed.events if event.event_type == "CALL"]
+        self.assertEqual([event.start_line for event in calls], [3, 5, 6])
+
+    def test_a_project_failure_macro_is_a_throw(self) -> None:
+        """llama.cpp's `GGML_ABORT` and `GGML_ASSERT` are the project's own
+        non-local exits. They are macros, so nothing in the grammar marks them;
+        the vocabulary is the only place that can say what they are."""
+        parsed = cpp_events(
+            b"void f(int c) {\n"
+            b"  GGML_ASSERT(c);\n"
+            b"  if (!c) { GGML_ABORT(\"no\"); }\n"
+            b"}\n"
+        )
+        throws = [(event.matched_name, event.matched_via, event.start_line)
+                  for event in parsed.events if event.event_type == "THROW"]
+        self.assertEqual(throws, [("GGML_ASSERT", "calls", 2), ("GGML_ABORT", "calls", 3)])
+
     def test_one_declaration_starting_two_threads_reports_two_events(self) -> None:
         parsed = cpp_events(b"void f() {\n  std::thread a{w}, b{w};\n}\n")
         spawns = [event for event in parsed.events if event.event_type == "THREAD_SPAWN"]

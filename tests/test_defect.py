@@ -1185,6 +1185,39 @@ class LockOrderTests(unittest.TestCase):
         self.assertEqual(result.coverage["lock_points"], 4)
 
 
+    def test_a_guards_own_unlock_releases_the_mutex_it_was_built_on(self) -> None:
+        """`std::unique_lock<std::mutex> lock(m); lock.unlock();` ends the
+        acquisition of `m`, so a later acquisition of `m` is not re-entrant.
+
+        The two halves publish under two names: the RAII rule reads the
+        constructor argument, so the acquisition's subject is `m`, while the
+        release's subject is `lock` -- the receiver the source wrote. Only
+        `subject_init_arg0` joins them, and until it was read here the `held`
+        list kept `m` across the unlock and reported the stage 7 review's
+        llama-quant 1.4 case."""
+        events, edges = self.publish_source(
+            "#include <mutex>\n"
+            "static std::mutex m;\n"
+            "void released(void) {\n"
+            "  std::unique_lock<std::mutex> lock(m);\n"
+            "  lock.unlock();\n"
+            "  std::unique_lock<std::mutex> again(m);\n"
+            "}\n"
+            "void held(void) {\n"
+            "  std::unique_lock<std::mutex> lock(m);\n"
+            "  std::unique_lock<std::mutex> again(m);\n"
+            "}\n"
+        )
+        result = defect.lock_order(events, edges)
+        # The control is in the same fixture on purpose: `held` takes `m`
+        # twice with nothing releasing it, and that is the candidate the
+        # unlock must remove from `released` without removing it here.
+        self.assertEqual([candidate.defect_key for candidate in result.candidates], ["1.4"])
+        candidate = result.candidates[0]
+        self.assertEqual(candidate.subject["identity"], "file_static:src/unit.cpp:m")
+        self.assertEqual(candidate.metadata["anchor_span"]["start_line"], 9)
+        self.assertTrue(all(fact["holding_confirmed"] for fact in candidate.facts))
+
     def test_two_locks_named_by_the_same_root_are_not_a_self_deadlock(self) -> None:
         """The redis-50 shape, found by reading a generated review sheet:
         `pthread_mutex_trylock(&index->slot_locks[i])` and
@@ -2109,6 +2142,57 @@ class Stage5C2FactsTests(unittest.TestCase):
         alloc = only(table, "ALLOC")
         self.assertEqual(alloc["escaped_to"], "")
 
+    def test_a_write_through_a_parameter_marks_the_escape(self) -> None:
+        """`*out = tmp`, `s->field = tmp` and `arr[i] = tmp` store the pointer
+        in memory the caller owns, which is what outliving the frame means.
+
+        A parameter was excluded from the escape targets wholesale, on the
+        ground that a parameter slot dies with the frame. That is true of the
+        slot and false of what it points at, so the C out-parameter idiom --
+        allocate, hand the buffer back through a parameter -- was reported as
+        a leak. The signal is the one the alias rule already reads: the
+        written expression is not the bare name."""
+        events, edges = self.publish_source(
+            "#include <stdlib.h>\n"
+            "struct S { char *field; };\n"
+            "void f(char **out, struct S *s, char **arr, int i) {\n"
+            '  char *tmp = strdup("x");\n'
+            "  *out = tmp;\n"
+            "  s->field = tmp;\n"
+            "  arr[i] = tmp;\n"
+            "}\n"
+        )
+        table = annotations_by_type(events, edges)
+        writes = [row for row in table["WRITE"] if row["write_source"] == "tmp"]
+        self.assertEqual(len(writes), 3)
+        for write in writes:
+            self.assertEqual(write["subject_storage"], "parameter")
+            self.assertNotEqual(write["expression"], write["subject"])
+            self.assertEqual(write["unconditional"], "true")
+        alloc = only(table, "ALLOC")
+        self.assertEqual(alloc["escaped_to"], "out;s;arr")
+        self.assertEqual(alloc["escaped_to_line"], "5")
+
+    def test_a_bare_write_to_a_parameter_is_no_escape(self) -> None:
+        """`out = tmp` rebinds this frame's copy of the pointer and the caller
+        sees nothing -- the reason the parameter storage was excluded in the
+        first place. Widening the rule to the shapes that do escape must not
+        swallow this one."""
+        events, edges = self.publish_source(
+            "#include <stdlib.h>\n"
+            "void f(char **out) {\n"
+            '  char *tmp = strdup("x");\n'
+            "  out = tmp;\n"
+            "}\n"
+        )
+        table = annotations_by_type(events, edges)
+        write = only(table, "WRITE")
+        self.assertEqual(write["subject"], "out")
+        self.assertEqual(write["expression"], "out")
+        self.assertEqual(write["unconditional"], "true")
+        alloc = only(table, "ALLOC")
+        self.assertEqual(alloc["escaped_to"], "")
+
     # -- the rulings, end to end -----------------------------------------
 
     def test_the_return_ruling_eliminates_without_contracts(self) -> None:
@@ -2125,6 +2209,46 @@ class Stage5C2FactsTests(unittest.TestCase):
             record["reason"] for record in result.coverage["disqualified_evidence"]
         ]
         self.assertEqual(reasons, ["ESCAPE_RETURN"])
+
+    def test_the_out_parameter_ruling_eliminates(self) -> None:
+        """The out-parameter hand-off, end to end: the allocation leaves the
+        frame through `*out`, so nothing here leaks it and the candidate is
+        eliminated rather than reported. The stage 7 review sheet's
+        `*meta = metadata_string` is this shape."""
+        events, edges = self.publish_source(
+            "#include <stdlib.h>\n"
+            "int f(char **out) {\n"
+            '  char *tmp = strdup("x");\n'
+            "  *out = tmp;\n"
+            "  return 0;\n"
+            "}\n"
+        )
+        result = defect.resource_lifetime(events, edges)
+        self.assertEqual(result.candidates, ())
+        reasons = [
+            record["reason"] for record in result.coverage["disqualified_evidence"]
+        ]
+        self.assertEqual(reasons, ["ESCAPE_TO_SHARED"])
+
+    def test_a_write_through_allocation_is_reported_under_its_buffer(self) -> None:
+        """The allocation a write-through allocator makes is the buffer, not
+        the error code the declaration binds: `int rc = posix_memalign(&base,
+        ...)` acquires `base`, and a candidate filed under `rc` names an int
+        the source never allocated. The stage 7 review sheet's
+        `const int rc = posix_memalign(&base, ...)` is this shape."""
+        events, edges = self.publish_source(
+            "#include <stdlib.h>\n"
+            "int f(size_t n) {\n"
+            "  void *base = 0;\n"
+            "  int rc = posix_memalign(&base, 16, n);\n"
+            "  return rc;\n"
+            "}\n"
+        )
+        result = defect.resource_lifetime(events, edges)
+        self.assertEqual([candidate.defect_key for candidate in result.candidates], ["4.1"])
+        candidate = result.candidates[0]
+        self.assertEqual(candidate.subject["name"], "base")
+        self.assertEqual(candidate.subject["type"], "void")
 
     def test_the_escape_write_ruling_eliminates_without_contracts(self) -> None:
         """Every path from the allocation passes the plain assignment into
@@ -3309,9 +3433,13 @@ class Stage6QueryTests(unittest.TestCase):
         self.assertEqual(result.coverage["states"], {"ambiguous": 1})
         # The missing evidence names what would settle it, and it is not a
         # relation the graph is missing -- it is an API contract the AI side
-        # holds, which is why 3.1 stays unconfirmable after this stage.
-        self.assertEqual(len(candidate.missing_evidence), 2)
+        # holds, which is why 3.1 stays unconfirmable after this stage. Stage 6's
+        # review sheet added the third line: an arm ending in `abort`/`assert`
+        # does not return, and this query reads it as falling through, which is
+        # the whole reason the middle state exists (`null_flow`'s own docstring).
+        self.assertEqual(len(candidate.missing_evidence), 3)
         self.assertIn("return NULL", candidate.missing_evidence[0])
+        self.assertIn("noreturn", candidate.missing_evidence[2])
 
     def test_null_flow_eliminates_the_guarded_dereference_and_keeps_a_partial_one(self) -> None:
         """The guard test reads the null arm, not the check's existence.

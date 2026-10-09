@@ -57,6 +57,7 @@ from .sparsecfg import (
     BRANCH_FALSE,
     BRANCH_TRUE,
     SUBJECT_FROM_ASSIGNMENT,
+    SUBJECT_FROM_RECEIVER,
     ControlPath,
     build_adjacency,
     find_paths,
@@ -254,6 +255,26 @@ _MISSING_ERROR_PATH = (
 )
 _MISSING_DESTRUCTOR = (
     "whether a destructor or another path releases the lock first"
+)
+# The one declaration the stage 6 review sheet named and the graph did not
+# already carry (cases 16 and 17). An arm that ends in `abort()`, `assert()`, or
+# a project's own failure macro ends there: it cannot reach what follows the
+# branch, so two arms that are in fact exclusive do not both fall through. The
+# graph holds a method's control flow, not the calling convention of the calls
+# inside it, so the arm reads as falling through and the pair reads as
+# reachable. Declared on the three queries whose verdict turns on that question
+# -- double_free, the lock branch of resource_lifetime, and null_flow, whose own
+# docstring already names this limit as the reason its middle state is
+# `ambiguous`. The wording says "the conventions the graph does not hold" rather
+# than "the graph does not model noreturn" on purpose: modelling the standard
+# ones is a future change, and a project's own macros are the part no vocabulary
+# closes. This line stays true across it.
+_MISSING_NORETURN = (
+    "the noreturn conventions the graph does not hold: an arm that ends in "
+    "`abort`, `assert`, or a project's own failure macro does not return, so it "
+    "cannot reach what follows the branch -- the graph holds the control flow "
+    "and not the call's calling convention, and the arm reads as falling "
+    "through, which leaves two mutually exclusive arms looking both reachable"
 )
 _MISSING_RECURSIVE = (
     "whether the mutex is recursive: under PTHREAD_MUTEX_RECURSIVE a second "
@@ -1495,7 +1516,10 @@ def _lifetime_candidate(
         _MISSING_RELEASE_IN_CALLEE,
     ]
     if is_lock:
-        missing.extend([_MISSING_ERROR_PATH, _MISSING_DESTRUCTOR, _MISSING_GUARD_BINDING])
+        missing.extend([
+            _MISSING_ERROR_PATH, _MISSING_DESTRUCTOR, _MISSING_GUARD_BINDING,
+            _MISSING_NORETURN,
+        ])
     if contracts is not None and contracts_cover:
         # Every call on these paths goes to a callee whose contract is known,
         # and none of them took the resource -- otherwise this candidate would
@@ -1730,7 +1754,10 @@ def lock_order(
     adjacency = build_adjacency(edges)
     non_lock_points = _non_lock_points(points)
     locks_by_method = _locks_by_method(points, excluded=non_lock_points)
-    unlocks_by_subject = _unlocks_by_subject(points, identity=identity)
+    guard_targets = _guard_targets(points, identity=identity)
+    unlocks_by_subject = _unlocks_by_subject(
+        points, identity=identity, guard_targets=guard_targets
+    )
     # The identity is what the walk is about; the spelling is what a human
     # reads. Keeping them in two maps rather than one is the point of the
     # stage: `index->slot_locks[i]` and `index->global_lock` are two locks with
@@ -1750,7 +1777,20 @@ def lock_order(
                 continue
             display.setdefault(name, _identity_display(info))
             if info["event_type"] == "UNLOCK":
-                held = [(held_name, held_id) for held_name, held_id in held if held_name != name]
+                # The guard's own `.unlock()` releases the mutex the guard was
+                # built on, so it ends that acquisition too. Without this the
+                # `held` list keeps the mutex and the next acquisition of it
+                # reads as re-entrant.
+                guard = _guard_mutex(info)
+                released = {name}
+                if guard:
+                    target = guard_targets.get((owner, guard))
+                    if target:
+                        released.add(target)
+                held = [
+                    (held_name, held_id) for held_name, held_id in held
+                    if held_name not in released
+                ]
                 continue
             if any(held_name == name for held_name, _ in held):
                 first = next(held_id for held_name, held_id in held if held_name == name)
@@ -1886,8 +1926,56 @@ def _locks_by_method(
     }
 
 
-def _unlocks_by_subject(
+def _guard_mutex(info: Mapping[str, Any]) -> str:
+    """The mutex a guard's own release names, or "".
+
+    `std::unique_lock<std::mutex> lock(mutex);` publishes the acquisition as
+    acting on `mutex` -- that is the object the lock-order walk orders, and the
+    reason the RAII rule reads the constructor argument. The guard's later
+    `lock.unlock()` publishes the release as acting on `lock`, because that is
+    the receiver the source wrote. `subject_init_arg0` is the mutex the guard
+    was built on, so it is the half that joins the two.
+
+    Only a release reached through a receiver can be this: an UNLOCK written as
+    `unlock(&m)` or `pthread_mutex_unlock(&m)` already names its mutex as its
+    first argument, and has nothing to add.
+    """
+    if info.get("subject_from") != SUBJECT_FROM_RECEIVER:
+        return ""
+    return info.get("subject_init_arg0", "")
+
+
+def _guard_targets(
     points: Mapping[str, Mapping[str, Any]], *, identity: bool = True
+) -> dict[tuple[str, str], str]:
+    """The identity a guard's constructor argument was acquired under.
+
+    Keyed by `(owner, spelling)`. The alias `_guard_mutex` recovers is a
+    spelling and the map it joins into is keyed by identity, so something has
+    to cross the two -- and this crosses them with the acquisition points
+    themselves rather than by resolving the alias afresh. Both sides are read
+    from one method's syntax and resolved by one declaration index, so inside
+    an owner the spelling names one declaration. Across owners it would not,
+    which is the stage 4 join `_identity` replaced, so the owner is part of the
+    key and not an optimisation.
+    """
+    targets: dict[tuple[str, str], str] = {}
+    for info in points.values():
+        if info["event_type"] != "LOCK":
+            continue
+        spelling = info.get("subject", "")
+        if not spelling:
+            continue
+        key = (str(info.get("owner_symbol_id", "")), spelling)
+        targets.setdefault(key, _identity(info, identity=identity))
+    return targets
+
+
+def _unlocks_by_subject(
+    points: Mapping[str, Mapping[str, Any]],
+    *,
+    identity: bool = True,
+    guard_targets: Mapping[tuple[str, str], str] | None = None,
 ) -> dict[str, frozenset[str]]:
     """Unlock points per lock identity.
 
@@ -1895,7 +1983,15 @@ def _unlocks_by_subject(
     whether a lock is still held: a method that locks `index->a` and unlocks
     `index->b` holds the first one, and a name-keyed map would say it released
     it -- turning a real inversion into a pair that never overlaps.
+
+    A guard's own `.unlock()` is indexed under the mutex it was constructed on
+    as well as under the guard, because releasing the guard releases that
+    mutex: without it the walk finds a way past the release and reports the
+    second acquisition of one mutex as a self-deadlock. That alias is the one
+    place a spelling enters, and `_guard_targets` is what keeps it inside the
+    owner that wrote it.
     """
+    targets = guard_targets or {}
     unlocks: dict[str, set[str]] = {}
     for point_id, info in points.items():
         if info["event_type"] != "UNLOCK":
@@ -1903,6 +1999,13 @@ def _unlocks_by_subject(
         key = _identity(info, identity=identity)
         if key:
             unlocks.setdefault(key, set()).add(point_id)
+        guard = _guard_mutex(info)
+        if not guard:
+            continue
+        owner = str(info.get("owner_symbol_id", ""))
+        target = targets.get((owner, guard), "")
+        if target and target != key:
+            unlocks.setdefault(target, set()).add(point_id)
     return {name: frozenset(ids) for name, ids in unlocks.items()}
 
 
@@ -2977,6 +3080,11 @@ class _Reachability:
         self._adjacency = adjacency
         self._points = points
         self._reached: dict[str, frozenset[str]] = {}
+        # The breadth-first tree per source, kept only for the sources a route
+        # was actually asked about. `from_` answers the node question and pays
+        # no memory for predecessors; an elimination is the common case and it
+        # never asks for a route.
+        self._trees: dict[str, dict[str, tuple[str, str]]] = {}
         # Every point the control-flow graph mentions, as a source or as a
         # destination. Membership is the test for "this point has a position",
         # and it is read off the graph rather than off a list of event types:
@@ -3003,6 +3111,58 @@ class _Reachability:
             reached = frozenset(seen)
             self._reached[source] = reached
         return reached
+
+    def route(self, source: str, target: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """One shortest route from `source` to `target`, as points and edges.
+
+        Read off the scan's own breadth-first tree rather than searched for,
+        which is `error_handling`'s precedent (`_branch_scan`/`_route`): every
+        point the walk entered has exactly one predecessor, so following them
+        back is linear, and the route *is* the route the verdict was decided
+        along -- it cannot disagree with `state`.
+
+        Empty when there is no route to record, and that is not a verdict.
+        A source with no control-flow position, a target the graph never
+        mentions, and a pair `state` calls `disjoint` all land here; the
+        question "are these connected" is `state`'s and is answered there.
+
+        This is what `find_paths` used to do for the four flow queries, and it
+        is the reason they were slow rather than the reason they were wrong:
+        that helper enumerates simple paths with a per-path visited set and
+        caps only what it *returns*, so a pair with fewer than `max_paths`
+        routes between it -- including a pair with none -- drains its queue and
+        pays for every route inside `max_hops`.
+        """
+        if source not in self._adjacency or target not in self._nodes:
+            return (), ()
+        tree = self._trees.get(source)
+        if tree is None:
+            tree = {}
+            seen = {source}
+            queue: deque[str] = deque([source])
+            while queue:
+                current = queue.popleft()
+                for edge_id, dst, _flags in self._adjacency.get(current, ()):
+                    if dst not in seen:
+                        seen.add(dst)
+                        tree[dst] = (current, edge_id)
+                        queue.append(dst)
+            self._trees[source] = tree
+        if target not in tree:
+            return (), ()
+        route_points = [target]
+        route_edges: list[str] = []
+        cursor = target
+        while cursor != source:
+            step = tree.get(cursor)
+            if step is None:  # unreachable by construction; reported as no route
+                return (), ()
+            cursor, edge_id = step
+            route_edges.append(edge_id)
+            route_points.append(cursor)
+        route_points.reverse()
+        route_edges.reverse()
+        return tuple(route_points), tuple(route_edges)
 
     def state(self, source: str, target: str) -> str:
         """`reachable`, `disjoint`, or `unknown` when the graph cannot say.
@@ -3193,36 +3353,54 @@ def _disqualification_coverage(
 
 
 def _flow_path(
-    adjacency: Mapping[str, list[tuple[str, str, frozenset[str]]]],
+    reach: _Reachability,
     points: Mapping[str, Mapping[str, Any]],
     source: str,
     target: str,
     max_hops: int,
     max_paths: int,
 ) -> tuple[tuple[dict[str, Any], ...], bool]:
-    """The evidence paths from `source` to `target`, and whether the walk was
-    cut short.
+    """The evidence path from `source` to `target`, and whether it was cut short.
 
-    Evidence only. The *decision* that the two are connected is
-    `_Reachability`'s, because this enumerates paths and a bounded enumeration
-    that finds nothing is not a proof of disconnection. A source with no
-    control-flow position yields nothing here rather than an error: it is a
-    fact about the graph, not a failure.
+    One route, read off the reachability scan's own breadth-first tree, so the
+    evidence and the verdict are the same fact stated twice rather than two
+    searches that could disagree. A source with no control-flow position yields
+    nothing here rather than an error: it is a fact about the graph, not a
+    failure.
+
+    This used to hand the two ends to `find_paths`. Measured on redis-50, the
+    four queries that call this spent 163 of 177 seconds inside that helper --
+    387 calls, 36 million `is_target` invocations -- for evidence nothing
+    reads: `paths` is not part of `Candidate.sort_key`, so no candidate moves
+    when it changes, and `state` decides the eliminations either way.
+
+    Both ceilings survive, read the way the walk's own `_branch_scan` reads
+    them: a route longer than `max_hops` is not recorded, and `max_paths` still
+    bounds how many routes are. Dropping the first was measured and rejected --
+    it recorded an 85-hop route on llama.cpp-69 where the enumeration had
+    recorded none, which is evidence the caller never asked to pay for. What is
+    recorded now is always a prefix of what was recorded before, which is what
+    makes the candidate-zero-move gate exact rather than approximate.
+
+    `truncated` is kept in the return shape and is now always False: the route
+    either fits the ceiling or is not recorded, so there is no enumeration left
+    to cut short. The key it feeds (`metadata["paths_truncated"]`) has no
+    consumer, and dropping it would change a published schema for no gain.
     """
-    if source not in adjacency:
+    if max_paths <= 0:
         return (), False
-    target_info = points.get(target)
-    if target_info is None:
+    route_points, route_edges = reach.route(source, target)
+    if not route_points or len(route_edges) > max_hops:
         return (), False
-    paths, truncated = find_paths(
-        dict(adjacency),
-        dict(points),
-        starts={source},
-        is_target=lambda info: info is target_info,
-        max_hops=max_hops,
-        max_paths=max_paths,
-    )
-    return tuple(path.to_dict() for path in paths), truncated
+    return ((
+        {
+            "points": list(route_points),
+            "types": [
+                points.get(point_id, {}).get("event_type", "") for point_id in route_points
+            ],
+            "edges": list(route_edges),
+        },
+    ), False)
 
 
 _PATH_DISJOINT = {
@@ -3464,7 +3642,7 @@ def null_flow(
 
         states[status] += 1
         paths, truncated = _flow_path(
-            adjacency, points, source_id, target_id, max_hops, max_paths
+            reach, points, source_id, target_id, max_hops, max_paths
         )
         source_info = points.get(source_id, {})
         steps = [source_id, target_id]
@@ -3495,7 +3673,9 @@ def null_flow(
             uncertain_facts=tuple(uncertain),
             paths=paths,
             source_evidence=_source_evidence(steps, points),
-            missing_evidence=(_MISSING_NULLABILITY, _MISSING_PARTIAL_GUARD),
+            missing_evidence=(
+                _MISSING_NULLABILITY, _MISSING_PARTIAL_GUARD, _MISSING_NORETURN,
+            ),
             metadata={
                 "flow_class": kind,
                 "definition": {
@@ -3613,7 +3793,7 @@ def use_after_free(
         )
         candidate = _use_candidate(
             source_id, target_id, target, points, names, status, identity=identity,
-            adjacency=adjacency, max_hops=max_hops, max_paths=max_paths,
+            reach=reach, max_hops=max_hops, max_paths=max_paths,
             flow_class=FREE_TO_USE, composition=False,
         )
         states[status] += 1
@@ -3710,9 +3890,9 @@ def use_after_free(
                     continue
                 candidates.append(_use_candidate(
                     release_id, call_id, call, points, names, AMBIGUOUS,
-                    identity=identity, adjacency=adjacency, max_hops=max_hops,
-                    max_paths=max_paths, flow_class=FREE_TO_USE, composition=True,
-                    reach_state=reach.state(release_id, call_id),
+                    identity=identity, reach=reach, max_hops=max_hops,
+                    max_paths=max_paths, flow_class=FREE_TO_USE,
+                    composition=True, reach_state=reach.state(release_id, call_id),
                 ))
                 states[AMBIGUOUS] += 1
 
@@ -3775,7 +3955,7 @@ def _use_candidate(
     status: str,
     *,
     identity: bool,
-    adjacency: Mapping[str, list[tuple[str, str, frozenset[str]]]],
+    reach: _Reachability,
     max_hops: int,
     max_paths: int,
     flow_class: str,
@@ -3792,7 +3972,7 @@ def _use_candidate(
     identity_key = _identity(use, identity=identity)
     owner = str(use.get("owner_symbol_id", ""))
     release = points.get(release_id, {})
-    paths, truncated = _flow_path(adjacency, points, release_id, use_id, max_hops, max_paths)
+    paths, truncated = _flow_path(reach, points, release_id, use_id, max_hops, max_paths)
     uncertain: list[dict[str, Any]] = []
     if not identity_key:
         uncertain.append(_uncertain(
@@ -3986,7 +4166,7 @@ def double_free(
                 states[status] += 1
                 candidates.append(_double_free_candidate(
                     first_id, second_id, first, second, points, names, status,
-                    identity=identity, adjacency=adjacency, max_hops=max_hops,
+                    identity=identity, reach=reach, max_hops=max_hops,
                     max_paths=max_paths, reach_state=state,
                 ))
 
@@ -4052,7 +4232,7 @@ def _double_free_candidate(
     status: str,
     *,
     identity: bool,
-    adjacency: Mapping[str, list[tuple[str, str, frozenset[str]]]],
+    reach: _Reachability,
     max_hops: int,
     max_paths: int,
     reach_state: str,
@@ -4065,7 +4245,7 @@ def _double_free_candidate(
     """
     identity_key = _identity(second, identity=identity)
     owner = str(second.get("owner_symbol_id", ""))
-    paths, truncated = _flow_path(adjacency, points, first_id, second_id, max_hops, max_paths)
+    paths, truncated = _flow_path(reach, points, first_id, second_id, max_hops, max_paths)
     uncertain: list[dict[str, Any]] = []
     if not identity_key:
         uncertain.append(_uncertain(
@@ -4133,7 +4313,9 @@ def _double_free_candidate(
         uncertain_facts=tuple(uncertain),
         paths=paths,
         source_evidence=_source_evidence(steps, points),
-        missing_evidence=(_MISSING_NULL_CONVENTION, _MISSING_ALIAS_PRECISION),
+        missing_evidence=(
+            _MISSING_NULL_CONVENTION, _MISSING_ALIAS_PRECISION, _MISSING_NORETURN,
+        ),
         metadata={
             "first_release": {
                 "point": first_id,
@@ -4487,7 +4669,7 @@ def taint_path(
                 status = AMBIGUOUS
         states[status] += 1
         paths, truncated = _flow_path(
-            adjacency, points, source_id, target_id, max_hops, max_paths
+            reach, points, source_id, target_id, max_hops, max_paths
         )
         steps = [source_id, target_id]
         candidates.append(Candidate(

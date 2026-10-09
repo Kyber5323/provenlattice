@@ -146,6 +146,11 @@ class EventExtractor:
         self._by_syntax: dict[str, list[EventSpec]] = {}
         self._by_call: dict[str, list[tuple[EventSpec, str]]] = {}
         self._by_qualified: dict[str, list[tuple[EventSpec, str]]] = {}
+        # Canonical, because it is compared against a canonical `full` name.
+        # An entry whose last component is not one of the spec's own `calls`
+        # can never fire, and a veto that silently never fires is the one
+        # failure mode this key cannot be allowed to have.
+        self._excluded: dict[str, frozenset[str]] = {}
         for spec in vocabulary.events.values():
             for node_type in spec.syntax:
                 self._by_syntax.setdefault(node_type, []).append(spec)
@@ -153,6 +158,20 @@ class EventExtractor:
                 self._by_call.setdefault(_canonical(keyword), []).append((spec, keyword))
             for keyword in spec.qualified:
                 self._by_qualified.setdefault(_canonical(keyword), []).append((spec, keyword))
+            if not spec.qualified_exclude:
+                continue
+            bare = {_canonical(keyword) for keyword in spec.calls}
+            for keyword in spec.qualified_exclude:
+                if _canonical(keyword).rpartition(".")[2] not in bare:
+                    raise ValueError(
+                        f"vocabulary {vocabulary.language!r}: "
+                        f"[events.{spec.event_type}].qualified_exclude lists {keyword!r}, "
+                        f"but none of its calls ends in that name; the entry would "
+                        f"never exclude anything"
+                    )
+            self._excluded[spec.event_type] = frozenset(
+                _canonical(keyword) for keyword in spec.qualified_exclude
+            )
         self._found: list[tuple[int, int, int, EventSpec, str, str, tuple[str, ...]]] = []
         self._visit_index = 0
         # Events that sit outside every symbol. Counted rather than dropped
@@ -202,6 +221,14 @@ class EventExtractor:
         # situation -- that is real ambiguity and both survive.
         candidates: dict[str, tuple[EventSpec, str, str, str]] = {}
         for spec, keyword in self._by_call.get(final, ()):
+            # The bare-name axis reads the last component, so a qualified call
+            # reaches tables that only ever meant the unqualified function:
+            # `std::getline` is not POSIX `getline`. A table says so with
+            # `qualified_exclude`, and the bare hit is dropped -- which is why
+            # the exclusion is checked here rather than in the caller, where
+            # the qualified axis has already run and would hide the difference.
+            if full != final and full in self._excluded.get(spec.event_type, ()):
+                continue
             candidates[spec.event_type] = (spec, final, "calls", keyword)
         if full != final:
             for spec, keyword in self._by_qualified.get(full, ()):

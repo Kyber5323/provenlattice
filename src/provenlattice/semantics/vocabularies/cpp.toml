@@ -15,6 +15,9 @@
 #             (`std::async(...)`) and as a declared type (`std::thread t(f);`),
 #             because both are the same event wearing different syntax.
 #
+# And one veto on the `calls` axis, `qualified_exclude`, for a qualified
+# spelling of a listed bare name that names a different function entirely.
+#
 # A name claimed by two events is reported by the loader, not resolved here.
 # `WaitForSingleObject` really is both a lock acquisition and a thread join, and
 # silently picking one would hide that from every downstream consumer.
@@ -38,9 +41,20 @@ syntax = ["return_statement"]
 # Non-local exits. `assert` and `exit` are not exceptions, but for a lifetime
 # query they behave the same way: control leaves the method and any ALLOC on
 # the path is never matched by a RELEASE.
+#
+# A project's own failure macro belongs here too. `GGML_ABORT` is llama.cpp's
+# `#define GGML_ABORT(...) ggml_abort(__FILE__, __LINE__, __VA_ARGS__)`, and
+# `GGML_ASSERT` expands to `if (!(x)) GGML_ABORT(...)` -- so the first never
+# returns and the second falls through when the condition holds. Both are
+# THROWs for the same reason `abort` and `assert` are; which of them actually
+# ends the chain is a control-flow question and is answered in `sparsecfg.py`,
+# where the walker asks it.
 [events.THROW]
 syntax = ["throw_statement"]
-calls = ["abort", "terminate", "exit", "_exit", "quick_exit", "longjmp", "assert"]
+calls = [
+  "abort", "terminate", "exit", "_exit", "quick_exit", "longjmp", "assert",
+  "GGML_ABORT", "GGML_ASSERT",
+]
 qualified = ["std::terminate", "std::abort", "std::exit", "std::quick_exit"]
 
 [events.ALLOC]
@@ -56,6 +70,26 @@ calls = [
   # GLib
   "g_malloc", "g_malloc0", "g_new", "g_new0", "g_object_new", "g_strdup",
 ]
+# POSIX `getline(&line, &size, f)` allocates the buffer it fills and hands it
+# to the caller, who must free it. `std::getline(is, str)` allocates nothing
+# the caller owns -- it reads into a string that already owns its storage. The
+# bare-name axis sees only the last component, so the C++ call hits the entry
+# above; this is the table saying that spelling is a different function.
+#
+# An unqualified `getline(...)` stays an ALLOC, which is what the POSIX call
+# is. A file that writes `getline` unqualified after `using namespace std;`
+# is still read as the POSIX one -- the graph holds the call as written, and
+# no vocabulary can settle which overload a using-directive selects.
+qualified_exclude = ["std::getline"]
+# The one allocator here that does not return what it allocates.
+# `posix_memalign(&p, align, size)` returns an error code and writes the
+# pointer through its first argument, so `int rc = posix_memalign(&p, ...)`
+# allocates `p` and `rc` is an int that names no resource. Its neighbours are
+# not in this list for the opposite reason: `memalign` and `aligned_alloc`
+# return the pointer, and `realloc` returns it too (its first argument is the
+# *old* pointer, which is a different claim the assignment rule already
+# handles by naming whatever the result is bound to).
+out_param = ["posix_memalign"]
 
 [events.RELEASE]
 syntax = ["delete_expression"]

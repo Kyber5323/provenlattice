@@ -112,7 +112,8 @@ class CppExtractor:
             # alternatives. When they drift, the parser factory must hand each
             # dialect its own profile.
             cfg = SparseCfgBuilder(
-                self.source, owners, hits, line_of, CPP_PROFILE, declarations
+                self.source, owners, hits, line_of, CPP_PROFILE, declarations,
+                out_param=self.vocabulary.out_param_names("ALLOC"),
             ).build(root)
         deduplicated: dict[tuple[str, str, str], ParsedSymbol] = {}
         for symbol in self.symbols:

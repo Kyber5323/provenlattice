@@ -3,11 +3,14 @@
 所有已发布里程碑按时间倒序记录。tag 命名遵循 `provenlattice-*` 前缀约定；
 各阶段的"已完成 / 明确未包含"以对应发布文档为准（`docs/releases/`）。
 
-## Post-V1.2 C Analysis Development（2026-10-10，codex/c-analysis-a1 分支）
+## Post-V1.2 C Analysis Development（2026-10-10，codex/c-analysis-a1 → 已集成 main）
 
-**Post-V1.2 development checkpoint**：在 V1.3 开发态（analysis layer +
-context bundle）之上扩展 C deep analysis。这是开发进展记录，**不是新的
-formal V1.3 qualification**；尚未完成同环境 16-case Agent revalidation。
+**Post-V1.2 development checkpoint**：开发分支 `codex/c-analysis-a1` 的完整
+commit chain（无 squash）已并入 main，A1–A3.6 能力链现已在 main 上
+（集成审计见 `docs/c-analysis-release-r1-integration-audit.md`）。在 V1.3
+开发态（analysis layer + context bundle）之上扩展 C deep analysis。这是开发
+进展记录，**不是新的 formal V1.3 qualification**；尚未完成同环境 16-case
+Agent revalidation。
 
 - **C 能力链（A1→A3.6，commits 235ef4e→af6d66d）**：C deep analysis 已从
   基础 symbol graph 扩展到 AST / CFG / call semantics：
@@ -33,7 +36,7 @@ formal V1.3 qualification**；尚未完成同环境 16-case Agent revalidation�
   `revalidation/c-contextbench-zstd-r1-manifest.json` 与
   `docs/c-analysis-colleague-revalidation-guide.md`）。
 
-## provenlattice-v1.3（2026-10-09，experiment/context-bundle 分支）— ANALYSIS LAYER + CONTEXT BUNDLE（开发态）
+## provenlattice-v1.3（2026-10-09，experiment/context-bundle 线，已集成 main）— ANALYSIS LAYER + CONTEXT BUNDLE（开发态）
 
 **V1.3 Optional Function Analysis Layer + Context Bundle**：Foundation Graph
 契约不变的前提下新增五层能力栈中的 L2–L5。未打 tag（正式 qualification 收敛后发布）。

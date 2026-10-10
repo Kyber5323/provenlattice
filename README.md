@@ -35,8 +35,9 @@ cache-read -73%。详见 `docs/releases/sqi-v1.2.md`：
 python experiments/query_interface_v1/tools/verify_release.py
 ```
 
-当前开发态：**V1.3 = Optional Function Analysis Layer + Context Bundle**
-（`experiment/context-bundle` 分支）——Foundation Graph 之上加入可选
+当前开发态：**Post-V1.2 = Optional Function Analysis Layer + Context Bundle**
+（已集成 main；development checkpoint，非正式 V1.3 qualification）——Foundation
+Graph 之上加入可选
 AST/CFG 分析层（D0–D8）、`task-context` 事实包（D9-C1/C2）、native MCP
 暴露（D9-C7/C8）、normalization-v2（D9-C9），并完成 D9-C10 六 case × 双臂
 受控能力稳定性实验（12/12 cells、6/6 pairs VALID）。新增能力边界如实记录：
@@ -80,9 +81,9 @@ parity/conflict 证据，未进冻结正式资格，V1.1 NOT STARTED）；增量
 **高于**全量构建（正式记录在案、非门禁观察）；核心图查询 p95/p99、并发
 QPS、10M+ LOC、跨仓统一索引、向量索引、分布式同步 = 未测/未实现。
 
-## Current Version: V1.3 五层能力栈
+## Post-V1.2 开发态：五层能力栈
 
-当前版本（`experiment/context-bundle` 分支）把系统组织为五层，逐层可选、逐层有证据：
+当前开发态（已集成 main）把系统组织为五层，逐层可选、逐层有证据：
 
 ```text
 L1 基础图层 Foundation Graph（默认，常驻）
@@ -169,18 +170,22 @@ SQI-V1    Structured Query Interface Qualification             ✅ QUALIFIED（2
 SQI-V1.1  Evaluation Hardening                                 ✅ PASS（2026-09-17）
 SQI-V1.2  Cost Optimization Qualification                      ✅ QUALIFIED / RELEASE READY（2026-09-20）
 Analysis Layer D0–D8                                          ✅ QUALIFIED Python-only（2026-09-22）
-Context Bundle / task-context-v0（D9-C1/C2）                    ✅（experiment/context-bundle）
+Context Bundle / task-context-v0（D9-C1/C2）                    ✅（已集成 main）
 Native MCP Exposure（D9-C7/C8）                                 ✅ 单工具透明桥接 + 冻结合约
 Normalization-v2（D9-C9）                                       ✅ raw≡normalized 校验
 D9-C10 P2 受控能力稳定性（6 case × 2 arm）                       ✅ PASS（2026-10-09）
 ContextBench zstd 16-case 重验                                  ✅ 14/16、0 真实失败、2 infra-excluded
-V1.3 收尾（正式 qualification 汇总 + tag）                       next
-V1.4      Def-Use / Local Data Flow / Finding Enrichment       not started
-V1.4a     C normalized AST（`.c`/`.h`）                         ✅ A1 implemented
-V1.4b     C CFG V1 + 表达式短路（&&/||/?:）                     ✅ A2/A2.1 implemented
-V1.4c     C 调用语义分类（direct/indirect/unresolved）          ✅ A3 implemented
-V1.4d     C++ deep analysis                                     next candidate
-V1.5     Taint / Security Analysis                            not started
+C 分析链 A1–A3.6（AST/CFG/短路/调用语义/紧凑上下文）              ✅ 已集成 main（diagnostic）
+Colleague 16-case rerun（R1 revalidation）                      next experiment（结果不预写）
+V1.3 正式 qualification 汇总 + tag                              pending（revalidation 之后收敛）
+V1.4      Def-Use / Local Data Flow / Finding Enrichment       not justified yet（A4_DEFUSE_NOT_YET_JUSTIFIED）
+V1.4a     C normalized AST（`.c`/`.h`）                         ✅ A1 implemented（已集成 main）
+V1.4b     C CFG V1 + 表达式短路（&&/||/?:）                     ✅ A2/A2.1 implemented（已集成 main）
+V1.4c     C 调用语义分类（direct/indirect/unresolved）          ✅ A3 implemented（已集成 main）
+V1.4d     C++ deep analysis                                     future candidate
+V1.4e     精确 function-pointer target / points-to              future candidate（当前仅 indirect 识别）
+V1.5     Taint / Security Analysis                            future candidate
+Clang / compile_commands 语义增强                               future candidate
 Overlay V1.1                                                   next candidate
 S3+ scale bands / concurrency                                  not started
 第四个 benchmark 仓库 / 跨仓统一索引 / 向量索引                  not started
@@ -192,7 +197,7 @@ MCP / Plugin / SDK        MCP 已落地（native exposure）；Plugin/SDK  evide
 当前最终目标：在 V1.2 Foundation Graph 契约不变的前提下，引入**可选的函数内分析层**（AST / CFG / 后续 Def-Use、Data Flow、安全分析），面向代码检测、安全分析与高级 Agent 任务。目标设计全文见
 [docs/design-optional-analysis-layer-vision.md](docs/design-optional-analysis-layer-vision.md)。
 
-分析层已按 D0–D8 完成实证交付并合入 `experiment/context-bundle`（报告见 `docs/design-analysis-layer-d*.md`）：
+分析层已按 D0–D8 完成实证交付并集成 main（报告见 `docs/design-analysis-layer-d*.md`）：
 
 - **Base Graph 默认 OFF 承诺**：analysis 表惰性创建、基础源码零修改、index/update 行为不变（每阶段零影响测试 + 全量回归 137/137）；
 - **D1–D3**：`file × analyzer` 派生缓存（`ast:python` / `cfg:python`）、fail-closed freshness、payload 硬上限；
@@ -203,14 +208,17 @@ MCP / Plugin / SDK        MCP 已落地（native exposure）；Plugin/SDK  evide
 - **D8**：真实 Agent 任务观察——UTILITY_OBSERVED=4 / ADOPTION_GAP=2 / CAPABILITY_GAP=0（无 DFG 需求信号）；
 - **D8-RV1**（2026-10-09）：历史 ADOPTION_GAP case（A2 merge/fallthrough、B2 break-vs-return）新版本自然使用重验 → 两例均 CASE_SOLVED_WITHOUT_PROVENLATTICE（如实在案，不计能力 win）。
 
-D9 context-bundle 线（`experiment/context-bundle`，18+ commits）：C6-C10 formal harness
+D9 context-bundle 线（已集成 main）：C6-C10 formal harness
 （含 C8-A 冻结 MCP 暴露合约、C9 normalization-v2、C10 oracle-v2 与受控协议），
 D9-C10 P2 = 12/12 cells、6/6 pairs VALID、PASS。
 
-下一步：V1.3 契约对外口径收敛 + 正式 qualification；DFG 等真实需求信号出现再启动；
-C 能力链（AST/CFG/短路/调用语义/紧凑上下文）已集成（post-V1.2 checkpoint），
-待同环境 16-case Agent revalidation；C++ deep analysis、精确 function-pointer
-target 解析与 def-use（真实 case 未证明必要）为后续候选。
+下一步（current next experiment）：colleague 16-case rerun——R1 revalidation
+包/清单/指南已冻结（`revalidation/c-contextbench-zstd-r1-manifest.json`），
+结果不预写；V1.3 正式 qualification 汇总待其之后再收敛。C 能力链
+（AST/CFG/短路/调用语义/紧凑上下文）已集成 main（post-V1.2 checkpoint）；
+def-use 真实 case 未证明必要（not justified yet），C++ deep analysis、
+精确 function-pointer target 解析、points-to、taint、Clang/compile_commands
+增强为后续候选（未排期）；DFG 等真实需求信号出现再启动。
 
 接口路线：SQI 契约已冻结（byte-identical envelope + citation closure）；
 **MCP 已落地**（D9-C8 native 单工具暴露，透明桥接 `python -m provenlattice`）；
@@ -258,9 +266,10 @@ Windows PowerShell 中先执行 `$env:PYTHONPATH='src'`。
 
 ✅ **SQI-V1.2 = QUALIFIED / RELEASE READY**（tag `provenlattice-sqi-v1.2`，GitHub Release 已发布）
 
-🧪 **V1.3 开发态（experiment/context-bundle）**：Analysis Layer（Python AST/CFG + C `.c`/`.h` normalized AST + C CFG V1）+
+🧪 **Post-V1.2 开发态（已集成 main）**：Analysis Layer（Python AST/CFG + C `.c`/`.h` normalized AST + C CFG V1）+
 Context Bundle/`task-context` + native MCP 暴露 + normalization-v2 已合入；
 D9-C10 受控稳定性 PASS；ContextBench zstd 16-case 重验无回归（14/16，0 真实失败）。
+正式 V1.3 qualification 待 colleague 16-case rerun 后收敛，尚未宣称。
 
 当前实现覆盖 Python/C/C++ CodeGraph，以及 Markdown Spec/Requirement/Document 到代码的可追溯确定性证据；RQ1 图保真度与 RQ2 系统规模资格已闭合，SQI 已完成 V1 → V1.1 → V1.2 三代 Agent 侧资格。Runtime Log、Commit History、Validation Result、Embedding、Vector DB、LLM linker、UI、TASCO 与 Agent 集成均未引入。
 
@@ -268,7 +277,8 @@ D9-C10 受控稳定性 PASS；ContextBench zstd 16-case 重验无回归（14/16�
 
 | 内容 | 位置 |
 | --- | --- |
-| 汇报母文档 | [docs/report-v1.2.md](docs/report-v1.2.md) |
+| V1.2 历史汇报 | [docs/report-v1.2.md](docs/report-v1.2.md) |
+| Post-V1.2 综合报告 | [docs/report-post-v1.2.md](docs/report-post-v1.2.md) |
 | 基座能力证据链 | [experiments/foundation_analysis/reviews/provenlattice-foundation-evidence-review.md](experiments/foundation_analysis/reviews/provenlattice-foundation-evidence-review.md) |
 | RQ1 图保真度综合 | experiments/fidelity_v1/results/rq1-graph-fidelity-evidence-synthesis-v1.md |
 | RQ2 系统与规模综合 | experiments/systems_v1/results/rq2-cross-system-synthesis-v1.json |
@@ -278,6 +288,10 @@ D9-C10 受控稳定性 PASS；ContextBench zstd 16-case 重验无回归（14/16�
 | 分析层 D0–D8 报告 | docs/design-analysis-layer-d4/d6/d7/d8-report.md |
 | D8-RV1 历史失败 case 重验 | experiments/analysis_layer/d8/d8_rv1_runner.py + results/D8-RV1-* |
 | D9-C10 受控实验协议 | experiments/context_bundle_v0/formal_harness/d9-c10/controlled-capability-protocol.json |
+| C 真实 zstd diagnostic（A3.5） | docs/design-analysis-layer-c-a35-zstd-diagnostic.md |
+| C 分析链 R1 集成审计 | docs/c-analysis-release-r1-integration-audit.md |
+| R1 revalidation manifest | revalidation/c-contextbench-zstd-r1-manifest.json |
+| Colleague 16-case revalidation guide | docs/c-analysis-colleague-revalidation-guide.md |
 
 ---
 

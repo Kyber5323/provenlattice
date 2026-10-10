@@ -13,11 +13,17 @@ SQI-V1 Structured Query Interface      = QUALIFIED   (Formal Protocol V1 scope, 
 SQI-V1.1 Evaluation Hardening          = PASS        (2026-09-17)
 SQI Cost Optimization C0               = PASS / Analysis Only (2026-09-17)
 SQI-V1.2 Cost Optimization Qualification = QUALIFIED / RELEASE READY (2026-09-20)
+Analysis Layer D0-D8 (Python-only)     = QUALIFIED   (2026-09-22)
+D9-C10 P2 Controlled Capability        = PASS        (2026-10-09)
+ContextBench zstd 16-case revalidation = 14/16 resolved, 2 infra-excluded, 0 genuine failure (2026-10-09, diagnostic)
+C analysis A1-A3.6                     = INTEGRATED on main (diagnostic; 16-case Agent revalidation PENDING)
+Colleague R1 revalidation              = PENDING (package/manifest/guide frozen; results not pre-written)
 ```
 
 **尚未做（防止误读）：**
 
 ```text
+正式 V1.3 qualification + tag                    = NOT YET（待 colleague 16-case rerun 后收敛，未宣称）
 Overlay V1.1                                     = NOT STARTED
 S3+ scale bands / concurrency                    = NOT STARTED（RQ2 明确排除）
 第四个 benchmark 仓库                             = NOT STARTED（明确不做）
@@ -65,7 +71,37 @@ T05.sqi 调用数 6-20/rep → 5/2/6（V1.2-NR2 通用修复，无任务特判�
     无硬编码 required id、无 oracle 变更）
 ```
 
-## 3. 复现矩阵
+### Post-V1.2 开发态（2026-09-21 → 2026-10-10，已集成 main；非正式 qualification）
+
+```text
+Analysis Layer D0-D8       UTILITY_OBSERVED 4/6 · ADOPTION_GAP 2/6 · CAPABILITY_GAP 0 ·
+                           Base Graph 零影响回归 137/137
+D8-RV1 (2026-10-09)        历史 ADOPTION_GAP case A2/B2 自然使用重验 →
+                           CASE_SOLVED_WITHOUT_PROVENLATTICE ×2（如实在案，不计能力 win）
+D9-C10 P2 (2026-10-09)     6 case × 2 arm × r1 = 12/12 cells · 6/6 pairs VALID ·
+                           Arm A facts=0 ×6 · Arm B facts>0 ×6 · 0 leakage / 0 hidden retry
+ContextBench zstd 16-case  14/16 resolved · 0 真实失败 · 2 infra-excluded（≠16/16）
+                           历史 3 失败 case 对账 = harness 苛判产物
+C 链 A1-A3.6               全量回归 254/254 · 真实 zstd diagnostic false direct bindings = 0 ·
+                           def-use not justified yet（A4_DEFUSE_NOT_YET_JUSTIFIED）
+Colleague R1 (16-case)     PENDING（wheel/manifest/guide 已冻结，结果不预写）
+```
+
+## 3. Post-V1.2 能力对账（逐项 status / evidence / reproduction / 性质）
+
+| 能力项 | Status | Evidence path | Reproduction entry | 性质 |
+| --- | --- | --- | --- | --- |
+| Analysis Layer D0–D8（Python AST/CFG） | QUALIFIED（Python-only，2026-09-22） | `docs/design-analysis-layer-d0-audit.md`…`design-analysis-layer-d8-report.md`；`experiments/analysis_layer/d8/results/D8-20260922T091934Z/`、`D8-20260923T061603Z/` | `experiments/analysis_layer/d8/d8_runner.py` | **formal**（限 Python-only scope） |
+| D8-RV1（历史 ADOPTION_GAP case 新版本自然使用重验） | 已闭合：CASE_SOLVED_WITHOUT_PROVENLATTICE ×2（A2/B2，如实在案） | `experiments/analysis_layer/d8/d8_rv1_runner.py`；`experiments/analysis_layer/d8/results/D8-RV1-20261009T083159Z/`、`D8-RV1-20261009T083452Z/`（含 `revalidation-summary.json`） | `experiments/analysis_layer/d8/d8_rv1_runner.py` | **diagnostic**（重验观察，非能力 win） |
+| Context Bundle / `task-context`（D9-C1/C2） | implemented；task-context-v0 事实包（fact_id + evidence_ids 全量可追溯） | `docs/design-analysis-layer-d9-c1-report.md`、`docs/design-context-bundle-d9-c2-prereg.md`；`experiments/analysis_layer/d8/results/D9-C1-T3-20260923T074912Z/` + `D9-C1-TRANSPORT-*/` | `python -m provenlattice task-context <repo> <symbol> --json` | **diagnostic**（传输/probe 级；formal 稳定性证据见 D9-C10） |
+| Native MCP 暴露（D9-C7/C8） | implemented；单工具 `mcp__provenlattice__query` 透明桥接，C8-A 冻结合约 byte-identical；C8-B 正式批漏斗证据 | `experiments/context_bundle_v0/formal_harness/provenlattice_mcp_server.py`；`experiments/context_bundle_v0/formal/`（`dispatch-contract.json` + sha256、`formal-manifest.json` + sha256） | `python experiments/context_bundle_v0/formal_harness/provenlattice_mcp_server.py` | **formal**（C8-A 冻结合约 + C8-B 正式批） |
+| normalization-v2（D9-C9） | implemented；Agent trace → 事实级观测，raw≡normalized 校验（C10 内 ×6） | `experiments/context_bundle_v0/formal_harness/formal_c9c1.py`、`formal_c9c2_runner.py`、`test_formal_c9c1.py` | `PYTHONPATH=src python -m unittest discover -s experiments/context_bundle_v0/formal_harness -p "test_formal_*.py"` | **formal** |
+| D9-C10 P2 受控能力稳定性 | PASS（2026-10-09；12/12 cells、6/6 pairs VALID、0 leakage / 0 hidden retry） | `experiments/context_bundle_v0/formal_harness/d9-c10/controlled-capability-protocol.json` + `assignment-sealed.json` + `c10-b1-verdict.json`（+ `c10-b2-amendment.json`） | `experiments/context_bundle_v0/formal_harness/formal_c10d_p2.py`（协议见 `d9-c10/`） | **formal** |
+| ContextBench zstd 16-case 重验 | 14/16 resolved、0 真实失败、2 infra-excluded（**≠16/16**）；对比历史 13/16 无回归 | 外部批目录 `benchmark-contextbench-zstd/`（`revalidation-summary.json`、`infra-limited-classification.json`、`historical-failure-attribution-audit.json`、`evidence-infra-limited/`） | `benchmark-contextbench-zstd/rv1-harness.py`（按冻结指南协议重建） | **diagnostic**（自然使用重验，非 formal qualification） |
+| C 分析链 A1/A2/A2.1/A3/A3.5/A3.6 | 已集成 main；全量回归 254/254；真实 zstd diagnostic 通过（false direct bindings = 0） | `docs/design-analysis-layer-c-a1-report.md`…`c-a36-report.md`（含各 audit）；`docs/design-analysis-layer-c-a35-zstd-diagnostic.md`；`docs/c-analysis-release-r1-integration-audit.md` | `PYTHONPATH=src python -m unittest tests.test_c_ast_analysis tests.test_c_cfg_analysis tests.test_c_scfg_analysis tests.test_c_call_semantics tests.test_c_context_retrieval`；`python -m provenlattice analyze <repo> --scope <dir> --features ast,cfg --json` | **diagnostic**（16-case Agent revalidation PENDING） |
+| Colleague R1 revalidation（16-case） | PENDING（wheel/manifest/guide 已冻结；结果不预写） | `revalidation/c-contextbench-zstd-r1-manifest.json`；`revalidation/packages/provenlattice-1.0.0-py3-none-any.whl`；`docs/c-analysis-colleague-revalidation-guide.md` | 按指南执行：`pip install revalidation/packages/provenlattice-1.0.0-py3-none-any.whl` → per-case protocol | **pending** |
+
+## 4. 复现矩阵
 
 | 结论 | 复现入口 | 验证内容 | 需要 Agent/DB |
 | --- | --- | --- | --- |
@@ -79,7 +115,7 @@ T05.sqi 调用数 6-20/rep → 5/2/6（V1.2-NR2 通用修复，无任务特判�
 | 基座能力证据链 | `experiments/foundation_analysis/results/PROVENLATTICE-FOUNDATION-EVIDENCE.json` + `experiments/foundation_analysis/reviews/provenlattice-foundation-evidence-review.md` | RQ1/RQ2/工程基线/架构映射/缺口矩阵综合（只读现有正式 evidence） | 已有记录 |
 | C4-R4 Native vs SQI 横向 | `experiments/query_interface_v1/results/analysis/C4-R4-NATIVE-VS-SQI-V1.2.json` + `reviews/c4-r4-native-vs-sqi-v1.2.md` | 同批横向成功率（100% vs 66.7%）与 success-normalized 成本（−28.1%）分析 | 已有记录 |
 
-## 4. 一键验证
+## 5. 一键验证
 
 ```bash
 python experiments/query_interface_v1/tools/verify_release.py
@@ -106,7 +142,7 @@ PYTHONPATH=src python -m unittest experiments.query_interface_v1.tests.test_sqi_
 PYTHONPATH=src python -m unittest discover -s tests              # 核心 integration tests
 ```
 
-## 5. 环境与冻结输入
+## 6. 环境与冻结输入
 
 | 项 | 值 |
 | --- | --- |
@@ -121,7 +157,7 @@ PYTHONPATH=src python -m unittest discover -s tests              # 核心 integr
 `src/provenlattice`（V0.2 实现，`python -m provenlattice.cli`）构建索引与知识层；
 sha256 必须与本锁文件一致方可复跑 qualification。
 
-## 6. 证据地图（formal / smoke / historical）
+## 7. 证据地图（formal / smoke / historical）
 
 物理路径保持 seal 冻结时的原样（移动会破坏 SHA-256 seal），分层语义如下：
 
@@ -134,12 +170,16 @@ sha256 必须与本锁文件一致方可复跑 qualification。
 规则：`task failure ≠ capability failure`；任何失败先归因；superseded/invalid/excluded
 一律显式标记，不删除。
 
-## 7. 各线入口
+## 8. 各线入口
 
 | 线 | 入口 |
 | --- | --- |
 | RQ1 Graph Fidelity | `experiments/fidelity_v1/` + `docs/p0-graph-fidelity-v1-status-v1.md` |
 | RQ2 Systems & Scale | `experiments/systems_v1/README.md` |
 | SQI-V1 / V1.1 / V1.2 | `experiments/query_interface_v1/README.md` |
+| Analysis Layer D0–D8 / C 链 A1–A3.6 | `experiments/analysis_layer/` + `docs/design-analysis-layer-*-report.md` |
+| Context Bundle / MCP / normalization / C10 | `experiments/context_bundle_v0/` + `docs/design-analysis-layer-d9-*.md` |
+| Post-V1.2 综合报告 | `docs/report-post-v1.2.md` |
+| Colleague R1 revalidation | `revalidation/` + `docs/c-analysis-colleague-revalidation-guide.md` |
 | 治理框架 | `docs/provenlattice-research-validation-framework-v1.md` |
 | 证据盘点 | `docs/provenlattice-evidence-inventory-gap-matrix-v1.md` |

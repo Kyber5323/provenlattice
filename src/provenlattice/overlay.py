@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import sqlite3
 import tempfile
 import time
@@ -14,7 +13,7 @@ from typing import Callable, Iterable
 from .models import OverlayConflict, OverlayDelta, OverlayMetadata
 from .incremental import incremental_update
 from .shard import ShardStrategy
-from .storage import SQLiteStorage
+from .storage import SQLiteStorage, copy_database
 
 
 ENTITY_TABLES = {
@@ -203,13 +202,18 @@ class OverlayStore:
 
 
 def _snapshot(database: str | Path, entity_type: str) -> dict[str, dict]:
+    """Every row of one entity table, the cold layer included.
+
+    Opened through `SQLiteStorage` on purpose: on a split layout (stage 7A) a
+    bare connection has no `raw_references` table to read, and a delta built
+    from that would report every reference as deleted.
+    """
     table, key = ENTITY_TABLES[entity_type]
-    connection = sqlite3.connect(database)
-    connection.row_factory = sqlite3.Row
-    try:
-        return {row[key]: dict(row) for row in connection.execute(f"SELECT * FROM {table}")}
-    finally:
-        connection.close()
+    with SQLiteStorage(database) as storage:
+        return {
+            row[key]: dict(row)
+            for row in storage.connection.execute(f"SELECT * FROM {table}")
+        }
 
 
 def capture_snapshot_delta(
@@ -270,7 +274,9 @@ def apply_repository_overlay(
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="pl-overlay-apply-") as temp:
         working_database = Path(temp) / "working.db"
-        shutil.copy2(Path(base_database).resolve(), working_database)
+        # The cold store travels with the main file; copying one half would
+        # hand the update an empty reference layer.
+        copy_database(base_database, working_database)
         update = incremental_update(
             repository, working_database, strategy=strategy,
             repository_id_override=overlay.metadata.repository_id,

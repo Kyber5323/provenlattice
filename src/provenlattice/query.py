@@ -1690,4 +1690,5 @@ class GraphQuery:
                              "counts": counts,
                              "latest_generation": decode_row(latest) if latest else None,
                              "database_size": self.storage.database_size,
+                             "cold_database_size": self.storage.cold_database_size,
                              "overlay_size": sum(item.database_size for item in self.view.layers)}, started)

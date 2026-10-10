@@ -12,6 +12,7 @@ from provenlattice.identity import repository_id, symbol_id
 from provenlattice.incremental import incremental_update
 from provenlattice.parsing.cpp import CppTreeSitterParser, tree_sitter_c, tree_sitter_cpp
 from provenlattice.scanner import scan_repository
+from provenlattice.storage import SQLiteStorage
 
 
 HAS_CPP_GRAMMARS = tree_sitter_c is not None and tree_sitter_cpp is not None
@@ -61,7 +62,8 @@ class CppParserTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             result = full_index(self.root, Path(temp) / "graph.db")
             self.assertGreater(result["metrics"]["files_parsed"], 0)
-            with closing(sqlite3.connect(Path(temp) / "graph.db")) as connection:
+            with SQLiteStorage(Path(temp) / "graph.db") as storage:
+                connection = storage.connection
                 include_statuses = {
                     row[0] for row in connection.execute(
                         "SELECT status FROM raw_references WHERE raw_name='api.hpp'"
@@ -86,13 +88,15 @@ class CppParserTests(unittest.TestCase):
             full_index(root, full_db)
 
             def snapshot(path: Path) -> dict[str, list[dict]]:
-                with closing(sqlite3.connect(path)) as connection:
-                    connection.row_factory = sqlite3.Row
+                # Through `SQLiteStorage`: a split layout keeps the references
+                # in the cold store, which a bare connection cannot see.
+                with SQLiteStorage(path) as storage:
                     return {
                         table: [
                             {key: value for key, value in dict(row).items()
                              if key not in {"generation", "boundary_dirty"}}
-                            for row in connection.execute(f"SELECT * FROM {table} ORDER BY 1")
+                            for row in storage.connection.execute(
+                                f"SELECT * FROM {table} ORDER BY 1")
                         ]
                         for table in ("nodes", "edges", "shards", "raw_references")
                     }

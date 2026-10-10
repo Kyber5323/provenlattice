@@ -50,6 +50,7 @@ from provenlattice.sparsecfg import (
     unreleased_resources,
 )
 from provenlattice.sparsedfg import CONSUMES, DATA_FLOW_TO, bind_parameters
+from provenlattice.storage import copy_database
 from provenlattice.storage import SQLiteStorage
 
 REPO = "defect-repo"
@@ -3078,7 +3079,8 @@ class ReviewSheetTests(unittest.TestCase):
         # A copy of the database whose recorded root no longer exists: what a
         # moved or renamed checkout leaves behind.
         moved_database = directory / "moved.db"
-        shutil.copyfile(database, moved_database)
+        # The copy has to take the cold reference store with it (stage 7A).
+        copy_database(database, moved_database)
         gone = directory / "gone"
         # `with sqlite3.connect(...)` commits and does not close, and a
         # connection left open holds a Windows lock on the file.

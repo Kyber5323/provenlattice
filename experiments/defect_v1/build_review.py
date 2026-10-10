@@ -49,6 +49,7 @@ from pathlib import Path
 from provenlattice import contracts, defect
 from provenlattice.sparsecfg import materialize_points
 from provenlattice.sparsedfg import bind_parameters
+from provenlattice.storage import cold_path_for
 
 REVIEW_ID = "provenlattice-defect-v1-review"
 REVIEW_STATUS = "DEFECT_REVIEW_READY_FOR_ANNOTATION"
@@ -78,8 +79,28 @@ FAILURE_REASONS = (
 
 
 def _open_read_only(database: Path) -> sqlite3.Connection:
+    """A read-only connection that sees the cold layer (stage 7A).
+
+    `mode=ro` is the point of this function -- the review path must not write
+    -- so the cold store is attached here rather than by opening through
+    `SQLiteStorage`, whose open brings a cold store into existence for a fresh
+    database. A legacy snapshot has the real table and needs nothing; a split
+    one gets its cold file attached read-only, and only when it exists, so a
+    missing cold store fails on `no such table` instead of being created.
+    """
     connection = sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
+    row = connection.execute(
+        "SELECT type FROM sqlite_master WHERE name = 'raw_references'"
+    ).fetchone()
+    cold = cold_path_for(database)
+    if row is None and cold.exists():
+        connection.execute(
+            "ATTACH DATABASE ? AS cold", (f"file:{cold.as_posix()}?mode=ro",)
+        )
+        connection.execute(
+            "CREATE TEMP VIEW raw_references AS SELECT * FROM cold.raw_references"
+        )
     return connection
 
 

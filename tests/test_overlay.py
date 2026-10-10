@@ -12,6 +12,7 @@ from provenlattice.overlay import (
     detect_conflicts, materialize_view, merge_overlays, rebase_overlay,
 )
 from provenlattice.query import GraphQuery
+from provenlattice.storage import SQLiteStorage
 
 
 BASE = """from module_b.util import helper
@@ -92,10 +93,13 @@ class OverlayTests(unittest.TestCase):
                 "Shard": ("shards", "shard_id"),
                 "BoundaryEdge": ("shard_edges", "edge_id"),
             }.items():
-                connection = sqlite3.connect(self.target)
-                connection.row_factory = sqlite3.Row
-                target = [dict(row) for row in connection.execute(f"SELECT * FROM {table}")]
-                connection.close()
+                # Through `SQLiteStorage`: the reference layer is cold on a
+                # split layout and invisible to a bare connection.
+                with SQLiteStorage(self.target) as storage:
+                    target = [
+                        dict(row)
+                        for row in storage.connection.execute(f"SELECT * FROM {table}")
+                    ]
                 self.assertEqual(normalized(effective[entity], key), normalized(target, key))
             with GraphQuery(self.base, branch_overlay=branch.path) as query:
                 self.assertEqual(len(query.find_symbol("added")["data"]), 1)

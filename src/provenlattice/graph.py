@@ -388,6 +388,7 @@ def full_index(
             ],
         )
         metrics.database_size = storage.database_size
+        metrics.cold_database_size = storage.cold_database_size
         metrics.index_time_ms = (time.perf_counter() - started) * 1000
         storage.connection.execute(
             "UPDATE graph_generation SET metrics=? WHERE repo_id=? AND generation=?",

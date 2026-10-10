@@ -124,6 +124,9 @@ class Metrics:
     affected_nodes: int = 0
     affected_edges: int = 0
     database_size: int = 0
+    # The cold store of a split layout (stage 7A). Zero for a legacy database,
+    # whose references are already inside `database_size`.
+    cold_database_size: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

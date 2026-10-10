@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -51,16 +52,14 @@ CREATE TABLE IF NOT EXISTS shard_edges (
     dst_shard_id TEXT NOT NULL, edge_type TEXT NOT NULL,
     raw_reference_id TEXT
 );
-CREATE TABLE IF NOT EXISTS raw_references (
-    id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, file_id TEXT NOT NULL,
-    owner_symbol_id TEXT NOT NULL, raw_name TEXT NOT NULL,
-    reference_type TEXT NOT NULL, target_module TEXT,
-    start_line INTEGER, end_line INTEGER,
-    status TEXT NOT NULL CHECK(status IN ('resolved', 'ambiguous', 'unresolved')),
-    candidate_symbols TEXT NOT NULL, resolved_symbol_id TEXT,
-    resolution_strategy TEXT NOT NULL, provenance TEXT NOT NULL,
-    confidence REAL NOT NULL, generation INTEGER NOT NULL, metadata TEXT NOT NULL
-);
+-- `raw_references` is NOT here: it is the cold layer (stage 7A). It lives in a
+-- sibling database file (COLD_SCHEMA below) that this class ATTACHes as `cold`
+-- and re-exposes to readers through a TEMP VIEW of the same name, so every
+-- existing `SELECT ... FROM raw_references` keeps working unchanged while the
+-- main file -- the one every query opens -- carries only hot graph facts. A
+-- database that still has the real table (anything indexed before stage 7A,
+-- the frozen 5B snapshots included) stays on the legacy layout and is not
+-- touched.
 CREATE TABLE IF NOT EXISTS raw_evidence_links (
     id TEXT PRIMARY KEY, repository_id TEXT NOT NULL,
     source_node_id TEXT NOT NULL, raw_anchor TEXT NOT NULL,
@@ -132,10 +131,6 @@ CREATE INDEX IF NOT EXISTS idx_shard_edges_src ON shard_edges(src_shard_id);
 CREATE INDEX IF NOT EXISTS idx_shard_edges_dst ON shard_edges(dst_shard_id);
 CREATE INDEX IF NOT EXISTS idx_shard_edges_raw_reference ON shard_edges(raw_reference_id);
 CREATE INDEX IF NOT EXISTS idx_files_shard_id ON files(shard_id);
-CREATE INDEX IF NOT EXISTS idx_raw_references_name ON raw_references(raw_name);
-CREATE INDEX IF NOT EXISTS idx_raw_references_file ON raw_references(file_id);
-CREATE INDEX IF NOT EXISTS idx_raw_references_owner ON raw_references(owner_symbol_id);
-CREATE INDEX IF NOT EXISTS idx_raw_references_resolved ON raw_references(resolved_symbol_id);
 -- `layer` lives in the metadata JSON but is queried as a column. Without these
 -- the planner scans the whole table, and for nodes that means reading a
 -- metadata blob which is ~95% of the table's bytes.
@@ -180,14 +175,69 @@ CREATE INDEX IF NOT EXISTS idx_document_state_path ON document_state(repository_
 """
 
 
+# The cold layer (stage 7A). Same DDL as the legacy in-main `raw_references`
+# so rows move between the two layouts verbatim, but every statement is
+# schema-qualified for the ATTACHed `cold` database. `id_filter`'s temp tables
+# live in the TEMP schema and are therefore shared by both.
+COLD_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cold.raw_references (
+    id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, file_id TEXT NOT NULL,
+    owner_symbol_id TEXT NOT NULL, raw_name TEXT NOT NULL,
+    reference_type TEXT NOT NULL, target_module TEXT,
+    start_line INTEGER, end_line INTEGER,
+    status TEXT NOT NULL CHECK(status IN ('resolved', 'ambiguous', 'unresolved')),
+    candidate_symbols TEXT NOT NULL, resolved_symbol_id TEXT,
+    resolution_strategy TEXT NOT NULL, provenance TEXT NOT NULL,
+    confidence REAL NOT NULL, generation INTEGER NOT NULL, metadata TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cold.idx_raw_references_name ON raw_references(raw_name);
+CREATE INDEX IF NOT EXISTS cold.idx_raw_references_file ON raw_references(file_id);
+CREATE INDEX IF NOT EXISTS cold.idx_raw_references_owner ON raw_references(owner_symbol_id);
+CREATE INDEX IF NOT EXISTS cold.idx_raw_references_resolved ON raw_references(resolved_symbol_id);
+"""
+
+
+def cold_path_for(database: str | Path) -> Path:
+    """The cold store that belongs to a main database path.
+
+    A fixed suffix rather than a directory: the two files travel together
+    (`copy_database`), `*.db` is already ignored by git, and a database renamed
+    or moved by hand keeps its partner discoverable by the same rule.
+    """
+    database = Path(database).resolve()
+    return database.with_name(database.stem + ".cold.db")
+
+
+def copy_database(source: str | Path, target: str | Path) -> list[Path]:
+    """Copy a database, cold store included, to `target`; return what was copied.
+
+    Every copy of a database has to go through here: a split layout whose cold
+    half was left behind reads as an empty reference layer, and the overlay
+    path (`apply_repository_overlay`) copies the base snapshot before every
+    incremental apply.
+    """
+    source, target = Path(source).resolve(), Path(target).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    copied = [target]
+    source_cold = cold_path_for(source)
+    if source_cold.exists():
+        target_cold = cold_path_for(target)
+        shutil.copy2(source_cold, target_cold)
+        copied.append(target_cold)
+    return copied
+
+
 class SQLiteStorage:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, cold: str | Path | None = None) -> None:
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
         self._id_filter_seq = 0
+        self.cold_path = Path(cold).resolve() if cold is not None else cold_path_for(self.path)
         self.connection.executescript(SCHEMA)
+        self._open_reference_layer()
         # V0.3 introduced the reverse boundary index. Backfill snapshots created
         # by V0.2 once, before they are frozen as an Overlay base.
         self.connection.execute(
@@ -201,6 +251,57 @@ class SQLiteStorage:
                  AND json_extract(metadata, '$.dst_shard_id') IS NOT NULL"""
         )
         self.connection.commit()
+
+    def _open_reference_layer(self) -> None:
+        """Attach the cold store, or stay on the legacy in-main table.
+
+        Legacy (a database indexed before stage 7A) still has the real
+        `raw_references` table: nothing is attached and nothing is created, so
+        a frozen snapshot reads exactly as it did before the split. A split
+        database attaches its cold file and re-exposes it as a TEMP VIEW under
+        the old name -- TEMP, not stored, because a stored view's `cold.`
+        prefix only resolves on a connection that attached, and a reader
+        without the cold store should fail loudly on a missing table rather
+        than confusingly on a missing schema.
+        """
+        row = self.connection.execute(
+            "SELECT type FROM sqlite_master WHERE name = 'raw_references'"
+        ).fetchone()
+        if row is not None and row["type"] == "table":
+            self._reference_schema = "main"
+            return
+        if not self.cold_path.exists():
+            # ATTACH would create the file silently, and every read afterwards
+            # would answer "no references" instead of failing. Only a database
+            # that is being built may bring its cold store into existence.
+            populated = self.connection.execute("SELECT COUNT(*) FROM repositories").fetchone()[0]
+            if populated:
+                # Close before raising: an abandoned connection keeps a
+                # Windows lock on the main file the caller may want to move.
+                self.connection.close()
+                raise RuntimeError(
+                    f"cold store missing for {self.path}: expected {self.cold_path}"
+                )
+        self.connection.execute("ATTACH DATABASE ? AS cold", (str(self.cold_path),))
+        self.connection.executescript(COLD_SCHEMA)
+        self.connection.execute(
+            "CREATE TEMP VIEW raw_references AS SELECT * FROM cold.raw_references"
+        )
+        self._reference_schema = "cold"
+
+    @property
+    def reference_schema(self) -> str:
+        return self._reference_schema
+
+    @property
+    def reference_table(self) -> str:
+        """The writable name of the reference table.
+
+        Reads go through the unqualified name (the TEMP VIEW in a split
+        layout, the real table in a legacy one); writes must name the cold
+        schema explicitly, because the view is read-only.
+        """
+        return "cold.raw_references" if self._reference_schema == "cold" else "raw_references"
 
     def close(self) -> None:
         self.connection.close()
@@ -222,7 +323,18 @@ class SQLiteStorage:
 
     @property
     def database_size(self) -> int:
+        """The main (hot) file. The cold store is reported separately.
+
+        The two numbers are not comparable with a legacy single-file snapshot:
+        the split is precisely the act of moving bytes from this number to
+        `cold_database_size`, and the frozen artifacts stay legacy.
+        """
         return self.path.stat().st_size if self.path.exists() else 0
+
+    @property
+    def cold_database_size(self) -> int:
+        """The cold file, or 0 when the references still live in the main one."""
+        return self.cold_path.stat().st_size if self.cold_path.exists() else 0
 
     def current_generation(self, repo_id: str) -> int:
         row = self.connection.execute(
@@ -459,7 +571,9 @@ class SQLiteStorage:
                 "DELETE FROM edges WHERE COALESCE(json_extract(metadata, '$.layer'), 'code') != 'knowledge'"
             )
             connection.execute("DELETE FROM shard_edges")
-            connection.execute("DELETE FROM raw_references")
+            # The reference layer may live in the ATTACHed cold database; the
+            # delete goes through the writable name (the TEMP VIEW is not).
+            connection.execute(f"DELETE FROM {self.reference_table}")
             connection.execute("DELETE FROM semantic_events")
             connection.execute("DELETE FROM semantic_edges")
             connection.execute("DELETE FROM semantic_fingerprint")
@@ -567,7 +681,8 @@ class SQLiteStorage:
                 ],
             )
             connection.executemany(
-                "INSERT INTO raw_references VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO {self.reference_table} "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         reference.id, reference.repo_id, reference.file_id,

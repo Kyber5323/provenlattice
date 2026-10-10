@@ -13,7 +13,7 @@ from provenlattice.graph import full_index
 from provenlattice.identity import repository_id
 from provenlattice.incremental import incremental_update
 from provenlattice.query import GraphQuery
-from provenlattice.storage import SQLiteStorage
+from provenlattice.storage import SQLiteStorage, cold_path_for, copy_database
 
 
 REVISION_A = """from module_b.util import helper
@@ -62,25 +62,30 @@ def write(path: Path, text: str) -> None:
 
 
 def snapshot(database: Path) -> dict:
-    connection = sqlite3.connect(database)
-    connection.row_factory = sqlite3.Row
-    result = {}
-    for table in ("nodes", "edges", "shards", "raw_references"):
-        rows = []
-        for row in connection.execute(f"SELECT * FROM {table} ORDER BY 1"):
-            item = dict(row)
-            item.pop("generation", None)
-            if "boundary_dirty" in item:
-                item.pop("boundary_dirty")
-            rows.append(item)
-        result[table] = rows
-    result["boundary_edges"] = [
-        dict(row) for row in connection.execute(
-            "SELECT id, src_id, dst_id, type, metadata FROM edges "
-            "WHERE json_extract(metadata, '$.scope') = 'boundary' ORDER BY id"
-        )
-    ]
-    connection.close()
+    """Every compared table, the cold reference layer included.
+
+    Opened through `SQLiteStorage` on purpose: a split layout (stage 7A) keeps
+    `raw_references` in its cold store, and a bare connection would read the
+    table as absent -- comparing two empty lists as equal.
+    """
+    with SQLiteStorage(database) as storage:
+        connection = storage.connection
+        result = {}
+        for table in ("nodes", "edges", "shards", "raw_references"):
+            rows = []
+            for row in connection.execute(f"SELECT * FROM {table} ORDER BY 1"):
+                item = dict(row)
+                item.pop("generation", None)
+                if "boundary_dirty" in item:
+                    item.pop("boundary_dirty")
+                rows.append(item)
+            result[table] = rows
+        result["boundary_edges"] = [
+            dict(row) for row in connection.execute(
+                "SELECT id, src_id, dst_id, type, metadata FROM edges "
+                "WHERE json_extract(metadata, '$.scope') = 'boundary' ORDER BY id"
+            )
+        ]
     return result
 
 
@@ -221,10 +226,15 @@ class IntegrationTests(unittest.TestCase):
         self.assertIsNone(missing[0]["resolved_symbol_id"])
         self.assertEqual(ambiguous[0]["status"], "ambiguous")
         self.assertEqual(len(ambiguous[0]["candidate_symbols"]), 2)
-        with closing(sqlite3.connect(database)) as connection:
+        with SQLiteStorage(database) as storage:
+            connection = storage.connection
+            # The reference table lives in the cold schema on a split layout,
+            # so the index list is read through the table-valued pragma with
+            # the schema the storage actually opened.
             indexes = {
                 row[0] for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='raw_references'"
+                    "SELECT name FROM pragma_index_list('raw_references', ?)",
+                    (storage.reference_schema,),
                 )
             }
             ambiguous_edges = connection.execute(
@@ -385,6 +395,113 @@ class TargetedLoaderTests(unittest.TestCase):
             if row["file_id"] not in excluded_files and row["id"] not in excluded_ids
         }
         self.assertEqual(targeted, expected)
+
+
+def to_legacy_layout(database: Path) -> None:
+    """Rewrite a split database into the pre-7A single-file layout.
+
+    The DDL is read back out of the cold schema rather than copied here: the
+    fixture has to be the real old shape, and a second copy of the DDL in a
+    test is a copy that drifts.
+    """
+    with SQLiteStorage(database) as storage:
+        connection = storage.connection
+        statements = [
+            row[0] for row in connection.execute(
+                "SELECT sql FROM cold.sqlite_master "
+                "WHERE tbl_name = 'raw_references' AND sql IS NOT NULL"
+            )
+        ]
+        # The TEMP VIEW shadows the main schema for unqualified names, and the
+        # DDL read back above is unqualified -- drop the view first so the
+        # table and its indexes land in the main file.
+        connection.execute("DROP VIEW temp.raw_references")
+        for statement in statements:
+            connection.execute(statement)
+        connection.execute("INSERT INTO main.raw_references SELECT * FROM cold.raw_references")
+        connection.commit()
+    cold_path_for(database).unlink()
+
+
+class ColdSplitTests(unittest.TestCase):
+    """Stage 7A: `raw_references` in a sibling file, hot facts in the main one."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "repo"
+        write(self.root / "module_a" / "service.py", REVISION_A)
+        write(
+            self.root / "module_b" / "util.py",
+            "def helper(value: int) -> int:\n    return value + 1\n",
+        )
+        self.database = Path(self.temp.name) / "graph.db"
+        full_index(self.root, self.database)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_the_reference_layer_lives_in_a_sibling_file(self) -> None:
+        cold = cold_path_for(self.database)
+        self.assertTrue(cold.is_file())
+        with SQLiteStorage(self.database) as storage:
+            self.assertEqual(storage.reference_schema, "cold")
+            self.assertEqual(storage.reference_table, "cold.raw_references")
+            self.assertIsNone(
+                storage.connection.execute(
+                    "SELECT type FROM sqlite_master WHERE name = 'raw_references'"
+                ).fetchone()
+            )
+            self.assertGreater(storage.cold_database_size, 0)
+            self.assertEqual(
+                storage.connection.execute("SELECT COUNT(*) FROM raw_references").fetchone()[0],
+                storage.connection.execute(
+                    "SELECT COUNT(*) FROM cold.raw_references").fetchone()[0],
+            )
+        with GraphQuery(self.database) as query:
+            self.assertTrue(query.get_raw_references(raw_name="helper")["data"])
+            self.assertEqual(query.status()["data"]["cold_database_size"], cold.stat().st_size)
+
+    def test_a_connection_without_the_cold_store_fails_loudly(self) -> None:
+        """A bare `sqlite3.connect` cannot see the cold layer, and that is the
+        point: the failure is a missing table, not a silently empty one."""
+        connection = sqlite3.connect(self.database)
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                connection.execute("SELECT COUNT(*) FROM raw_references").fetchone()
+        finally:
+            connection.close()
+
+    def test_a_missing_cold_store_is_an_error_not_an_empty_table(self) -> None:
+        cold_path_for(self.database).unlink()
+        with self.assertRaises(RuntimeError):
+            SQLiteStorage(self.database)
+
+    def test_a_legacy_single_file_database_still_reads_and_updates(self) -> None:
+        to_legacy_layout(self.database)
+        with SQLiteStorage(self.database) as storage:
+            self.assertEqual(storage.reference_schema, "main")
+            self.assertEqual(storage.reference_table, "raw_references")
+            self.assertEqual(storage.cold_database_size, 0)
+            rows = storage.connection.execute("SELECT COUNT(*) FROM raw_references").fetchone()[0]
+        self.assertGreater(rows, 0)
+        write(self.root / "module_c" / "api.py", "def extra(value: int) -> int:\n    return value - 1\n")
+        update = incremental_update(self.root, self.database)
+        self.assertTrue(update["changed"])
+        self.assertEqual(update["metrics"]["cold_database_size"], 0)
+        with SQLiteStorage(self.database) as storage:
+            self.assertGreater(
+                storage.connection.execute("SELECT COUNT(*) FROM raw_references").fetchone()[0], 0
+            )
+        self.assertFalse(cold_path_for(self.database).exists())
+
+    def test_copy_takes_the_cold_store_along(self) -> None:
+        target = Path(self.temp.name) / "copy.db"
+        copied = copy_database(self.database, target)
+        self.assertEqual([path.name for path in copied], ["copy.db", "copy.cold.db"])
+        with SQLiteStorage(target) as storage:
+            self.assertGreater(
+                storage.connection.execute("SELECT COUNT(*) FROM raw_references").fetchone()[0], 0
+            )
 
 
 class ExpressionIndexTests(unittest.TestCase):

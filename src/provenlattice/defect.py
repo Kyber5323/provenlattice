@@ -1803,6 +1803,14 @@ def lock_order(
     a disqualification instead: nothing in the graph can run these methods at
     the same time, so the candidates are dropped and counted rather than
     reported as ambiguous.
+
+    The same holding test decides the 1.4 shape, and there it *is* decisive:
+    a self-deadlock needs both acquisitions held at once, so when no path
+    reaches the second without passing an UNLOCK of that lock the shape is not
+    a deadlock and no candidate is published (`disqualified_not_held` counts
+    them). Identity uncertainty is the other kind of gap and still publishes as
+    ambiguous -- not knowing which object a name denotes is not the same as
+    knowing the lock was released.
     """
     points, adjacency = _published_graph(events, edges, points, adjacency)
     non_lock_points = _non_lock_points(points)
@@ -1881,11 +1889,15 @@ def lock_order(
                 candidates.append(candidate)
 
     reentrant_candidates = sorted(reentrant) if _wanted("1.4", defect_keys) else ()
+    disqualified_not_held = 0
     for owner, first, second, lock_identity in reentrant_candidates:
         candidate = _self_deadlock_candidate(
             owner, first, second, lock_identity, points, adjacency, unlocks_by_subject,
             max_hops, max_paths, names, display=display, identity=identity,
         )
+        if candidate is None:
+            disqualified_not_held += 1
+            continue
         if subject is not None and candidate.subject["name"] != subject:
             continue
         candidates.append(candidate)
@@ -1934,6 +1946,11 @@ def lock_order(
         "candidates": len(candidates),
         "candidates_by_key": _count_by_key(candidates),
         "disqualified_no_threads": disqualified_no_threads,
+        # Self-deadlock shapes the holding walk exonerated: the lock is released
+        # between the two acquisitions on every path, so there is no window in
+        # which both are held. Counted rather than silently dropped, for the
+        # same reason `disqualified_no_threads` is.
+        "disqualified_not_held": disqualified_not_held,
         "max_hops": max_hops,
         "semantic_points": len(points),
         "semantic_edges": sum(len(item) for item in adjacency.values()),
@@ -2233,13 +2250,28 @@ def _self_deadlock_candidate(
     *,
     display: Mapping[str, str] | None = None,
     identity: bool = True,
-) -> Candidate:
+) -> Candidate | None:
     display = display or {}
     name = display.get(lock_identity, _identity_display(points[first]))
     confirmed = _holds_before(adjacency, points, first, second, lock_identity, unlocks, max_hops)
+    if not confirmed:
+        # The rule consumes its own holding answer instead of publishing a
+        # candidate it has already exonerated. `_holds_before` blocks the
+        # UNLOCK points of the lock and asks whether any path still reaches the
+        # second acquisition; with `max_paths=1` an empty result also means
+        # `find_paths` never set its `truncated` flag, so the answer is a
+        # decision and not a budget running out. Two acquisitions the graph can
+        # show are never held at once are not a self-deadlock.
+        #
+        # This is *not* the same as the caps below. `_lock_identity_cap` and
+        # `_identity_cap` say the identity is not known well enough to prove
+        # the object, which is a gap in the evidence and still publishes as
+        # ambiguous. "No path holds the lock" is the graph answering the
+        # question, and there is nothing left to report.
+        return None
     lock_cap = _lock_identity_cap(points[first], identity=identity)
     cap = _identity_cap(points[first], identity=identity)
-    status = RESOLVED if confirmed and lock_cap is None and cap is None else AMBIGUOUS
+    status = RESOLVED if lock_cap is None and cap is None else AMBIGUOUS
     # A recursive mutex is not decisive: it can exonerate the candidate, but
     # it does not stop the graph answering whether the same lock was taken
     # twice while held, which is what this candidate is about.
@@ -2250,11 +2282,6 @@ def _self_deadlock_candidate(
             "acquisition by the same thread legal"
         ),
     )]
-    if not confirmed:
-        uncertain.append(_uncertain(
-            "HOLDING_CONFIRMED", decisive=True,
-            detail="no path reaches the second acquisition without releasing the lock",
-        ))
     if lock_cap is not None:
         uncertain.append(_uncertain(
             lock_cap["fact"], decisive=True, detail=lock_cap["detail"],
@@ -2269,11 +2296,9 @@ def _self_deadlock_candidate(
             cap["fact"], decisive=True, detail=cap["detail"],
             point=first, source=_span(points[first]),
         ))
-    paths: list[dict[str, Any]] = []
-    if confirmed:
-        paths.extend(
-            _acquisition_path(adjacency, points, first, second, name, unlocks, max_hops, max_paths)
-        )
+    paths: list[dict[str, Any]] = _acquisition_path(
+        adjacency, points, first, second, name, unlocks, max_hops, max_paths
+    )
     facts = tuple(
         {
             "side": "single",

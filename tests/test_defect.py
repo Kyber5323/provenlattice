@@ -3390,6 +3390,27 @@ class Stage6QueryTests(unittest.TestCase):
         self.addCleanup(query.close)
         return query
 
+    def publish_with_references(self, source: str):
+        """A real index's points *and* its `raw_references` rows.
+
+        The builtin rule joins the two by `(file_id, owner_symbol_id,
+        start_line)`, and a hand-made row set would agree with a hand-made key
+        -- so both halves come from the extractor here, the same way the taint
+        tests get their rows.
+        """
+        query = self.indexed(source)
+        events, edges = query._semantic_layer()
+        repository, _commit = query._context()
+        references = [
+            dict(row)
+            for row in query.storage.connection.execute(
+                "SELECT file_id, owner_symbol_id, start_line, raw_name "
+                "FROM raw_references WHERE repo_id = ? AND reference_type = 'CALLS'",
+                (repository,),
+            )
+        ]
+        return events, edges, materialize_points(events, edges), references
+
     @staticmethod
     def facts(result) -> list[str]:
         return [

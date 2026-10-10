@@ -29,3 +29,6 @@ experiments/query_interface_v1/results/formal/*/SQI-T*/
 experiments/query_interface_v1/results/implementation-smoke/*/SQI-T*.json
 # SQI quarantine artifacts (invalid agent session leftovers) remain local; the attribution review documents them.
 experiments/query_interface_v1/results/formal/*/quarantine-*/
+
+# Embedded ContextBench reference dataset clone (136MB parquet data) stays local per prereg.
+experiments/context_bundle_v0/source/

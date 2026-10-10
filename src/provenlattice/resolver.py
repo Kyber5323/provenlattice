@@ -7,6 +7,11 @@ import json
 from .identity import edge_id, raw_reference_id
 from .models import Edge, Node, ParsedFile, ParsedReference, RawReference
 
+# Bump when reference metadata semantics change: cached rows whose metadata
+# lacks the current version are re-resolved so full and incremental index
+# runs converge on identical classification.
+CALL_KIND_VERSION = 1
+
 
 @dataclass(slots=True)
 class ResolutionBatch:
@@ -142,6 +147,7 @@ class ReferenceResolver:
                     changed_file_ids=changed_file_ids,
                     affected_reference_ids=affected_reference_ids,
                     valid_node_ids=valid_node_ids,
+                    metadata=reference.metadata,
                 )
                 raw_references.append(record)
                 reused += int(was_reused)
@@ -152,6 +158,15 @@ class ReferenceResolver:
         return ResolutionBatch(
             list({edge.id: edge for edge in edges}.values()), raw_references, reprocessed, reused
         )
+
+    @staticmethod
+    def _cached_metadata(cached: dict | None) -> dict:
+        if not cached:
+            return {}
+        try:
+            return json.loads(cached.get("metadata") or "{}")
+        except (TypeError, ValueError):
+            return {}
 
     def _reuse_record(
         self, *, repo_id: str, file_node: Node, source: Node, raw_name: str,
@@ -171,6 +186,7 @@ class ReferenceResolver:
             cached is None
             or file_node.id in changed_file_ids
             or reference_id in affected_reference_ids
+            or self._cached_metadata(cached).get("call_kind_version") != CALL_KIND_VERSION
             or (
                 cached.get("resolved_symbol_id") is not None
                 and cached.get("resolved_symbol_id") not in valid_node_ids
@@ -199,6 +215,11 @@ class ReferenceResolver:
         by_qualified: dict[str, list[Node]],
         by_name: dict[str, list[Node]],
     ) -> tuple[list[Node], Node | None, str, float]:
+        if (reference.metadata or {}).get("call_kind") == "indirect":
+            # Indirect calls are never name-bound: a member callback, a
+            # function-pointer variable or a complex callee expression must
+            # not reach a same-named function.
+            return [], None, "indirect_call_shape", 0.0
         target = reference.target.strip(".")
         short = target.rsplit(".", 1)[-1]
         same_file = [candidate for candidate in by_name.get(short, []) if candidate.file_id == source.file_id]
@@ -252,6 +273,7 @@ class ReferenceResolver:
         changed_file_ids: set[str], affected_reference_ids: set[str],
         valid_node_ids: set[str],
         selected: Node | None = None,
+        metadata: dict | None = None,
     ) -> tuple[RawReference, bool]:
         reference_id = raw_reference_id(
             repo_id, file_node.id, source.id, reference_type, raw_name, ordinal
@@ -264,6 +286,7 @@ class ReferenceResolver:
             cached is not None
             and file_node.id not in changed_file_ids
             and reference_id not in affected_reference_ids
+            and self._cached_metadata(cached).get("call_kind_version") == CALL_KIND_VERSION
             and cached_candidate_ids.issubset(valid_node_ids)
             and (
                 cached.get("resolved_symbol_id") is None
@@ -290,6 +313,7 @@ class ReferenceResolver:
             target_module, start_line, end_line, status, candidate_ids,
             selected.id if selected else None, strategy, provenance,
             confidence if selected else 0.0, generation,
+            {"call_kind_version": CALL_KIND_VERSION, **(metadata or {})},
         ), False
 
     @staticmethod

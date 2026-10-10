@@ -316,6 +316,71 @@ class GraphQuery:
         return self._result(data, started, [self._raw_reference_evidence(row) for row in data],
                             query_type="raw_references", anchor=raw_name or resolved_symbol_id or "")
 
+    MAX_CALL_CANDIDATES = 8
+    MAX_CALL_SITES = 16
+
+    def get_call_semantics(self, symbol: str) -> dict:
+        """Bounded per-symbol call-site classification (direct/indirect/unresolved)."""
+        started = time.perf_counter()
+        node = self._resolve(symbol)
+        if not node:
+            return self._result({"counts": {}, "sites": []}, started,
+                                query_type="call_semantics", anchor=symbol)
+        raw = [
+            row for row in self.get_raw_references(owner_symbol_id=node["id"])["data"]
+            if row.get("reference_type") == "CALLS"
+        ]
+        target_ids = {
+            row["resolved_symbol_id"] for row in raw if row.get("resolved_symbol_id")}
+        candidate_ids = {
+            candidate for row in raw
+            for candidate in (row.get("candidate_symbols") or [])}
+        names = {
+            row["id"]: row["name"] for row in self.view.by_ids(
+                "Node", target_ids | candidate_ids)
+        } if (target_ids or candidate_ids) else {}
+        file_ids = {row["file_id"] for row in raw}
+        paths = {}
+        for row in self.view.by_ids("Node", file_ids):
+            metadata = row.get("metadata") or {}
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except ValueError:
+                    metadata = {}
+            paths[row["id"]] = metadata.get("relative_path", "")
+        counts: dict[str, int] = {}
+        sites = []
+        for row in raw:
+            kind = (row.get("metadata") or {}).get("call_kind") or "unknown"
+            status = row.get("status")
+            if kind == "indirect":
+                semantic = "indirect"
+            elif status == "resolved":
+                semantic = "direct"
+            elif status == "ambiguous":
+                semantic = "ambiguous"
+            else:
+                semantic = "unresolved"
+            counts[semantic] = counts.get(semantic, 0) + 1
+            resolved_id = row.get("resolved_symbol_id")
+            candidate_names = [
+                names.get(candidate, candidate)
+                for candidate in (row.get("candidate_symbols") or [])
+            ][:self.MAX_CALL_CANDIDATES]
+            sites.append({
+                "file": paths.get(row["file_id"], ""),
+                "line": row.get("start_line"),
+                "call_kind": kind,
+                "class": semantic,
+                "callee": row.get("raw_name"),
+                "target": names.get(resolved_id) if resolved_id else None,
+                "candidates": candidate_names,
+            })
+        return self._result(
+            {"counts": counts, "sites": sites[:self.MAX_CALL_SITES]}, started,
+            query_type="call_semantics", anchor=node["id"])
+
     def get_evidence_links(
         self, *, source_node_id: str | None = None,
         resolved_target_id: str | None = None, status: str | None = None,
@@ -741,6 +806,7 @@ class GraphQuery:
             budget=budget, profile=bundle_profile, focus_terms=focus_terms,
         )
         result = self._bundle_result(bundle, started)
+        result["call_semantics"] = self.get_call_semantics(anchor["id"])["data"]
         features = _parse_analysis_request(analysis)
         if features:
             result["analysis"] = self._analysis_sections(anchor["id"], features)

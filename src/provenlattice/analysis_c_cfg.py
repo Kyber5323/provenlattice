@@ -752,8 +752,9 @@ def _build_file_cfg(store, file_id: str, source, ast_read: dict, scope_symbols: 
         "error_statements": 0, "stray_cases": 0,
     }
     functions = sorted(
-        (node, path) for (node, path) in index.values()
-        if node.kind == "FUNCTION" and node.parser_kind == "function_definition"
+        ((node, path) for (node, path) in index.values()
+         if node.kind == "FUNCTION" and node.parser_kind == "function_definition"),
+        key=lambda item: item[1],
     )
     for function_node, _ in functions:
         key = (function_node.start_byte, function_node.end_byte)

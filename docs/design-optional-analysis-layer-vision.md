@@ -330,6 +330,8 @@ Evidence-enriched Finding
 | L2 Local CFG | ✅ 已实现（口径：statement 级、intraprocedural） | `analysis_cfg.py`，feature=`cfg:python`，contract `python-cfg-v1`；entry/exit/condition/callsite/merge/statement/return/break/continue + next/true/false/back/return/break/continue 边 | D4 报告；D4 测试 12/12 |
 | C CFG V1 A2 | ✅ 已实现（函数内控制流） | `analysis_c_cfg.py`，feature=`cfg:c`，contract `c-cfg-v2`；构建于 A1 normalized C AST 之上（builder 无 parser 依赖），复用 AnalysisStore/analysis_v1；sequence/if/else/while/do/for/break/continue/return/switch/case/default/fallthrough/goto/implicit exit | C-A2 audit/report + CCFG-01..15 golden tests |
 | C Short-Circuit CFG A2.1 | ✅ 已实现（表达式级 `&&`/`\|\|`/`?:`） | `_condition_flow`/`_value_flow` 短路 lowering；operand 节点复用 normalized AST identity；嵌套布尔与 loop/return/assignment 集成 | C-A2.1 audit/report + SCFG-01..10 golden tests |
+| C Call Semantics A3 | ✅ 已实现（direct/indirect/unresolved 分类） | foundation extractor `call_kind`/`callee_shape` metadata（schema 不变）；indirect 永不 name-bind；`get_call_semantics` + `explain-symbol` 暴露；candidate 有界且 ≠ resolved | C-A3 audit/report + CALL-01..15 golden tests |
+| C 精确 indirect target 解析 | ⬜ 未实现（A3 边界） | `h = foo` 不传播；无 points-to/def-use；INDIRECT_CALL 识别 ≠ points-to 分析 | C-ANALYSIS-A3 boundary |
 | 表达式级 short-circuit CFG 之外的高级表达式流 | ⬜ 未实现（A2.1 边界） | 逗号运算符、GCC statement-expression、switch 条件内短路、算术表达式内嵌套短路保持 opaque | C-ANALYSIS-A2.1 boundary |
 | 独立缓存 + 失效 | ✅ 已实现（键维度见 §10.2） | `analysis.py`：`file × analyzer` 原子替换、fail-closed freshness、payload 硬上限 | D1 + D3 报告；contract 测试 9/9 |
 | 按需构建（目录级） | ✅ 已实现 | `orchestrator.py` + CLI `analyze <repo> --scope <dir> --features ast,cfg`；feature/scope 校验先于一切 mutation；`cfg→ast` 依赖编排 | D5 报告；CLI 测试 13/13 |

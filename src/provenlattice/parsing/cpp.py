@@ -27,14 +27,19 @@ def module_name(relative_path: str) -> str:
 class CppExtractor:
     """Normalize the conservative, syntax-only C/C++ Tree-sitter facts."""
 
-    def __init__(self, source: bytes, relative_path: str) -> None:
+    def __init__(self, source: bytes, relative_path: str, language: str = "cpp") -> None:
         self.source = source
         self.line_starts = [0, *(index + 1 for index, value in enumerate(source) if value == 10)]
         self.module = module_name(relative_path)
+        self.language = language
         self.scope: list[tuple[str, str]] = []
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
         self.imports: list[ParsedImport] = []
+        # Syntax-level callable tracking for call-site classification.
+        self.callable_typedefs: set[str] = set()
+        self.local_callables: set[str] = set()
+        self.function_names: set[str] = set()
 
     def text(self, node: Any | None) -> str:
         return "" if node is None else self.source[node.start_byte:node.end_byte].decode("utf-8", "replace")
@@ -59,6 +64,15 @@ class CppExtractor:
 
     def extract(self, root: Any) -> ParsedFile:
         self._walk(root)
+        for reference in self.references:
+            if reference.type != "CALLS" or reference.metadata.get("call_kind") != "direct":
+                continue
+            references = [
+                name for name in reference.metadata.get("argument_identifiers", [])
+                if name in self.function_names
+            ]
+            if references:
+                reference.metadata["function_reference_args"] = references[:4]
         deduplicated: dict[tuple[str, str, str], ParsedSymbol] = {}
         for symbol in self.symbols:
             key = (symbol.kind, symbol.qualified_name, symbol.signature)
@@ -136,13 +150,66 @@ class CppExtractor:
         self.symbols.append(ParsedSymbol(kind, short_name, qualified, self.line(node), self.line(node, end=True),
                                          signature, not short_name.startswith("_"),
                                          {"definition": node.type == "function_definition"}))
+        if kind in {"Function", "Method"}:
+            self.function_names.add(short_name)
+        if node.type == "function_definition":
+            self.local_callables = set()
+        elif self._is_function_pointer_declarator(declarator):
+            # A function-pointer variable declaration (`int (*fp)(int);` or a
+            # callback struct field) declares a callable, not a function.
+            self.local_callables.add(short_name)
+        if node.type == "function_definition":
+            self._collect_parameter_callables(declarator)
         self.scope.append((short_name, kind))
         body = node.child_by_field_name("body")
         if body:
             for child in body.named_children:
                 self._walk(child)
         self.scope.pop()
+        if node.type in {"declaration", "field_declaration"}:
+            # Variable initializers can contain calls (`int x = f();`); walk
+            # only the initializer values so they are captured, owned by the
+            # enclosing function rather than the declared variable, and
+            # without re-emitting type symbols.
+            for child in node.named_children:
+                if child.type == "init_declarator":
+                    value = child.child_by_field_name("value")
+                    if value is not None:
+                        self._walk(value)
         return True
+
+    def _collect_parameter_callables(self, declarator: Any | None) -> None:
+        function = self._find_function_declarator(declarator)
+        if function is None:
+            return
+        parameters = function.child_by_field_name("parameters")
+        if parameters is None:
+            return
+        for parameter in parameters.named_children:
+            if parameter.type != "parameter_declaration":
+                continue
+            param_name = self._declarator_name(parameter.child_by_field_name("declarator"))
+            if not param_name:
+                continue
+            type_node = parameter.child_by_field_name("type")
+            type_name = self.text(type_node) if type_node is not None else ""
+            if type_name in self.callable_typedefs or self._is_function_pointer_declarator(
+                    parameter.child_by_field_name("declarator")):
+                self.local_callables.add(param_name)
+
+    def _is_function_pointer_declarator(self, declarator: Any | None) -> bool:
+        function = self._find_function_declarator(declarator)
+        if function is None:
+            return False
+        stack = [function.child_by_field_name("declarator")]
+        while stack:
+            current = stack.pop()
+            if current is None:
+                continue
+            if current.type == "parenthesized_declarator":
+                return True
+            stack.extend(current.named_children)
+        return False
 
     def _type(self, node: Any) -> None:
         name_node = node.child_by_field_name("name") or node.child_by_field_name("declarator")
@@ -150,6 +217,9 @@ class CppExtractor:
         if not name or "(" in name:
             return
         name = name.split("::")[-1]
+        if node.type == "type_definition" and self._is_function_pointer_declarator(
+                node.child_by_field_name("declarator")):
+            self.callable_typedefs.add(name)
         self.symbols.append(ParsedSymbol("Type", name, self.qualified(name), self.line(node), self.line(node, end=True),
                                          self._normalize(self.text(node)), True, {"syntax": node.type}))
 
@@ -162,15 +232,69 @@ class CppExtractor:
                                                       "syntax": "preproc_include"}))
 
     def _call(self, node: Any) -> None:
-        target = self._normalize(self.text(node.child_by_field_name("function"))).replace("::", ".")
+        function = node.child_by_field_name("function")
+        arguments = self._argument_identifiers(node, function)
+        if self.language != "c":
+            # A3 classification is a C semantic; other languages keep their
+            # legacy shape so their foundation behavior is unchanged.
+            metadata = {"syntax": "call_expression", "call_kind": "direct",
+                        "callee_shape": "legacy"}
+        else:
+            call_kind, callee_shape, callee_detail = self._classify_callee(function)
+            metadata = {"syntax": "call_expression", "call_kind": call_kind,
+                        "callee_shape": callee_shape, **callee_detail}
+        if arguments:
+            metadata["argument_identifiers"] = arguments
+        target = self._normalize(self.text(function)).replace("::", ".")
         if target:
             self.references.append(ParsedReference(self.owner(), "CALLS", target,
                                                    start_line=self.line(node), end_line=self.line(node, end=True),
-                                                   metadata={"syntax": "call_expression"}))
-        function = node.child_by_field_name("function")
+                                                   metadata=metadata))
         for child in node.named_children:
             if not self.same_node(child, function):
                 self._walk(child)
+
+    def _classify_callee(self, function: Any | None) -> tuple[str, str, dict]:
+        """Syntax-shape classification; indirect is never name-bound later."""
+        if function is None:
+            return "indirect", "missing", {}
+        if function.type == "identifier":
+            name = self.text(function)
+            if name and name in self.local_callables:
+                return "indirect", "identifier", {"callee_symbol": name}
+            return "direct", "identifier", {}
+        if function.type in {"qualified_identifier", "qualified_type_identifier",
+                             "template_function", "namespace_identifier"}:
+            return "direct", "qualified", {}
+        if function.type == "field_expression":
+            field = self.text(function.child_by_field_name("field"))
+            receiver = self.text(function.child_by_field_name("argument"))
+            return "indirect", "field_access", {"callee_symbol": receiver, "field": field}
+        if function.type == "parenthesized_expression":
+            inner = function.named_children[0] if function.named_children else None
+            detail = {"callee_expression": self.text(function)}
+            if inner is not None and inner.type == "pointer_expression":
+                target = inner.named_children[0] if inner.named_children else None
+                if target is not None and target.type == "identifier":
+                    detail["callee_symbol"] = self.text(target)
+            return "indirect", "deref" if inner is not None and inner.type == "pointer_expression" else "complex", detail
+        if function.type == "subscript_expression":
+            return "indirect", "subscript", {"callee_expression": self.text(function)}
+        if function.type == "call_expression":
+            return "indirect", "nested_call", {"callee_expression": self.text(function)}
+        return "indirect", "complex", {"callee_expression": self.text(function)}
+
+    def _argument_identifiers(self, node: Any, function: Any | None) -> list[str]:
+        arguments = node.child_by_field_name("arguments")
+        if arguments is None:
+            return []
+        names = []
+        for child in arguments.named_children:
+            if child.type == "identifier" and not self.same_node(child, function):
+                name = self.text(child)
+                if name:
+                    names.append(name)
+        return names[:8]
 
     def _declarator_name(self, node: Any | None) -> str:
         if node is None:
@@ -241,4 +365,4 @@ class CppTreeSitterParser:
             changed_ranges = [{"start_byte": item.start_byte, "end_byte": item.end_byte,
                                "start_point": tuple(item.start_point), "end_point": tuple(item.end_point)}
                               for item in old_tree.changed_ranges(tree)]
-        return ParseOutcome(CppExtractor(source, relative_path).extract(tree.root_node), tree, changed_ranges)
+        return ParseOutcome(CppExtractor(source, relative_path, self.language).extract(tree.root_node), tree, changed_ranges)

@@ -6,6 +6,7 @@ import json
 from pathlib import Path, PurePosixPath
 
 from .analysis_ast import analyze_ast_scope, normalize_scope, scoped_sources
+from .analysis_c_ast import analyze_c_ast_scope
 from .analysis_cfg import ANALYZER as CFG_ANALYZER, analyze_cfg_scope
 from .identity import path_id
 from .scanner import IGNORED_DIRS, SUPPORTED_EXTENSIONS
@@ -14,6 +15,51 @@ from .storage import SQLiteStorage
 SUPPORTED_FEATURES = ("ast", "cfg")
 FEATURE_DEPENDENCIES = {"cfg": ("ast",)}
 REASON_PREFIX = "skipped_"
+
+
+def _supports_feature(entry: dict, feature: str) -> bool:
+    if feature == "cfg":
+        return entry["language"] == "python"
+    return (
+        entry["language"] == "python"
+        or PurePosixPath(entry["path"]).suffix.lower() in {".c", ".h"}
+    )
+
+
+def _unsupported_reason(entry: dict, feature: str) -> str:
+    if feature == "cfg" and PurePosixPath(entry["path"]).suffix.lower() in {".c", ".h"}:
+        return "not_implemented"
+    return "unsupported_language"
+
+
+def _merge_feature_results(runs: list[dict]) -> dict:
+    """Merge language-specific materializers without exposing a fake analyzer."""
+    if not runs:
+        raise ValueError("at least one analysis run is required")
+    handled = {
+        path for run in runs
+        for key in ("materialized", "reused")
+        for path in run.get(key, [])
+    }
+    merged = {
+        "repo_id": runs[0]["repo_id"],
+        "database": runs[0]["database"],
+        "scope": runs[0]["scope"],
+        "analyzers": [run["analyzer"] for run in runs],
+        "contracts": [run["contract"] for run in runs],
+        "materialized": sorted({path for run in runs for path in run["materialized"]}),
+        "reused": sorted({path for run in runs for path in run["reused"]}),
+        "nodes_written": sum(run.get("nodes_written", 0) for run in runs),
+        "analyze_time_ms": sum(run.get("analyze_time_ms", 0.0) for run in runs),
+    }
+    for key in (
+        "skipped_unsupported", "skipped_not_in_base",
+        "skipped_base_out_of_date", "skipped_payload_too_large",
+    ):
+        merged[key] = sorted({
+            path for run in runs for path in run.get(key, []) if path not in handled
+        })
+    return merged
 
 
 class AnalysisRequestError(Exception):
@@ -97,7 +143,12 @@ def analyze_scope(repo: str | Path, scope: str, features, database: str | Path |
             )
     results = {}
     if "ast" in plan:
-        results["ast"] = analyze_ast_scope(root, scope_path.as_posix(), database)
+        ast_runs = [analyze_ast_scope(root, scope_path.as_posix(), database)]
+        # Do not materialize C AST as an implicit fallback for an unsupported
+        # C CFG-only request. C AST is built only when the caller requests AST.
+        if "ast" in requested:
+            ast_runs.append(analyze_c_ast_scope(root, scope_path.as_posix(), database))
+        results["ast"] = _merge_feature_results(ast_runs)
     if "cfg" in plan:
         results["cfg"] = analyze_cfg_scope(root, scope_path.as_posix(), database)
     categories: dict[str, dict[str, tuple[str, str | None]]] = {}
@@ -113,7 +164,14 @@ def analyze_scope(repo: str | Path, scope: str, features, database: str | Path |
                 if reason == "unsupported":
                     reason = "unsupported_language"
                 for path in paths:
-                    mapping[path] = ("skipped", reason)
+                    effective_reason = reason
+                    if (
+                        feature == "cfg"
+                        and PurePosixPath(path).suffix.lower() in {".c", ".h"}
+                        and reason == "unsupported_language"
+                    ):
+                        effective_reason = "not_implemented"
+                    mapping[path] = ("skipped", effective_reason)
         categories[feature] = mapping
     if "cfg" in categories:
         metadata_by_file = _cfg_file_metadata(database)
@@ -140,7 +198,7 @@ def analyze_scope(repo: str | Path, scope: str, features, database: str | Path |
                 status, reason = "skipped", "unsupported_language"
             else:
                 status, reason = categories[feature].get(
-                    path, ("skipped", "unsupported_language"))
+                    path, ("skipped", _unsupported_reason(entry, feature)))
             record[f"{feature}_status"] = status
             if reason is not None:
                 reasons.append(f"{feature}:{reason}")
@@ -169,7 +227,7 @@ def analyze_scope(repo: str | Path, scope: str, features, database: str | Path |
                 status, reason = "skipped", "unsupported_language"
             else:
                 status, reason = mapping.get(
-                    path, ("skipped", "unsupported_language"))
+                    path, ("skipped", _unsupported_reason(entry, feature)))
             if status == "materialized":
                 materialized.append(path)
             elif status == "reused":
@@ -212,7 +270,10 @@ def analyze_scope(repo: str | Path, scope: str, features, database: str | Path |
                 "skipped": sum(1 for status, _ in mapping.values() if status == "skipped"),
             },
         }
-    eligible = [entry for entry in inventory if entry["language"] == "python"]
+    eligible = [
+        entry for entry in inventory
+        if any(_supports_feature(entry, feature) for feature in requested)
+    ]
     if not eligible:
         status = "failed"
     else:
@@ -220,8 +281,12 @@ def analyze_scope(repo: str | Path, scope: str, features, database: str | Path |
         all_good = True
         for entry in eligible:
             for feature in requested:
+                if not _supports_feature(entry, feature):
+                    continue
                 status, _ = categories[feature].get(
-                    entry["path"], ("skipped", "unsupported_language"))
+                    entry["path"],
+                    ("skipped", _unsupported_reason(entry, feature)),
+                )
                 if status in {"materialized", "reused"}:
                     produced_any = True
                 else:

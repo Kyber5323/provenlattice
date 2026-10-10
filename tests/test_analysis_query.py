@@ -326,9 +326,10 @@ class QueryAnalysisTests(unittest.TestCase):
         available = query_analysis(
             self.root, "cfg", file_path="src/main.py", database=self.database)
         self.assertEqual(available["status"], "available")
-        not_built = query_analysis(
+        c_ast = query_analysis(
             self.root, "ast", file_path="src/b.c", database=self.database)
-        self.assertEqual(not_built["status"], "unsupported")
+        self.assertEqual(c_ast["status"], "available")
+        self.assertEqual(c_ast["analyzer"], "ast:c")
         self.assertEqual(base_snapshot(self.database), base_before)
         self.assertEqual(analysis_snapshot(self.database), analysis_before)
 

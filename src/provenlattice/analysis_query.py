@@ -14,8 +14,15 @@ from .analysis import ANALYZER_VERSIONS
 from .orchestrator import AnalysisRequestError
 from .storage import SQLiteStorage
 
-SUPPORTED_QUERY_FEATURES = {"ast": "ast:python", "cfg": "cfg:python"}
-FUNCTION_KINDS = frozenset({"function_definition", "async_function_definition"})
+SUPPORTED_QUERY_FEATURES = frozenset({"ast", "cfg"})
+QUERY_ANALYZERS = {
+    ("ast", "python"): "ast:python",
+    ("cfg", "python"): "cfg:python",
+    ("ast", "c"): "ast:c",
+}
+FUNCTION_KINDS = frozenset({
+    "function_definition", "async_function_definition", "FUNCTION",
+})
 ANALYSIS_RESPONSE_NODE_LIMIT = 400
 
 
@@ -43,7 +50,15 @@ def _coverage(state) -> dict:
         return {"type": "none"}
     scope = state.get("metadata", {}).get("scope")
     if scope:
-        return {"type": "scoped", "scope": scope}
+        coverage = {"type": "scoped", "scope": scope}
+        metadata = state.get("metadata", {})
+        for key in (
+            "analysis_status", "partial", "parse_coverage",
+            "error_node_count", "missing_node_count",
+        ):
+            if key in metadata:
+                coverage[key] = metadata[key]
+        return coverage
     return {"type": "derived_only"}
 
 
@@ -155,6 +170,9 @@ def _build_ast_tree(nodes, root_id: str) -> dict:
             "end_byte": payload.get("end_byte"),
             "children": [],
         }
+        for key in ("language", "parser_kind", "name", "child_order", "partial"):
+            if key in payload:
+                emitted[key] = payload[key]
         children = sorted(
             children_map.get(node["analysis_node_id"], []),
             key=lambda child: (_path_index(child),
@@ -181,7 +199,6 @@ def query_analysis(repo: str | Path, feature: str, *, file_path=None,
         raise AnalysisRequestError(
             "invalid_request", "exactly one of file_path or symbol_id is required")
     database = Path(database).resolve() if database else root / ".provenlattice" / "codegraph.db"
-    analyzer = SUPPORTED_QUERY_FEATURES[feature_key]
     with SQLiteStorage(database) as storage:
         repository = storage.repository()
         if repository is None:
@@ -189,12 +206,28 @@ def query_analysis(repo: str | Path, feature: str, *, file_path=None,
                 "base_graph_required", "run `provenlattice index` before query")
         repo_id = repository["repo_id"]
         if symbol_id is not None:
-            return _query_symbol(storage, repo_id, feature_key, analyzer, symbol_id)
-        return _query_file(storage, repo_id, feature_key, analyzer,
+            return _query_symbol(storage, repo_id, feature_key, symbol_id)
+        return _query_file(storage, repo_id, feature_key,
                            PurePosixPath(str(file_path).replace("\\", "/")).as_posix())
 
 
-def _query_file(storage, repo_id: str, feature_key: str, analyzer: str, relative: str) -> dict:
+def _analysis_language(path: str, stored_language: str | None) -> str | None:
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in {".c", ".h"}:
+        return "c"
+    return stored_language
+
+
+def _analyzer_for(feature: str, language: str | None) -> tuple[str | None, str | None]:
+    analyzer = QUERY_ANALYZERS.get((feature, language))
+    if analyzer is not None:
+        return analyzer, None
+    if feature == "cfg" and language == "c":
+        return "cfg:c", "not_implemented"
+    return (f"{feature}:{language}" if language else None), "unsupported_language"
+
+
+def _query_file(storage, repo_id: str, feature_key: str, relative: str) -> dict:
     selector = {"file_path": relative}
     file_row = storage.row(
         "SELECT file_id, language FROM files WHERE repo_id=? AND path=?",
@@ -203,9 +236,12 @@ def _query_file(storage, repo_id: str, feature_key: str, analyzer: str, relative
     if file_row is None:
         return _envelope(feature_key, analyzer, selector, "not_built",
                          "file_not_in_base_graph", {"type": "none"})
-    if file_row["language"] != "python":
+    analyzer, unsupported = _analyzer_for(
+        feature_key, _analysis_language(relative, file_row["language"])
+    )
+    if unsupported is not None:
         return _envelope(feature_key, analyzer, selector, "unsupported",
-                         "unsupported_language", {"type": "none"})
+                         unsupported, {"type": "none"})
     file_id = file_row["file_id"]
     read = _read_state(storage, file_id, analyzer)
     if read["status"] != "available":
@@ -226,8 +262,9 @@ def _query_file(storage, repo_id: str, feature_key: str, analyzer: str, relative
     return result
 
 
-def _query_symbol(storage, repo_id: str, feature_key: str, analyzer: str, symbol_id: str) -> dict:
+def _query_symbol(storage, repo_id: str, feature_key: str, symbol_id: str) -> dict:
     selector = {"symbol_id": symbol_id}
+    analyzer = QUERY_ANALYZERS.get((feature_key, "python"))
     symbol = storage.row(
         "SELECT id, kind, name, qualified_name, file_id FROM nodes WHERE id=?",
         (symbol_id,),
@@ -239,6 +276,16 @@ def _query_symbol(storage, repo_id: str, feature_key: str, analyzer: str, symbol
         return _envelope(feature_key, analyzer, selector, "not_available",
                          "analysis_not_available", {"type": "none"})
     file_id = symbol["file_id"]
+    file_row = storage.row(
+        "SELECT path, language FROM files WHERE file_id=?", (file_id,)
+    )
+    language = _analysis_language(
+        file_row["path"], file_row["language"]
+    ) if file_row is not None else None
+    analyzer, unsupported = _analyzer_for(feature_key, language)
+    if unsupported is not None:
+        return _envelope(feature_key, analyzer, selector, "unsupported",
+                         unsupported, {"type": "none"})
     read = _read_state(storage, file_id, analyzer)
     if read["status"] == "not_built":
         return _envelope(feature_key, analyzer, selector, "not_built",

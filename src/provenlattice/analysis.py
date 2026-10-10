@@ -37,7 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_analysis_edges_file_feature
 ANALYSIS_TABLES = frozenset({"analysis_state", "analysis_nodes", "analysis_edges"})
 KNOWN_FEATURES = frozenset({"ast", "cfg"})
 LANGUAGE_PATTERN = re.compile(r"[a-z0-9_\-]+")
-ANALYZER_VERSIONS = {"ast:python": 1, "cfg:python": 1}
+ANALYZER_VERSIONS = {"ast:python": 1, "cfg:python": 1, "ast:c": 1}
 STATUS_CURRENT = "current"
 MAX_ANALYSIS_NODE_PAYLOAD_BYTES = 4096
 

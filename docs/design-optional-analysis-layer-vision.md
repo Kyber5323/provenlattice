@@ -326,7 +326,9 @@ Evidence-enriched Finding
 | --- | --- | --- | --- |
 | 默认 OFF / 契约隔离 / Base 零影响 | ✅ 已实证 | analysis 表惰性创建；基础 index/update 零改动、零创建 | D1/D2/D3 各零影响测试；`git diff` 基础源码为空 |
 | L1 Function Structure | ✅ 已实现（口径：AST 层） | `analysis_ast.py`，feature=`ast:python`，contract `python-ast-v1`；真实 CST 全量节点（含函数体）、parent 链可恢复层级 | D2 报告 §9；D2 测试 11/11 |
+| C Function Structure A1 | ✅ 已实现（`.c`/`.h`，normalized AST） | `analysis_c_frontend.py` + `analysis_c_ast.py`，feature=`ast:c`，contract `c-ast-v1`；Tree-sitter kinds 仅保存在 `parser_kind` | C-A1 audit/report + golden tests |
 | L2 Local CFG | ✅ 已实现（口径：statement 级、intraprocedural） | `analysis_cfg.py`，feature=`cfg:python`，contract `python-cfg-v1`；entry/exit/condition/callsite/merge/statement/return/break/continue + next/true/false/back/return/break/continue 边 | D4 报告；D4 测试 12/12 |
+| C CFG | ⬜ 未实现 | C 请求显式 `unsupported/not_implemented`，不返回空 CFG 或 AST fallback | C-ANALYSIS-A1 boundary |
 | 独立缓存 + 失效 | ✅ 已实现（键维度见 §10.2） | `analysis.py`：`file × analyzer` 原子替换、fail-closed freshness、payload 硬上限 | D1 + D3 报告；contract 测试 9/9 |
 | 按需构建（目录级） | ✅ 已实现 | `orchestrator.py` + CLI `analyze <repo> --scope <dir> --features ast,cfg`；feature/scope 校验先于一切 mutation；`cfg→ast` 依赖编排 | D5 报告；CLI 测试 13/13 |
 | 查询接口（function.structure / function.cfg） | ✅ 已实现（命名：`analysis` 查询层） | `analysis_query.py` `query_analysis(feature, file_path / symbol_id)` + CLI `analysis` 命令；六态契约 available/not_built/stale/unsupported/not_available/corrupt | D6 报告；查询测试 12/12 |

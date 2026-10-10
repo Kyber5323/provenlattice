@@ -123,9 +123,9 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(result["requested_features"], ["ast"])
         self.assertEqual(set(result["features"]), {"ast"})
         self.assertEqual(result["features"]["ast"]["materialized"],
-                         ["src/a.py", "src/sub/b.py"])
+                         ["src/a.py", "src/b.c", "src/sub/b.py"])
         self.assertEqual(result["features"]["ast"]["skipped"]["unsupported_language"],
-                         ["src/README.md", "src/b.c", "src/x.js"])
+                         ["src/README.md", "src/x.js"])
         cfg_rows = [row for row in analysis_state_rows(self.database)
                     if row["feature"].startswith("cfg")]
         self.assertEqual(cfg_rows, [])
@@ -137,12 +137,15 @@ class OrchestratorTests(unittest.TestCase):
         result = analyze_scope(self.root, "src", "ast,cfg", self.database)
         self.assertEqual(result["status"], "complete")
         self.assertEqual(set(result["features"]), {"ast", "cfg"})
-        for feature in ("ast", "cfg"):
-            self.assertEqual(result["features"][feature]["materialized"],
-                             ["src/a.py", "src/sub/b.py"])
+        self.assertEqual(result["features"]["ast"]["materialized"],
+                         ["src/a.py", "src/b.c", "src/sub/b.py"])
+        self.assertEqual(result["features"]["cfg"]["materialized"],
+                         ["src/a.py", "src/sub/b.py"])
+        self.assertEqual(result["features"]["cfg"]["skipped"]["not_implemented"],
+                         ["src/b.c"])
         self.assertEqual(result["files"],
                          {"seen": 5, "analyzed": 2, "reused": 0, "skipped": 3})
-        self.assertEqual(len(analysis_state_rows(self.database)), 4)
+        self.assertEqual(len(analysis_state_rows(self.database)), 5)
 
     def test_g3_cfg_only_materializes_ast_dependency(self) -> None:
         result = analyze_scope(self.root, "src", "cfg", self.database)
@@ -153,7 +156,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(result["features"]["cfg"]["materialized"],
                          ["src/a.py", "src/sub/b.py"])
         self.assertEqual(set(result["features"]["cfg"]["skipped"]),
-                         {"unsupported_language"})
+                         {"not_implemented", "unsupported_language"})
         features = [row["feature"] for row in analysis_state_rows(self.database)]
         self.assertEqual(sorted(features), ["ast:python", "ast:python", "cfg:python", "cfg:python"])
         self.assertEqual(self.per_file(result, "src/a.py")["cfg_status"], "materialized")
@@ -208,10 +211,10 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("ast:unsupported_language", readme["reasons"])
         c_file = self.per_file(result, "src/b.c")
         self.assertEqual(c_file["language"], "c")
-        self.assertEqual(c_file["ast_status"], "skipped")
-        self.assertIn("ast:unsupported_language", c_file["reasons"])
+        self.assertEqual(c_file["ast_status"], "materialized")
+        self.assertNotIn("ast:unsupported_language", c_file["reasons"])
         self.assertEqual(result["files"],
-                         {"seen": 5, "analyzed": 2, "reused": 0, "skipped": 3})
+                         {"seen": 5, "analyzed": 3, "reused": 0, "skipped": 2})
         self.assertEqual(result["status"], "complete")
 
     def test_g8_unknown_feature_fail_closed(self) -> None:
@@ -259,9 +262,11 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["files"],
                          {"seen": 5, "analyzed": 0, "reused": 2, "skipped": 3})
+        self.assertEqual(result["features"]["ast"]["reused"],
+                         ["src/a.py", "src/b.c", "src/sub/b.py"])
+        self.assertEqual(result["features"]["cfg"]["reused"],
+                         ["src/a.py", "src/sub/b.py"])
         for feature in ("ast", "cfg"):
-            self.assertEqual(result["features"][feature]["reused"],
-                             ["src/a.py", "src/sub/b.py"])
             self.assertEqual(result["features"][feature]["materialized"], [])
         after = {
             feature: state_updated_at(self.database, self.fid(), feature)

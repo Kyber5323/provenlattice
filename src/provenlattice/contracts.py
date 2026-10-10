@@ -309,6 +309,7 @@ def build(
     names: Mapping[str, str] | None = None,
     signatures: Mapping[str, str] | None = None,
     declared: Mapping[str, Any] | None = None,
+    points: dict[str, dict[str, Any]] | None = None,
 ) -> ContractTable:
     """Assemble the contracts. Pure: everything it reads is passed in.
 
@@ -317,8 +318,14 @@ def build(
     `matched_name` is the node type (`call_expression`), not the callee. The
     join is `(file_id, owner_symbol_id, start_line)`; a key carrying more than
     one name is ambiguous and stays unknown rather than picking a winner.
+
+    `points` is the caller's materialised graph when it has one. The contracts
+    are read by the defect queries, which materialise the same `(events,
+    edges)` anyway, so a caller that hands its own in saves a second copy of a
+    structure that is only ever read.
     """
-    points = sparsecfg.materialize_points(events, edges)
+    if points is None:
+        points = sparsecfg.materialize_points(events, edges)
     table = declared if declared is not None else {"sink": [], "wrapper": []}
     names = names or {}
 

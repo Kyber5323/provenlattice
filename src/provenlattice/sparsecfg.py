@@ -2492,6 +2492,7 @@ def unreleased_resources(
     excluded: Collection[str] = (),
     max_hops: int = 64,
     max_paths: int = 8,
+    adjacency: dict[str, list[tuple[str, str, frozenset[str]]]] | None = None,
 ) -> tuple[list[ControlPath], bool]:
     """A point of type `acquire` reaches the exit with no `release` of the same
     subject on the path.
@@ -2513,8 +2514,13 @@ def unreleased_resources(
     A subject-less acquire still produces candidates -- its block set is empty.
     Over-reporting is the intended bias for a candidate generator; the AI judge
     decides.
+
+    `adjacency` is the caller's, when it has one: the defect layer runs this
+    twice per `resource_lifetime` (once per mode) and both walks are over the
+    same `edges`, so building it a third and fourth time bought nothing.
     """
-    adjacency = build_adjacency(edges)
+    if adjacency is None:
+        adjacency = build_adjacency(edges)
     excluded_set = frozenset(excluded)
     found: list[ControlPath] = []
     truncated = False

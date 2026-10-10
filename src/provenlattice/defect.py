@@ -449,7 +449,23 @@ def query_for(defect_key: str) -> str:
     raise ValueError(f"unknown defect pattern: {defect_key}")
 
 
-def run(query: str, events: Iterable[Any], edges: Iterable[Any], **kwargs: Any) -> DefectQueryResult:
+# The two structures every query reads off the published graph, named so the
+# eight signatures that take them stay readable. Both are pure functions of
+# `(events, edges)`, and neither is written to after construction -- see
+# `_published_graph` for what that buys.
+Points = dict[str, dict[str, Any]]
+Adjacency = dict[str, list[tuple[str, str, frozenset[str]]]]
+
+
+def run(
+    query: str,
+    events: Iterable[Any],
+    edges: Iterable[Any],
+    *,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
+    **kwargs: Any,
+) -> DefectQueryResult:
     """Dispatch by name, passing each query only the parameters it accepts.
 
     The queries have deliberately different knobs: `max_paths` bounds a walk,
@@ -458,6 +474,12 @@ def run(query: str, events: Iterable[Any], edges: Iterable[Any], **kwargs: Any) 
     call site means a caller can offer the full parameter set without knowing
     which query uses which, and the signature remains the single source of
     truth about what each query honours.
+
+    `points` and `adjacency` are the one pair every query shares. A caller
+    running all eight -- `GraphQuery.get_defect_candidates(defect_type="all")`
+    does -- builds them once and hands them in; a caller running one leaves
+    them `None` and that query builds its own pair, which is what a test
+    driving a single query directly has always done.
     """
     functions: dict[str, Callable[..., DefectQueryResult]] = {
         RESOURCE_LIFETIME: resource_lifetime,
@@ -476,11 +498,40 @@ def run(query: str, events: Iterable[Any], edges: Iterable[Any], **kwargs: Any) 
             f"unknown defect query: {query!r}; known: {', '.join(QUERY_NAMES)}"
         ) from None
     accepted = set(inspect.signature(function).parameters)
-    return function(events, edges, **{k: v for k, v in kwargs.items() if k in accepted})
+    supplied = {k: v for k, v in kwargs.items() if k in accepted}
+    if "points" in accepted:
+        supplied["points"] = points if points is not None else materialize_points(events, edges)
+    if "adjacency" in accepted:
+        supplied["adjacency"] = adjacency if adjacency is not None else build_adjacency(edges)
+    return function(events, edges, **supplied)
 
 
 # ----------------------------------------------------------------------
 # shared reading of the published graph
+
+
+def _published_graph(
+    events: Iterable[Any], edges: Iterable[Any],
+    points: Points | None, adjacency: Adjacency | None,
+) -> tuple[Points, Adjacency]:
+    """Whatever the caller already built, or build it now.
+
+    One pair of structures can serve every query in a call because neither is
+    written to after construction: a query reads `points` for an event's facts
+    and walks `adjacency`, and the caches that *do* fill up as queries run --
+    `_Reachability`'s reached-sets and breadth-first trees -- keep their state
+    in objects of their own.
+
+    Building them per query instead cost a `materialize_points` and a
+    `build_adjacency` per query on the same `(events, edges)`, ten of each for
+    one `all` run, and that redundancy was the bulk of its wall clock on the
+    acceptance corpora.
+    """
+    if points is None:
+        points = materialize_points(events, edges)
+    if adjacency is None:
+        adjacency = build_adjacency(edges)
+    return points, adjacency
 
 
 def _identity(info: Mapping[str, Any], *, identity: bool = True) -> str:
@@ -985,6 +1036,8 @@ def resource_lifetime(
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
     contracts: ContractTable | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
     """A resource acquired and never released on a path to the method's exit.
 
@@ -999,8 +1052,7 @@ def resource_lifetime(
     resource elsewhere: a call that takes it as an argument, or a `return p;`
     that hands it to the caller, both cap the candidate at `ambiguous`.
     """
-    points = materialize_points(events, edges)
-    adjacency = build_adjacency(edges)
+    points, adjacency = _published_graph(events, edges, points, adjacency)
     # Stage 5B's alias-aware RETURN_TRANSFER reads the flow edges, and only
     # the contracts-gated rulings ever look at them -- so the adjacency is
     # built exactly there and never on the default path.
@@ -1015,7 +1067,7 @@ def resource_lifetime(
     truncated = False
 
     alloc_paths, alloc_truncated = unreleased_resources(
-        edges, points, max_hops=max_hops, max_paths=max_paths
+        edges, points, adjacency=adjacency, max_hops=max_hops, max_paths=max_paths
     )
     truncated = truncated or alloc_truncated
     for path in alloc_paths:
@@ -1024,7 +1076,7 @@ def resource_lifetime(
     lock_paths: list[ControlPath] = []
     if include_locks:
         lock_paths, lock_truncated = unreleased_resources(
-            edges, points,
+            edges, points, adjacency=adjacency,
             acquire="LOCK", release="UNLOCK",
             exclude_null_guard=False, excluded=raii_locks | non_lock_points,
             max_hops=max_hops, max_paths=max_paths,
@@ -1727,6 +1779,8 @@ def lock_order(
     names: Mapping[str, str] | None = None,
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
     """Lock acquisitions in one order in one method and the opposite order in
     another, plus the self-deadlock shape of acquiring one lock twice.
@@ -1750,8 +1804,7 @@ def lock_order(
     the same time, so the candidates are dropped and counted rather than
     reported as ambiguous.
     """
-    points = materialize_points(events, edges)
-    adjacency = build_adjacency(edges)
+    points, adjacency = _published_graph(events, edges, points, adjacency)
     non_lock_points = _non_lock_points(points)
     locks_by_method = _locks_by_method(points, excluded=non_lock_points)
     guard_targets = _guard_targets(points, identity=identity)
@@ -2289,6 +2342,8 @@ def race_condition(
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
     bindings: ParameterBindingTable | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
     """One object touched by two methods, at least one touch a write, where the
     graph cannot show the two touches are ordered or protected.
@@ -2329,8 +2384,7 @@ def race_condition(
     by spelling, exactly as before, because a cross-file global is the most
     important shared state this query can see.
     """
-    points = materialize_points(events, edges)
-    adjacency = build_adjacency(edges)
+    points, adjacency = _published_graph(events, edges, points, adjacency)
     reverse = _reverse_adjacency(adjacency)
     methods_index = _method_index(points, reverse, identity=identity)
 
@@ -3520,6 +3574,8 @@ def null_flow(
     names: Mapping[str, str] | None = None,
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
     """Matrix 3.1: a null value reaching a dereference.
 
@@ -3543,8 +3599,7 @@ def null_flow(
     function through a call the graph cannot call `noreturn`. Only "no check at
     all on this identity" is `resolved`.
     """
-    points = materialize_points(events, edges)
-    adjacency = build_adjacency(edges)
+    points, adjacency = _published_graph(events, edges, points, adjacency)
     reach = _Reachability(adjacency, points)
     checks_by_owner: dict[str, list[str]] = {}
     for point_id in sorted(points):
@@ -3729,6 +3784,8 @@ def use_after_free(
     names: Mapping[str, str] | None = None,
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
     """Matrix 4.3: a use of an object after the same identity was released.
 
@@ -3757,8 +3814,7 @@ def use_after_free(
     re-allocates through a pointer argument (`len = redisFormatCommand(&cmd,
     ...)`), which no fact in the graph distinguishes from a use.
     """
-    points = materialize_points(events, edges)
-    adjacency = build_adjacency(edges)
+    points, adjacency = _published_graph(events, edges, points, adjacency)
     reach = _Reachability(adjacency, points)
     population: Counter = Counter()
     states: Counter = Counter()
@@ -4072,6 +4128,8 @@ def double_free(
     names: Mapping[str, str] | None = None,
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
     """Matrix 4.2: two releases of the same object on one path.
 
@@ -4094,8 +4152,7 @@ def double_free(
     different objects that share a root. A pair whose members differ is not a
     double free, and `subject_member` is what says so.
     """
-    points = materialize_points(events, edges)
-    adjacency = build_adjacency(edges)
+    points, adjacency = _published_graph(events, edges, points, adjacency)
     reach = _Reachability(adjacency, points)
     by_owner = _by_owner(points)
     alias_groups = _alias_groups(points)
@@ -4487,6 +4544,8 @@ def taint_path(
     names: Mapping[str, str] | None = None,
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
     """A value from a declared source reaching a declared sink position.
 
@@ -4522,8 +4581,7 @@ def taint_path(
     source -- and no declared sink is ever reached from one.
     """
     vocabulary = taint if taint is not None else load_taint()
-    points = materialize_points(events, edges)
-    adjacency = build_adjacency(edges)
+    points, adjacency = _published_graph(events, edges, points, adjacency)
     reach = _Reachability(adjacency, points)
     by_line: dict[tuple[str, str, int], set[str]] = {}
     reference_rows = 0
@@ -5128,6 +5186,8 @@ def error_handling(
     names: Mapping[str, str] | None = None,
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
     """Matrix 9.1: a call's result was stored and never examined.
 
@@ -5168,8 +5228,7 @@ def error_handling(
     frozen five-column comparison describes.
     """
     max_hops = max(max_hops, _WINDOW_MAX_HOPS)
-    points = materialize_points(events, edges)
-    adjacency = build_adjacency(edges)
+    points, adjacency = _published_graph(events, edges, points, adjacency)
     by_owner = _by_owner(points)
     population: Counter = Counter()
     states: Counter = Counter()

@@ -663,7 +663,10 @@ class GraphQuery:
         repo_id = str(decode_row(repository)["repo_id"]) if repository else ""
         return self.storage.semantic_events(repo_id), self.storage.semantic_edges(repo_id)
 
-    def _contracts(self, events: list, edges: list, names: Mapping[str, str]) -> contracts.ContractTable:
+    def _contracts(
+        self, events: list, edges: list, names: Mapping[str, str],
+        points: dict | None = None,
+    ) -> contracts.ContractTable:
         """Assemble the ownership contracts from the cold tables.
 
         Three reads, all of them keyed by repo_id like every other reader here:
@@ -676,6 +679,10 @@ class GraphQuery:
         error: the inferred sources carry the layer on their own, and failing a
         query because a data file is absent would make the whole query layer
         depend on an optional table.
+
+        `points` is passed through to `contracts.build`: the defect queries
+        materialise the same graph a few lines later, and a second copy of a
+        read-only structure is a second copy.
         """
         repository = self.storage.repository()
         repo_id = str(decode_row(repository)["repo_id"]) if repository else ""
@@ -690,7 +697,7 @@ class GraphQuery:
         signatures = self._signatures()
         return contracts.build(
             events, edges, references=references, names=names, signatures=signatures,
-            declared=contracts.load_declared(),
+            declared=contracts.load_declared(), points=points,
         )
 
     def _taint_references(self) -> list[dict]:
@@ -943,7 +950,17 @@ class GraphQuery:
         started = time.perf_counter()
         events, edges = self._semantic_layer()
         names = self._symbol_names()
-        contracts = self._contracts(events, edges, names) if use_contracts else None
+        # One materialisation per call, not one per query. `points` and
+        # `adjacency` are pure functions of `(events, edges)` and no query
+        # writes into either, so all eight queries of an `all` run share this
+        # pair -- contracts and the race bindings included. Built per query
+        # they were ten of each, and on the acceptance corpora that redundancy
+        # was the bulk of the run's wall clock.
+        points = materialize_points(events, edges)
+        adjacency = build_adjacency(edges)
+        contracts = self._contracts(
+            events, edges, names, points=points
+        ) if use_contracts else None
 
         if defect_type in defect.QUERY_NAMES:
             queries = (defect_type,)
@@ -976,7 +993,7 @@ class GraphQuery:
             bindings = None
             if contracts is not None and query == defect.RACE_CONDITION:
                 bindings = bind_parameters(
-                    materialize_points(events, edges),
+                    points,
                     callees=contracts, signatures=self._signatures(), names=names,
                 )
             # The taint query's two ends are callee names, and a CALL event does
@@ -989,7 +1006,8 @@ class GraphQuery:
                 references = self._taint_references()
                 taint = defect.load_taint()
             result = defect.run(
-                query, events, edges, subject=subject, names=names,
+                query, events, edges, points=points, adjacency=adjacency,
+                subject=subject, names=names,
                 max_hops=max_hops, max_paths=max_paths, max_candidates=max_candidates,
                 identity=identity, defect_keys=keep, contracts=contracts,
                 bindings=bindings, references=references, taint=taint,

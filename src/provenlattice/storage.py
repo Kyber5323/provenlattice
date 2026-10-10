@@ -444,35 +444,37 @@ class SQLiteStorage:
             )
         }
 
-    def raw_reference_cache(
+    def iter_reference_survivors(
         self,
         repo_id: str,
         *,
         exclude_file_ids: set[str] | None = None,
         exclude_ids: set[str] | None = None,
-    ) -> dict[str, dict]:
-        """Old reference records, minus the ones no reuse path can reach.
+    ) -> Iterator[sqlite3.Row]:
+        """Stream the old reference records a carry path can reach, one row at a time.
 
-        The resolver reuses a cached record only when its file was not changed
-        and its id is not in the affected set (resolver._reuse_record); every
-        other record is re-derived from the re-parsed file. Loading the
-        unreusable ones is pure waste, and on this table -- the largest in the
-        database -- it is the waste that dominates toggle-time memory (P1).
+        A record is carried only when its file was not changed and its id is
+        not in the affected set; every other record is re-derived from the
+        re-parsed file. Loading the unreusable ones is pure waste, and on this
+        table -- the largest in the database -- materialising the *reusable*
+        ones is what made update memory track the table's size: 328,213 rows
+        and 475 MB on the llama.cpp corpus, read once and thrown away (stage
+        7A-2). The rows are yielded as the cursor produces them and never
+        collected.
         """
         exclude_file_ids = exclude_file_ids or set()
         exclude_ids = exclude_ids or set()
         if not exclude_file_ids and not exclude_ids:
-            return {
-                row["id"]: dict(row)
-                for row in self.connection.execute(
-                    "SELECT * FROM raw_references WHERE repo_id = ?", (repo_id,)
-                )
-            }
+            yield from self.connection.execute(
+                "SELECT * FROM raw_references WHERE repo_id = ?", (repo_id,)
+            )
+            return
         pieces = ["repo_id = ?"]
         params: list[object] = [repo_id]
         # The two exclusions may each be large enough to need their own temp
         # table; id_filter nests exactly one level per table so an ExitStack
-        # keeps both alive until the outer query has actually run.
+        # keeps both alive -- across every yield, since the generator holds the
+        # frame until the caller stops asking.
         with ExitStack() as stack:
             if exclude_file_ids:
                 sql, binds = stack.enter_context(self.id_filter(exclude_file_ids))
@@ -482,11 +484,10 @@ class SQLiteStorage:
                 sql, binds = stack.enter_context(self.id_filter(exclude_ids))
                 pieces.append(f"id NOT IN ({sql})")
                 params.extend(binds)
-            rows = self.connection.execute(
+            yield from self.connection.execute(
                 "SELECT * FROM raw_references WHERE " + " AND ".join(pieces),
                 tuple(params),
             )
-        return {row["id"]: dict(row) for row in rows}
 
     def references_for_names(self, names: set[str]) -> set[str]:
         if not names:
@@ -565,7 +566,19 @@ class SQLiteStorage:
         semantic_events: list[SemanticEvent] | None = None,
         semantic_edges: list[SemanticEdge] | None = None,
         semantic_fingerprints: list[dict] | None = None,
+        reference_delete_file_ids: set[str] | None = None,
+        reference_delete_ids: set[str] | None = None,
     ) -> None:
+        """Write a whole snapshot, or -- when the two `reference_delete_*` sets
+        are given -- everything but the reference rows they do not name.
+
+        A full index passes neither set: the reference layer is replaced
+        wholesale, exactly as before stage 7A-2. An update passes the file ids
+        it re-parsed and the ids it re-derived; the rows outside both sets were
+        never read into memory, are not rewritten here, and keep their content
+        verbatim -- only their generation advances. That carry is what makes
+        update memory stop tracking the reference table's size.
+        """
         with self.transaction() as connection:
             connection.execute(
                 "DELETE FROM edges WHERE COALESCE(json_extract(metadata, '$.layer'), 'code') != 'knowledge'"
@@ -573,7 +586,38 @@ class SQLiteStorage:
             connection.execute("DELETE FROM shard_edges")
             # The reference layer may live in the ATTACHed cold database; the
             # delete goes through the writable name (the TEMP VIEW is not).
-            connection.execute(f"DELETE FROM {self.reference_table}")
+            if reference_delete_file_ids is None and reference_delete_ids is None:
+                connection.execute(f"DELETE FROM {self.reference_table}")
+            else:
+                predicates: list[str] = []
+                params: list[object] = [repo_id]
+                with ExitStack() as stack:
+                    if reference_delete_file_ids:
+                        sql, binds = stack.enter_context(
+                            self.id_filter(reference_delete_file_ids)
+                        )
+                        predicates.append(f"file_id IN ({sql})")
+                        params.extend(binds)
+                    if reference_delete_ids:
+                        sql, binds = stack.enter_context(self.id_filter(reference_delete_ids))
+                        predicates.append(f"id IN ({sql})")
+                        params.extend(binds)
+                    if predicates:
+                        connection.execute(
+                            f"DELETE FROM {self.reference_table} WHERE repo_id = ? AND ("
+                            + " OR ".join(predicates) + ")",
+                            tuple(params),
+                        )
+                # The carried rows' content was not recomputed, but their
+                # generation says which graph they belong to, and a full rebuild
+                # of the same tree stamps every row with the new generation.
+                # Advancing them here is what keeps the two snapshots identical
+                # (7A-2 gate 2), rather than merely equal in content.
+                connection.execute(
+                    f"UPDATE {self.reference_table} SET generation = ? "
+                    "WHERE repo_id = ? AND generation <> ?",
+                    (generation, repo_id, generation),
+                )
             connection.execute("DELETE FROM semantic_events")
             connection.execute("DELETE FROM semantic_edges")
             connection.execute("DELETE FROM semantic_fingerprint")

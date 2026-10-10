@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
+from typing import Any, Iterable
 
 from .identity import cfg_exit_id, edge_id, event_id, path_id, repository_id, semantic_edge_id, symbol_id
 from .semantics.events import SemanticEdge, SemanticEvent
@@ -87,7 +88,8 @@ def build_graph(
     strategy: ShardStrategy | None = None,
     old_fingerprints: dict[str, str] | None = None,
     old_semantic_fingerprints: dict[str, str] | None = None,
-    cached_references: dict[str, dict] | None = None,
+    survivor_rows: Iterable[Any] | None = None,
+    rederive_reference_ids: set[str] | None = None,
     changed_file_ids: set[str] | None = None,
     affected_reference_ids: set[str] | None = None,
     repository_id_override: str | None = None,
@@ -303,7 +305,8 @@ def build_graph(
         file_nodes=file_nodes,
         symbol_nodes=symbol_nodes,
         generation=generation,
-        cached_references=cached_references,
+        survivor_rows=survivor_rows,
+        rederive_reference_ids=rederive_reference_ids,
         changed_file_ids=changed_file_ids,
         affected_reference_ids=affected_reference_ids,
     )

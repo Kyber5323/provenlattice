@@ -116,11 +116,14 @@ def incremental_update(
             for value in (*old_symbol_facts.get(node_id, ()), *new_symbol_facts.get(node_id, ()))
         }
         affected_reference_ids = storage.references_for_names(affected_names)
-        # References the resolver cannot reuse -- those of changed files and
-        # those whose candidate names moved -- are re-derived anyway, so they
-        # are excluded here rather than loaded and discarded (P1: this table
-        # dominates update memory).
-        old_references = storage.raw_reference_cache(
+        # The rows the resolver may carry are streamed, one at a time, and the
+        # ones it keeps are never read back out of the database at all -- they
+        # stay where they are and only their generation advances at write time.
+        # References it cannot carry -- those of changed files, those whose
+        # candidate names moved -- are excluded here rather than loaded and
+        # discarded, and are re-derived below (P1: this table dominates update
+        # memory, and until stage 7A-2 it was materialised in full).
+        survivor_rows = storage.iter_reference_survivors(
             repo_id,
             exclude_file_ids=changed_file_ids,
             exclude_ids=affected_reference_ids,
@@ -132,7 +135,8 @@ def incremental_update(
             strategy=strategy,
             old_fingerprints=old_fingerprints,
             old_semantic_fingerprints=old_semantic_fingerprints,
-            cached_references=old_references,
+            survivor_rows=survivor_rows,
+            rederive_reference_ids=affected_reference_ids,
             changed_file_ids=changed_file_ids,
             affected_reference_ids=affected_reference_ids,
             repository_id_override=repo_id,
@@ -220,11 +224,15 @@ def incremental_update(
         status_counts = {status: 0 for status in ("resolved", "ambiguous", "unresolved")}
         for reference in resolution.references:
             status_counts[reference.status] += 1
+        # The carried rows were counted as the survivor stream passed them, so
+        # the reported split covers the whole table without reading it back.
+        for status, count in resolution.carried_status.items():
+            status_counts[status] += count
         metrics = Metrics(
             files_scanned=len(sources), files_parsed=len(added | modified) - parse_failures,
             parse_failures=parse_failures, syntax_error_files=syntax_error_files,
             nodes_created=len(nodes), edges_created=len(edges),
-            raw_references=len(resolution.references),
+            raw_references=len(resolution.references) + resolution.reused,
             resolved_references=status_counts["resolved"],
             ambiguous_references=status_counts["ambiguous"],
             unresolved_references=status_counts["unresolved"],
@@ -245,6 +253,11 @@ def incremental_update(
             repo_id=repo_id, root=root, generation=new_generation, mode="incremental",
             files=files, nodes=nodes, edges=edges, shards=shards,
             raw_references=resolution.references, metrics=metrics,
+            # Rows outside these two sets stay in place; the resolver's stream
+            # has been exhausted by `build_graph` above, so nothing is still
+            # reading the table while this transaction writes it.
+            reference_delete_file_ids=changed_file_ids,
+            reference_delete_ids=resolution.rederive_ids,
             semantic_events=semantic_events, semantic_edges=semantic_edges,
             semantic_fingerprints=[
                 {

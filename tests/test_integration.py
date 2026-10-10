@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import shutil
 import sqlite3
@@ -12,7 +13,9 @@ from provenlattice import storage
 from provenlattice.graph import full_index
 from provenlattice.identity import repository_id
 from provenlattice.incremental import incremental_update
+from provenlattice.models import RawReference
 from provenlattice.query import GraphQuery
+from provenlattice.resolver import ReferenceResolver
 from provenlattice.storage import SQLiteStorage, cold_path_for, copy_database
 
 
@@ -377,24 +380,40 @@ class TargetedLoaderTests(unittest.TestCase):
         }
         self.assertEqual(set(boundary), substring_ids)
 
-    def test_raw_reference_cache_exclusions_equal_full_then_filtered(self) -> None:
+    def test_reference_survivor_stream_equals_full_then_filtered(self) -> None:
         repo_id = repository_id(self.root)
         with SQLiteStorage(self.database) as store:
-            full = store.raw_reference_cache(repo_id)
-        all_rows = list(full.values())
+            all_rows = [dict(row) for row in store.iter_reference_survivors(repo_id)]
+        self.assertGreater(len(all_rows), 1)
         excluded_files = {all_rows[0]["file_id"]}
         excluded_ids = {all_rows[1]["id"]}
         with SQLiteStorage(self.database) as store:
-            targeted = store.raw_reference_cache(
-                repo_id,
-                exclude_file_ids=excluded_files,
-                exclude_ids=excluded_ids,
-            )
-        expected = {
-            row["id"]: row for row in all_rows
+            targeted = [
+                dict(row) for row in store.iter_reference_survivors(
+                    repo_id, exclude_file_ids=excluded_files, exclude_ids=excluded_ids
+                )
+            ]
+        expected = [
+            row for row in all_rows
             if row["file_id"] not in excluded_files and row["id"] not in excluded_ids
-        }
-        self.assertEqual(targeted, expected)
+        ]
+        # Sorted rather than in stream order: the exclusions change the plan the
+        # query is evaluated under, and only membership is promised here.
+        self.assertEqual(
+            sorted(targeted, key=lambda row: row["id"]),
+            sorted(expected, key=lambda row: row["id"]),
+        )
+
+    def test_reference_survivors_are_streamed_not_collected(self) -> None:
+        """The point of the method: a caller that stops early has not paid for
+        the rest of the table (stage 7A-2 -- update memory used to hold every
+        reusable row at once)."""
+        repo_id = repository_id(self.root)
+        with SQLiteStorage(self.database) as store:
+            stream = store.iter_reference_survivors(repo_id)
+            self.assertTrue(inspect.isgenerator(stream))
+            self.assertEqual(next(stream)["repo_id"], repo_id)
+            stream.close()
 
 
 def to_legacy_layout(database: Path) -> None:
@@ -502,6 +521,74 @@ class ColdSplitTests(unittest.TestCase):
             self.assertGreater(
                 storage.connection.execute("SELECT COUNT(*) FROM raw_references").fetchone()[0], 0
             )
+
+    def test_an_update_carries_untouched_reference_rows_in_place(self) -> None:
+        """Only the rows the update re-derives are written; every other row
+        keeps its stored content and advances its generation (stage 7A-2)."""
+        with SQLiteStorage(self.database) as storage:
+            before = {row["id"]: row for row in storage.rows("SELECT * FROM raw_references")}
+        write(
+            self.root / "module_c" / "api.py",
+            "def extra(value: int) -> int:\n    return value - 1\n",
+        )
+        update = incremental_update(self.root, self.database)
+        self.assertTrue(update["changed"])
+        with SQLiteStorage(self.database) as storage:
+            after = {row["id"]: row for row in storage.rows("SELECT * FROM raw_references")}
+        # Nothing dropped, nothing duplicated: the count the update reports is
+        # the count the table holds, and the split it reports covers it.
+        self.assertEqual(update["metrics"]["raw_references"], len(after))
+        self.assertGreaterEqual(len(after), len(before))
+        self.assertGreater(update["metrics"]["references_reused"], 0)
+        self.assertEqual(
+            update["metrics"]["references_reused"] + update["metrics"]["references_reprocessed"],
+            len(after),
+        )
+        carried = set(before) & set(after)
+        self.assertTrue(carried)
+        for reference_id in carried:
+            old, new = dict(before[reference_id]), dict(after[reference_id])
+            self.assertEqual(old.pop("generation"), update["graph_generation"] - 1)
+            self.assertEqual(new.pop("generation"), update["graph_generation"])
+            self.assertEqual(old, new)
+
+
+class CarriedEdgeTests(unittest.TestCase):
+    """A carried row is never rewritten, so its edge is rebuilt from the stored
+    columns -- and has to come out field-for-field what a rebuild would build."""
+
+    def test_carried_edge_matches_the_rebuilt_one(self) -> None:
+        source_id, target_id = "symbol-owner", "symbol-target"
+        record = RawReference(
+            "reference-1", "repo", "file-1", source_id, "helper", "CALLS", None,
+            3, 4, "resolved", [target_id], target_id,
+            "same_file_resolution", "same_file_resolution", 0.98, 7,
+        )
+        row = {
+            "id": record.id, "repo_id": record.repo_id, "file_id": record.file_id,
+            "owner_symbol_id": record.owner_symbol_id, "raw_name": record.raw_name,
+            "reference_type": record.reference_type, "target_module": record.target_module,
+            "start_line": record.start_line, "end_line": record.end_line,
+            "status": record.status,
+            "candidate_symbols": json.dumps(record.candidate_symbols),
+            "resolved_symbol_id": record.resolved_symbol_id,
+            "resolution_strategy": record.resolution_strategy,
+            "provenance": record.provenance, "confidence": record.confidence,
+            "generation": record.generation, "metadata": "{}",
+        }
+        self.assertEqual(
+            ReferenceResolver._edge_from_row(row, 9),
+            ReferenceResolver._edge_from_record(record, source_id, 9),
+        )
+
+    def test_a_row_without_a_resolution_carries_no_edge(self) -> None:
+        row = {
+            "id": "reference-2", "status": "ambiguous", "resolved_symbol_id": None,
+            "owner_symbol_id": "symbol-owner", "reference_type": "CALLS",
+            "provenance": "tree_sitter_syntax", "confidence": 0.0,
+            "resolution_strategy": "ambiguous",
+        }
+        self.assertIsNone(ReferenceResolver._edge_from_row(row, 9))
 
 
 class ExpressionIndexTests(unittest.TestCase):

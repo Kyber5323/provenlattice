@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Any, Iterable
 import json
 
 from .identity import edge_id, raw_reference_id
 from .models import Edge, Node, ParsedFile, ParsedReference, RawReference
 
-# Bump when reference metadata semantics change: cached rows whose metadata
-# lacks the current version are re-resolved so full and incremental index
-# runs converge on identical classification.
+# Bump when reference metadata semantics change: rows whose metadata lacks
+# the current version are re-derived rather than carried, so full and
+# incremental index runs converge on identical classification.
 CALL_KIND_VERSION = 1
 
 
@@ -19,6 +20,13 @@ class ResolutionBatch:
     references: list[RawReference]
     reprocessed: int
     reused: int
+    # Ids whose persisted row has to be deleted before the new rows go in:
+    # everything the resolver was asked to re-derive. Rows not in here were
+    # carried in place and are not rewritten at all (stage 7A-2).
+    rederive_ids: set[str]
+    # Status tally of the carried rows, so the caller can report the table's
+    # three-state split without reading the table back.
+    carried_status: dict[str, int]
 
 
 class ReferenceResolver:
@@ -31,17 +39,30 @@ class ReferenceResolver:
         file_nodes: dict[str, Node],
         symbol_nodes: list[Node],
         generation: int,
-        cached_references: dict[str, dict] | None = None,
         changed_file_ids: set[str] | None = None,
         affected_reference_ids: set[str] | None = None,
+        survivor_rows: Iterable[Any] | None = None,
+        rederive_reference_ids: set[str] | None = None,
     ) -> ResolutionBatch:
+        """Derive the references of changed files, carry the rest in place.
+
+        `survivor_rows` and `rederive_reference_ids` travel together: the rows
+        the stream yields are already in the database and are left there, so
+        only the ids named in `rederive_reference_ids` are derived again. Pass
+        neither and every reference is derived -- that is a full index. Pass
+        survivors and the resolver never materialises a reusable row, which is
+        what stops update memory from tracking the reference table's size
+        (stage 7A-2).
+        """
         edges: list[Edge] = []
         raw_references: list[RawReference] = []
         reprocessed = 0
         reused = 0
-        cached_references = cached_references or {}
+        carried_status = {"resolved": 0, "ambiguous": 0, "unresolved": 0}
         changed_file_ids = changed_file_ids or set()
         affected_reference_ids = affected_reference_ids or set()
+        derive_everything = rederive_reference_ids is None
+        rederive = set() if derive_everything else set(rederive_reference_ids)
         by_qualified: dict[str, list[Node]] = defaultdict(list)
         by_name: dict[str, list[Node]] = defaultdict(list)
         by_module = {node.qualified_name: node for node in file_nodes.values()}
@@ -58,28 +79,34 @@ class ReferenceResolver:
             for index in range(len(parts)):
                 by_include_suffix["/".join(parts[index:])].append(node)
 
+        if survivor_rows is not None:
+            # One pass, one row at a time: a row that still holds is counted and
+            # turned into its edge; a row that does not is named for re-derivation
+            # (its candidate set lost a symbol, or its resolution did) and left
+            # for the loop below, which is the only place that writes rows.
+            for row in survivor_rows:
+                if not _survives(row, changed_file_ids=changed_file_ids,
+                                 affected_reference_ids=affected_reference_ids,
+                                 valid_node_ids=valid_node_ids):
+                    rederive.add(row["id"])
+                    continue
+                reused += 1
+                carried_status[row["status"]] += 1
+                edge = self._edge_from_row(row, generation)
+                if edge:
+                    edges.append(edge)
+
         for relative_path, parsed in parsed_files.items():
             file_node = file_nodes[relative_path]
+            file_changed = file_node.id in changed_file_ids
             sources = {node.qualified_name: node for node in by_file_id.get(file_node.id, [])}
             for index, imported in enumerate(parsed.imports):
                 source = sources.get(imported.source_qualified_name, file_node)
                 module = self._absolute_module(file_node.qualified_name, imported.module)
-                cached = self._reuse_record(
-                    repo_id=file_node.repo_id, file_node=file_node, source=source,
-                    raw_name=imported.target, reference_type="IMPORTS", target_module=module,
-                    start_line=imported.metadata.get("start_line"),
-                    end_line=imported.metadata.get("end_line"), ordinal=index,
-                    generation=generation, cached_references=cached_references,
-                    changed_file_ids=changed_file_ids,
-                    affected_reference_ids=affected_reference_ids,
-                    valid_node_ids=valid_node_ids,
-                )
-                if cached:
-                    raw_references.append(cached)
-                    reused += 1
-                    edge = self._edge_from_record(cached, source, generation)
-                    if edge:
-                        edges.append(edge)
+                if not file_changed and not derive_everything and raw_reference_id(
+                    file_node.repo_id, file_node.id, source.id, "IMPORTS",
+                    imported.target, index,
+                ) not in rederive:
                     continue
                 candidates = [item for item in (by_module.get(module),) if item is not None]
                 candidates.extend(by_qualified.get(f"{module}.{imported.target}", []))
@@ -94,116 +121,48 @@ class ReferenceResolver:
                         node.metadata.get("relative_path") == include_target for node in matches
                     ) else 0.9
                 selected = self._select_candidate(candidates)
-                record, was_reused = self._record(
+                record = self._record(
                     repo_id=file_node.repo_id, file_node=file_node, source=source,
                     raw_name=imported.target, reference_type="IMPORTS", target_module=module,
                     start_line=imported.metadata.get("start_line"),
                     end_line=imported.metadata.get("end_line"), ordinal=index,
                     candidates=candidates, strategy=strategy, confidence=confidence,
-                    selected=selected,
-                    generation=generation, cached_references=cached_references,
-                    changed_file_ids=changed_file_ids,
-                    affected_reference_ids=affected_reference_ids,
-                    valid_node_ids=valid_node_ids,
+                    selected=selected, generation=generation,
                 )
                 raw_references.append(record)
-                reused += int(was_reused)
-                reprocessed += int(not was_reused)
-                edge = self._edge_from_record(record, source, generation)
+                reprocessed += 1
+                edge = self._edge_from_record(record, source.id, generation)
                 if edge:
                     edges.append(edge)
             for index, reference in enumerate(parsed.references):
                 source = sources.get(reference.source_qualified_name, file_node)
                 ordinal = index + len(parsed.imports)
-                cached = self._reuse_record(
-                    repo_id=file_node.repo_id, file_node=file_node, source=source,
-                    raw_name=reference.target, reference_type=reference.type,
-                    target_module=reference.target_module,
-                    start_line=reference.start_line, end_line=reference.end_line,
-                    ordinal=ordinal, generation=generation,
-                    cached_references=cached_references,
-                    changed_file_ids=changed_file_ids,
-                    affected_reference_ids=affected_reference_ids,
-                    valid_node_ids=valid_node_ids,
-                )
-                if cached:
-                    raw_references.append(cached)
-                    reused += 1
-                    edge = self._edge_from_record(cached, source, generation)
-                    if edge:
-                        edges.append(edge)
+                if not file_changed and not derive_everything and raw_reference_id(
+                    file_node.repo_id, file_node.id, source.id, reference.type,
+                    reference.target, ordinal,
+                ) not in rederive:
                     continue
                 candidates, selected, strategy, confidence = self._resolve_reference(
                     reference, source, file_node.qualified_name, parsed, by_qualified, by_name
                 )
-                record, was_reused = self._record(
+                record = self._record(
                     repo_id=file_node.repo_id, file_node=file_node, source=source,
                     raw_name=reference.target, reference_type=reference.type,
                     target_module=reference.target_module,
                     start_line=reference.start_line, end_line=reference.end_line,
                     ordinal=ordinal, candidates=candidates,
                     selected=selected, strategy=strategy, confidence=confidence,
-                    generation=generation, cached_references=cached_references,
-                    changed_file_ids=changed_file_ids,
-                    affected_reference_ids=affected_reference_ids,
-                    valid_node_ids=valid_node_ids,
+                    generation=generation,
                     metadata=reference.metadata,
                 )
                 raw_references.append(record)
-                reused += int(was_reused)
-                reprocessed += int(not was_reused)
-                edge = self._edge_from_record(record, source, generation)
+                reprocessed += 1
+                edge = self._edge_from_record(record, source.id, generation)
                 if edge:
                     edges.append(edge)
         return ResolutionBatch(
-            list({edge.id: edge for edge in edges}.values()), raw_references, reprocessed, reused
-        )
-
-    @staticmethod
-    def _cached_metadata(cached: dict | None) -> dict:
-        if not cached:
-            return {}
-        try:
-            return json.loads(cached.get("metadata") or "{}")
-        except (TypeError, ValueError):
-            return {}
-
-    def _reuse_record(
-        self, *, repo_id: str, file_node: Node, source: Node, raw_name: str,
-        reference_type: str, target_module: str | None, start_line: int | None,
-        end_line: int | None, ordinal: int, generation: int,
-        cached_references: dict[str, dict], changed_file_ids: set[str],
-        affected_reference_ids: set[str], valid_node_ids: set[str],
-    ) -> RawReference | None:
-        reference_id = raw_reference_id(
-            repo_id, file_node.id, source.id, reference_type, raw_name, ordinal
-        )
-        cached = cached_references.get(reference_id)
-        cached_candidate_ids = (
-            set(json.loads(cached["candidate_symbols"])) if cached is not None else set()
-        )
-        if (
-            cached is None
-            or file_node.id in changed_file_ids
-            or reference_id in affected_reference_ids
-            or self._cached_metadata(cached).get("call_kind_version") != CALL_KIND_VERSION
-            or (
-                cached.get("resolved_symbol_id") is not None
-                and cached.get("resolved_symbol_id") not in valid_node_ids
-            )
-            # A raw-reference cache entry is valid only while every candidate
-            # it records still exists.  Reusing a partial candidate set after a
-            # symbol deletion would preserve stale ambiguous/unresolved facts.
-            or not cached_candidate_ids.issubset(valid_node_ids)
-        ):
-            return None
-        return RawReference(
-            reference_id, repo_id, file_node.id, source.id, raw_name, reference_type,
-            target_module, start_line, end_line, cached["status"],
-            json.loads(cached["candidate_symbols"]),
-            cached["resolved_symbol_id"], cached["resolution_strategy"],
-            cached["provenance"], float(cached["confidence"]), generation,
-            json.loads(cached["metadata"]),
+            list({edge.id: edge for edge in edges}.values()), raw_references, reprocessed,
+            reused, rederive, carried_status,
         )
 
     def _resolve_reference(
@@ -215,11 +174,6 @@ class ReferenceResolver:
         by_qualified: dict[str, list[Node]],
         by_name: dict[str, list[Node]],
     ) -> tuple[list[Node], Node | None, str, float]:
-        if (reference.metadata or {}).get("call_kind") == "indirect":
-            # Indirect calls are never name-bound: a member callback, a
-            # function-pointer variable or a complex callee expression must
-            # not reach a same-named function.
-            return [], None, "indirect_call_shape", 0.0
         target = reference.target.strip(".")
         short = target.rsplit(".", 1)[-1]
         same_file = [candidate for candidate in by_name.get(short, []) if candidate.file_id == source.file_id]
@@ -269,39 +223,12 @@ class ReferenceResolver:
         self, *, repo_id: str, file_node: Node, source: Node, raw_name: str,
         reference_type: str, target_module: str | None, start_line: int | None,
         end_line: int | None, ordinal: int, candidates: list[Node], strategy: str,
-        confidence: float, generation: int, cached_references: dict[str, dict],
-        changed_file_ids: set[str], affected_reference_ids: set[str],
-        valid_node_ids: set[str],
-        selected: Node | None = None,
+        confidence: float, generation: int, selected: Node | None = None,
         metadata: dict | None = None,
-    ) -> tuple[RawReference, bool]:
+    ) -> RawReference:
         reference_id = raw_reference_id(
             repo_id, file_node.id, source.id, reference_type, raw_name, ordinal
         )
-        cached = cached_references.get(reference_id)
-        cached_candidate_ids = (
-            set(json.loads(cached["candidate_symbols"])) if cached is not None else set()
-        )
-        can_reuse = (
-            cached is not None
-            and file_node.id not in changed_file_ids
-            and reference_id not in affected_reference_ids
-            and self._cached_metadata(cached).get("call_kind_version") == CALL_KIND_VERSION
-            and cached_candidate_ids.issubset(valid_node_ids)
-            and (
-                cached.get("resolved_symbol_id") is None
-                or cached.get("resolved_symbol_id") in {node.id for node in candidates}
-            )
-        )
-        if can_reuse:
-            candidate_ids = json.loads(cached["candidate_symbols"])
-            return RawReference(
-                reference_id, repo_id, file_node.id, source.id, raw_name, reference_type,
-                target_module, start_line, end_line, cached["status"], candidate_ids,
-                cached["resolved_symbol_id"], cached["resolution_strategy"],
-                cached["provenance"], float(cached["confidence"]), generation,
-                json.loads(cached["metadata"]),
-            ), True
         candidate_ids = sorted(node.id for node in candidates if node.id != source.id)
         if selected is not None and selected.id == source.id:
             selected = None
@@ -314,7 +241,7 @@ class ReferenceResolver:
             selected.id if selected else None, strategy, provenance,
             confidence if selected else 0.0, generation,
             {"call_kind_version": CALL_KIND_VERSION, **(metadata or {})},
-        ), False
+        )
 
     @staticmethod
     def _absolute_module(source_module: str, module: str) -> str:
@@ -328,16 +255,64 @@ class ReferenceResolver:
         return ".".join([*package, *([suffix] if suffix else [])])
 
     @staticmethod
+    def _edge_from_row(row: Any, generation: int) -> Edge | None:
+        """The edge of a carried reference, read straight off its stored row.
+
+        Kept next to `_edge_from_record` on purpose: a carried row is not
+        rewritten, so its edge is the only thing this pass rebuilds, and it has
+        to come out field-for-field what that method would have built. The two
+        are pinned equal by `test_carried_edge_matches_the_rebuilt_one`.
+        """
+        if row["status"] != "resolved" or not row["resolved_symbol_id"]:
+            return None
+        return Edge(
+            edge_id(row["owner_symbol_id"], row["resolved_symbol_id"], row["reference_type"]),
+            row["owner_symbol_id"], row["resolved_symbol_id"], row["reference_type"],
+            provenance=row["provenance"], confidence=row["confidence"], generation=generation,
+            metadata={"raw_reference_id": row["id"], "resolution": row["resolution_strategy"]},
+        )
+
+    @staticmethod
     def _edge_from_record(
         record: RawReference,
-        source: Node,
+        source_id: str,
         generation: int,
     ) -> Edge | None:
         if record.status != "resolved" or not record.resolved_symbol_id:
             return None
         return Edge(
-            edge_id(source.id, record.resolved_symbol_id, record.reference_type),
-            source.id, record.resolved_symbol_id, record.reference_type,
+            edge_id(source_id, record.resolved_symbol_id, record.reference_type),
+            source_id, record.resolved_symbol_id, record.reference_type,
             provenance=record.provenance, confidence=record.confidence, generation=generation,
             metadata={"raw_reference_id": record.id, "resolution": record.resolution_strategy},
         )
+
+
+def _survives(
+    row: Any,
+    *,
+    changed_file_ids: set[str],
+    affected_reference_ids: set[str],
+    valid_node_ids: set[str],
+) -> bool:
+    """Whether a persisted reference row still holds and may be carried in place.
+
+    A row survives only while every symbol it names still exists: a stored
+    candidate set that lost a member, or a resolution that lost its target,
+    would otherwise keep reporting ambiguous/unresolved facts that a rebuild
+    would no longer produce. The file and id clauses are enforced by the SQL
+    that produced the row; they are repeated here so this predicate is the
+    whole rule and can be read in one place.
+    """
+    if row["file_id"] in changed_file_ids or row["id"] in affected_reference_ids:
+        return False
+    resolved_symbol_id = row["resolved_symbol_id"]
+    if resolved_symbol_id is not None and resolved_symbol_id not in valid_node_ids:
+        return False
+    try:
+        metadata = json.loads(row["metadata"] or "{}") or {}
+    except (TypeError, ValueError):
+        metadata = {}
+    if metadata.get("call_kind_version") != CALL_KIND_VERSION:
+        return False
+    return set(json.loads(row["candidate_symbols"])).issubset(valid_node_ids)

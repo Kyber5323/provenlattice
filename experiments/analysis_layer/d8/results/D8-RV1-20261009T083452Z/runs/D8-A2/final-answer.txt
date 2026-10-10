@@ -1,0 +1,38 @@
+## 结论
+
+**是的，两种情况都成立**——而且 `publish()` 在每次 `gate()` 调用中都会执行。
+
+| 组合 | 同一次 `gate()` 调用中是否都执行 | 条件 |
+|---|---|---|
+| `skip_tests()` + `publish()` | ✅ 会 | `mode == "fast"` |
+| `run_tests()` + `publish()` | ✅ 会 | `mode != "fast"`（else 分支） |
+| `skip_tests()` + `run_tests()` | ❌ 不会 | 二者在互斥的 if/else 分支中 |
+
+## 代码证据
+
+`pipeline/gate.py:1-6`：
+
+```python
+def gate(mode):
+    if mode == "fast":
+        skip_tests(mode)      # 分支 A：仅 fast 模式
+    else:
+        run_tests(mode)       # 分支 B：其余模式
+    publish(mode)             # ← 缩进与 if/else 同级，在分支合并之后无条件执行
+```
+
+关键点在 `gate.py:6`：`publish(mode)` 的缩进是 4 个空格（函数体级别），与 `if`/`else` 同级，**不在任何分支内**。因此控制流无论走哪条分支，都会汇合到第 6 行。
+
+同时可以确认不存在"提前退出"打断这一顺序的路径：
+- `pipeline/gate.py:9-18` 中 `skip_tests` / `run_tests` / `publish` 的函数体都只是 `return mode`，不抛异常、不返回哨兵值；
+- `gate()` 中没有 `return`，调用方的返回值也被丢弃，但调用本身（含副作用）必然发生。
+
+全仓库搜索确认这是唯一一处定义（无其他模块遮蔽/重导出这些名字）。
+
+## 旁证
+
+`README.md:10` 把这个结构事实作为该 fixture 的隐藏考点明确记录了下来：
+
+> | gate.py | gate | publish runs after the branch merge, on every path |
+
+也就是说，`publish()` 是"无条件路径"，而 `skip_tests()`/`run_tests()` 是"互斥分支"——这正是基础的符号/调用图无法表达、必须依赖控制流信息才能判断的事实。

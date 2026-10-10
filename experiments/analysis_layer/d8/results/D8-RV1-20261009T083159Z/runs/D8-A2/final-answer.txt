@@ -1,0 +1,32 @@
+**结论**
+
+| 问题 | 结论 |
+|---|---|
+| 同一次 `gate()` 调用中 `skip_tests()` 和 `publish()` 是否都可能执行？ | **可能**，当且仅当 `mode == "fast"` 时 |
+| 同一次 `gate()` 调用中 `run_tests()` 和 `publish()` 是否都可能执行？ | **可能**，当且仅当 `mode != "fast"` 时 |
+| `skip_tests()` 和 `run_tests()` 是否可能同时执行？ | **不可能**（二者在互斥的 if/else 分支中） |
+
+**代码证据** — `pipeline/gate.py:1-6`（整个文件共 18 行）：
+
+```python
+def gate(mode):
+    if mode == "fast":
+        skip_tests(mode)   # line 3 — 仅 mode == "fast" 时执行
+    else:
+        run_tests(mode)    # line 5 — 仅 mode != "fast" 时执行
+    publish(mode)          # line 6 — 在 if/else 之外，位于分支汇合点之后
+```
+
+逐点分析：
+
+1. **`skip_tests()` 与 `publish()`**：`skip_tests(mode)` 在 `if` 分支内（第 3 行），`publish(mode)` 在 `if/else` 结构之后、函数体顶层（第 6 行）。当 `mode == "fast"` 时，控制流先进入 `if` 分支调用 `skip_tests()`，随后继续执行第 6 行的 `publish()`。**二者在同一次调用中都会被执行。**
+
+2. **`run_tests()` 与 `publish()`**：同理，当 `mode != "fast"` 时进入 `else` 分支调用 `run_tests()`（第 5 行），之后落到第 6 行执行 `publish()`。**二者都会被执行。**
+
+3. **`skip_tests()` 与 `run_tests()`**：它们分别位于 `if`（第 3 行）和 `else`（第 5 行）两个互斥分支中，对同一个 `mode` 取值不可能同时进入，因此**永远不可能在单次调用中同时执行**。
+
+4. 需要注意的细节：`publish()` 没有任何条件包裹——第 6 行是无条件的语句，且 `skip_tests()`/`run_tests()` 都只是 `return mode`（第 9-14 行），不会抛异常，所以严格来说 **`publish()` 在每条路径上都会执行**；而 `skip_tests()` 和 `run_tests()` 二者中恰好有一个会执行（`mode` 要么等于 `"fast"` 要么不等于）。
+
+仓库 `README.md:10` 也明确记录了这一设计意图：`| gate.py | gate | publish runs after the branch merge, on every path |`——即“`publish` 在分支汇合之后、每条路径上都执行”。
+
+补充说明：仓库中只有这一处定义/调用（grep 全仓确认 `gate`/`skip_tests`/`run_tests`/`publish` 仅出现在 `pipeline/gate.py` 和 README 中），所以不存在其他调用点改变上述结论的情况。

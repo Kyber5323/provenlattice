@@ -32,3 +32,7 @@ experiments/query_interface_v1/results/formal/*/quarantine-*/
 
 # Embedded ContextBench reference dataset clone (136MB parquet data) stays local per prereg.
 experiments/context_bundle_v0/source/
+
+# D8-RV1 per-run agent runtime homes (claude CLI session stores; over-long paths, raw stream already captured in agent-output.txt/events.ndjson)
+experiments/analysis_layer/d8/results/D8-RV1-*/runs/*/home/
+experiments/analysis_layer/d8/results/D8-RV1-*/runs/*/tmp/

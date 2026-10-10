@@ -1,0 +1,55 @@
+（终端中文显示乱码，但结果可读：`[commit 被调用]`、`scan 返回值: None`、`check 实际访问的行: [1]`。）
+
+## 结论
+
+### 1. `commit()` 在 `scan()` 的所有正常调用路径上都会执行
+
+`pipeline/scan.py` 全文只有 19 行，`scan` 定义在 `pipeline/scan.py:1-6`：
+
+```python
+1  def scan(rows):
+2      for row in rows:
+3          if corrupt(row):
+4              break
+5          check(row)
+6      commit()
+```
+
+- 函数体内**没有 `return`、没有 `raise`、没有 `else: return`**，唯一的控制转移是第 4 行的 `break`。
+- 按 Python 语义，`break` 只终止最近的循环，随后继续执行循环之后的语句 —— 即第 6 行的 `commit()`。因此：
+  - **循环正常耗尽**（无 corrupt 行）→ 执行 `commit()`；
+  - **循环因 `break` 提前退出**（有 corrupt 行）→ 仍然执行 `commit()`。
+- 本文件中 `corrupt`/`check` 都是全函数（`pipeline/scan.py:9-14`）：`corrupt` 只是 `row is None`（恒等比较，对任何对象都不会抛异常），`check` 只是 `return row`，二者都不可能抛出异常中断 `scan`。
+- 因此**唯一**能让 `commit()` 不执行的路径是：`rows` 本身不可迭代、或其迭代器在 `__next__` 中抛异常 —— 这属于输入异常向外传播，而不是 `scan` 自身的代码路径。只要 `rows` 是可正常迭代的对象，`commit()` 必经。
+
+一个附带的精确性要点：第 6 行是语句 `commit()` 而非 `return commit()`，所以 `scan` 丢弃了 `commit()` 的返回值（本文件里是 `True`），`scan` 自身在所有路径上都返回 `None`（实测证实），调用方无法从返回值区分"完整扫描"与"中断后提交"。
+
+### 2. 存在 corrupt 行（`row is None`）时发生的事
+
+以 `scan([1, None, 2, 3])` 实测（对 `check`/`commit` 打点）：
+
+```
+[commit 被调用]
+scan 返回值: None
+check 实际访问的行: [1]
+```
+
+逐步解读：
+
+1. `check(1)` 正常执行（corrupt 之前的行都已被处理）；
+2. 遇到 `None` 时 `corrupt(row)` 为真，第 4 行 `break` **立即终止循环**；
+3. **corrupt 行之后的所有行（`2, 3`）永远不会被访问**，`check()` 不会对它们执行 —— 静默丢弃，没有任何异常、日志或标志位报告此事；
+4. 随后第 6 行 `commit()` **照常执行**，就像扫描完整完成了一样。
+
+即：**scan 是"前缀扫描 + 无条件提交"** —— corrupt 行触发的是静默截断（partial scan），而 commit 照旧落盘（README 中描述的 hidden fact："commit runs even when a row triggers `break` (break exits the loop, not the function)" 与代码实际行为一致）。如果调用方期望"扫描全部行成功后才提交"或"遇到 corrupt 行应报错/回滚"，当前实现不提供任何区分手段。
+
+### 关键证据位置
+
+| 证据 | 位置 |
+| --- | --- |
+| `commit()` 位于循环体之外、函数末尾 | `pipeline/scan.py:6`（缩进为函数体层级） |
+| `break` 仅退出循环 | `pipeline/scan.py:3-4` |
+| 函数内无 `return`/`raise` | `pipeline/scan.py:1-6` 全文 |
+| `corrupt` 恒等比较、不抛异常 | `pipeline/scan.py:9-10` |
+| `check` 直接返回、不抛异常 | `pipeline/scan.py:13-14` |
+| 行为实测 | 上述埋点运行输出 |

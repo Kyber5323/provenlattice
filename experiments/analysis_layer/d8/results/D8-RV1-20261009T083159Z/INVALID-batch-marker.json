@@ -1,0 +1,6 @@
+﻿{
+    "batch":  "D8-RV1-20261009T083159Z",
+    "disposition":  "superseded by next valid batch; preserved untouched",
+    "schema":  "d8-rv1-invalid-batch-marker-v1",
+    "reason":  "harness misconfig: MCP server launched without C8-A contract path arg -\u003e mcp status=failed -\u003e PL tool never exposed; NOT natural-use evidence"
+}

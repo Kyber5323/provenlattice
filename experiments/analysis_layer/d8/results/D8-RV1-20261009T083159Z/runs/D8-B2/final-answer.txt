@@ -1,0 +1,50 @@
+调查完成。整个 `pipeline/scan.py` 只有 19 行（仓库内无其他调用方、无测试、无重名 `commit`/`corrupt` 定义），结论完全由该文件本身可判定。
+
+## 代码证据
+
+`pipeline/scan.py:1-18`：
+
+```python
+def scan(rows):
+    for row in rows:
+        if corrupt(row):
+            break          # ← 只跳出循环，而不会跳出函数
+        check(row)
+    commit()               # ← 无论是否 break 都会执行到这一行
+
+def corrupt(row):
+    return row is None
+
+def check(row):
+    return row
+
+def commit():
+    return True
+```
+
+## 问题 1：`commit()` 是否在所有调用路径下都会执行？
+
+**是的，总是执行（每调用一次 `scan()` 恰好执行一次）。**
+
+- `scan()` 内没有任何 `return`、没有异常处理分支，控制流只有一条：`for` 循环结束后落到 `pipeline/scan.py:6` 的 `commit()`。
+- 关键点：`pipeline/scan.py:4` 的 `break` 只终止 `for` 循环，之后继续顺序执行到第 6 行。即使因 `corrupt(row)` 为真而 `break`，`commit()` 仍会被调用。
+- `corrupt()`（`:9-10`）和 `check()`（`:13-14`）按当前实现都不会抛异常（一个是 `is None` 判断，一个是恒等返回），所以循环体内不存在跳过第 6 行的路径。
+- 唯一的例外是**异常路径**：如果 `rows` 不可迭代，`for row in rows` 会在到达第 6 行之前抛 `TypeError`。这不是正常调用路径，且不属于 `scan()` 自主逻辑的分支。
+- 附带一点：第 6 行是裸调用 `commit()`，`scan()` 在任何路径下都返回 `None`，`commit()` 的返回值被丢弃——调用方无法从返回值判断扫描是完整还是被截断的。
+
+## 问题 2：`rows` 中存在 corrupt 行（`corrupt(row)` 为真）时会发生什么？
+
+语义**不是"跳过坏行继续处理"，而是"静默中止剩余全部处理，然后照常提交"**：
+
+1. 在**第一个** corrupt 行处 `break`，该行不会执行 `check(row)`（`pipeline/scan.py:3-4`）；
+2. `break` 终止整个循环——**第一个 corrupt 行之后的所有行（包括完全合法的行）全部被跳过，永不检查**；
+3. 循环退出后 `commit()` **仍会无条件执行**（`pipeline/scan.py:6`），既没有抛错、也没有任何失败信号。
+
+具体例子：`rows = [让行1, 让行2, None, 让行3]`
+→ `check(行1)`、`check(行2)` 执行；遇到 `None` 时 `break`；`check(行3)` 永远不执行；`commit()` 执行。结果是**前两行的部分处理被提交，行3 被静默丢弃**，且 `scan()` 返回 `None`，调用方无法察觉。
+
+## 结论
+
+- `commit()` 在 `scan()` 的任何正常调用路径下都会执行——包括遇到 corrupt 行 `break` 之后。
+- 这个"总会执行"恰恰是风险所在：碰到 corrupt 行时 `scan()` 会**静默截断**后续所有行的处理，却**照常提交**已处理的前缀部分，形成"部分提交且无任何错误指示"的行为。
+- 若意图是"跳过坏行继续扫描"，应把 `pipeline/scan.py:4` 的 `break` 改为 `continue`；若意图是"遇到坏行就不提交/报错"，则需要在 `break` 后跳过 `commit()` 或直接抛异常。当前代码在两种意图下都不是正确实现（取决于 `scan` 的契约，这是一个明确的 bug 或至少是高风险语义）。

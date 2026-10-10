@@ -1,0 +1,115 @@
+{
+  "schema": "d8-rv1-batch-summary-v1",
+  "experiment": "D8-RV1 Original Failure Case Revalidation (CURRENT_VERSION_REVALIDATION)",
+  "batch_dir": "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\analysis_layer\\d8\\results\\D8-RV1-20261009T083452Z",
+  "generated_at": "2026-10-09T08:35:24.816733+00:00",
+  "historical_baseline": {
+    "D8-A2": "ADOPTION_GAP",
+    "D8-B2": "ADOPTION_GAP",
+    "source": "docs/design-analysis-layer-d8-report.md + results/D8-20260922T091934Z (preserved, untouched)"
+  },
+  "runs": [
+    {
+      "run_id": "D8-RV1-D8-A2-f8955c",
+      "task_id": "D8-A2",
+      "verdict": {
+        "verdict": "CASE_SOLVED_WITHOUT_PROVENLATTICE",
+        "detail": "solved correctly via ordinary Read/Grep/Bash (PL tool never invoked)"
+      },
+      "evaluation": {
+        "facts": [
+          {
+            "id": "mentions_skip_and_publish",
+            "hit": true
+          },
+          {
+            "id": "mentions_publish",
+            "hit": true
+          },
+          {
+            "id": "co_execution_affirmed",
+            "hit": true
+          },
+          {
+            "id": "merge_or_sequence",
+            "hit": true
+          }
+        ],
+        "success": true,
+        "incremental_fact_in_answer": true
+      },
+      "observed": {
+        "pl_tool_visible": true,
+        "pl_tool_calls": 0,
+        "pl_invoked": false,
+        "help_discovery_calls": 0,
+        "task_context_calls": 0,
+        "task_context_states": [],
+        "facts_returned": [],
+        "analysis_calls": [],
+        "analysis_results": [],
+        "other_pl_calls": [],
+        "facts_used": {
+          "fact_ids_cited_in_answer": [],
+          "structural_tokens_in_answer": [],
+          "used": false
+        },
+        "tool_counts": {
+          "Glob": 2,
+          "Read": 2,
+          "Grep": 2
+        }
+      },
+      "wall_seconds": 11.8
+    },
+    {
+      "run_id": "D8-RV1-D8-B2-7aa1f5",
+      "task_id": "D8-B2",
+      "verdict": {
+        "verdict": "CASE_SOLVED_WITHOUT_PROVENLATTICE",
+        "detail": "solved correctly via ordinary Read/Grep/Bash (PL tool never invoked)"
+      },
+      "evaluation": {
+        "facts": [
+          {
+            "id": "commit_always",
+            "hit": true
+          },
+          {
+            "id": "break_behavior",
+            "hit": true
+          },
+          {
+            "id": "corrupt_mentioned",
+            "hit": true
+          }
+        ],
+        "success": true,
+        "incremental_fact_in_answer": true
+      },
+      "observed": {
+        "pl_tool_visible": true,
+        "pl_tool_calls": 0,
+        "pl_invoked": false,
+        "help_discovery_calls": 0,
+        "task_context_calls": 0,
+        "task_context_states": [],
+        "facts_returned": [],
+        "analysis_calls": [],
+        "analysis_results": [],
+        "other_pl_calls": [],
+        "facts_used": {
+          "fact_ids_cited_in_answer": [],
+          "structural_tokens_in_answer": [],
+          "used": false
+        },
+        "tool_counts": {
+          "Glob": 1,
+          "Bash": 3,
+          "Read": 2
+        }
+      },
+      "wall_seconds": 19.6
+    }
+  ]
+}

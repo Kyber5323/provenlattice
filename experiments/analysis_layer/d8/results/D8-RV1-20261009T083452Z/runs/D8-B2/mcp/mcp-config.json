@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "provenlattice": {
+      "command": "C:\\Users\\sunqinghw\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "args": [
+        "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\context_bundle_v0\\formal_harness\\provenlattice_mcp_server.py",
+        "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\context_bundle_v0\\formal_harness\\d9-c8\\d9-c8-a-native-tool-exposure-contract.json"
+      ],
+      "env": {
+        "PYTHONPATH": "D:\\ChatGPT\\codegraph\\provenlattice\\src"
+      }
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "schema": "d8-rv1-run-v1",
+  "run_id": "D8-RV1-D8-B2-7aa1f5",
+  "task_id": "D8-B2",
+  "category": "B_break_vs_return",
+  "target": "pipeline/scan.py::scan",
+  "generated_at": "2026-10-09T08:35:24.815219+00:00",
+  "fixture_commit_fingerprint": "d8-fixture-v1",
+  "repo_prep": {
+    "repo_id": "repo:31c10f0e5bc51d822f84ded0855c8f459d403f2ced2aa0a602a04afa743f1494",
+    "analyze_status": "complete"
+  },
+  "prompt": "在 pipeline/scan.py 中：commit() 是否在 scan() 的任何调用路径下都会执行？如果 rows 中存在 corrupt 的行（corrupt(row) 为真），会发生什么？请调查代码并给出明确结论和代码证据（文件、函数、代码片段）。",
+  "system_prompt": "Read-only code-analysis session in a small Python repository. Never edit, create, or delete files. Investigate the task question and answer with concrete code evidence (file, function, code fragment). End your reply with a final line starting with 'ANSWER:' followed by your concise conclusion.",
+  "mcp_server": "provenlattice_mcp_server.py (transparent bridge, no overrides)",
+  "exit_code": 0,
+  "completed": true,
+  "wall_seconds": 19.6,
+  "observed": {
+    "pl_tool_visible": true,
+    "pl_tool_calls": 0,
+    "pl_invoked": false,
+    "help_discovery_calls": 0,
+    "task_context_calls": 0,
+    "task_context_states": [],
+    "facts_returned": [],
+    "analysis_calls": [],
+    "analysis_results": [],
+    "other_pl_calls": [],
+    "facts_used": {
+      "fact_ids_cited_in_answer": [],
+      "structural_tokens_in_answer": [],
+      "used": false
+    },
+    "tool_counts": {
+      "Glob": 1,
+      "Bash": 3,
+      "Read": 2
+    }
+  },
+  "evaluation": {
+    "facts": [
+      {
+        "id": "commit_always",
+        "hit": true
+      },
+      {
+        "id": "break_behavior",
+        "hit": true
+      },
+      {
+        "id": "corrupt_mentioned",
+        "hit": true
+      }
+    ],
+    "success": true,
+    "incremental_fact_in_answer": true
+  },
+  "verdict": {
+    "verdict": "CASE_SOLVED_WITHOUT_PROVENLATTICE",
+    "detail": "solved correctly via ordinary Read/Grep/Bash (PL tool never invoked)"
+  }
+}

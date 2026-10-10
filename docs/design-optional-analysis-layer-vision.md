@@ -4,6 +4,38 @@
 >
 > **文档地位：项目当前最终目标（North Star）。** §1–§9 为目标设计原文；§10 为 2026-09 的实现状态对照（D0–D8 已实证交付部分与设计差异），实现层命名以已冻结的 D0–D8 契约为准。
 
+## 0. Gold Target 设计原则同步（2026-10-10）
+
+长期产品化目标已在 `docs/roadmap.md` 的 **Gold Target** 节冻结为 canonical
+planning entry（本节为同步摘要，细节以该节为准）：
+
+```text
+Always-on lightweight foundation
+            +
+On-demand advanced capabilities
+            +
+Task-scoped context delivery
+```
+
+与本设计直接相关的三条原则：
+
+1. **L1（本文所称 Base Graph / Foundation Graph）= 默认开启、低成本、长期
+   常驻的基础服务**——即使用户不启用任何高级分析，ProvenLattice 仍是可用的
+   基础代码/工程知识服务；
+2. **L2+ 高级能力按 capability × scope 双维按需启用**（即本文 §2 设计原则
+   1/2 的产品化表述），且 L2 是 extensible **Analyzer Capability Registry**
+   而非单个总开关——**新增 analyzer 不新增 architecture layer**；通过渐进
+   增强（而非默认全量分析）平衡能力、延迟、存储与上下文成本；
+3. **Layer ≠ Maturity Level**：五层架构（L1 Foundation → L2 Analysis →
+   L3 Task Context → L4 Evidence → L5 Exposure）表示数据生命周期 pipeline
+   stages，不是功能复杂度等级。**本文 §3 的 L0–L4 是分析能力阶梯的历史
+   命名**（函数结构 → CFG → Def-Use → 安全分析），全部映射到五层架构的
+   L2 Analysis，不构成独立架构层。
+
+未来新增层的严格判据、L6 判定标准、Capability Profiles（future
+productization candidate，未实现）与当前实现对照，见 roadmap Gold Target
+节 G4–G7。
+
 ## 1. 目标
 
 当前 ProvenLattice 的基础图以函数/符号级工程语义为主，已经能够支持：

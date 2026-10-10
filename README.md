@@ -197,6 +197,12 @@ MCP / Plugin / SDK        MCP 已落地（native exposure）；Plugin/SDK  evide
 当前最终目标：在 V1.2 Foundation Graph 契约不变的前提下，引入**可选的函数内分析层**（AST / CFG / 后续 Def-Use、Data Flow、安全分析），面向代码检测、安全分析与高级 Agent 任务。目标设计全文见
 [docs/design-optional-analysis-layer-vision.md](docs/design-optional-analysis-layer-vision.md)。
 
+该方向已冻结为 **Gold Target**（canonical planning entry 见
+[docs/roadmap.md](docs/roadmap.md) Gold Target 节）：**L1 = 默认开启的基础服务
+（Always-on），L2+ = 按 capability × scope 双维按需增强**，通过渐进增强平衡
+能力、延迟、存储与上下文成本；五层 = 数据生命周期阶段（Layer ≠ Maturity
+Level），当前不规划 L6。
+
 分析层已按 D0–D8 完成实证交付并集成 main（报告见 `docs/design-analysis-layer-d*.md`）：
 
 - **Base Graph 默认 OFF 承诺**：analysis 表惰性创建、基础源码零修改、index/update 行为不变（每阶段零影响测试 + 全量回归 137/137）；
@@ -279,6 +285,7 @@ D9-C10 受控稳定性 PASS；ContextBench zstd 16-case 重验无回归（14/16�
 | --- | --- |
 | V1.2 历史汇报 | [docs/report-v1.2.md](docs/report-v1.2.md) |
 | Post-V1.2 综合报告 | [docs/report-post-v1.2.md](docs/report-post-v1.2.md) |
+| 长期目标 Gold Target | docs/roadmap.md（Gold Target 节，canonical planning entry） |
 | 基座能力证据链 | [experiments/foundation_analysis/reviews/provenlattice-foundation-evidence-review.md](experiments/foundation_analysis/reviews/provenlattice-foundation-evidence-review.md) |
 | RQ1 图保真度综合 | experiments/fidelity_v1/results/rq1-graph-fidelity-evidence-synthesis-v1.md |
 | RQ2 系统与规模综合 | experiments/systems_v1/results/rq2-cross-system-synthesis-v1.json |

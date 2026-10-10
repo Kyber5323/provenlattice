@@ -288,6 +288,7 @@ D9-C10 受控稳定性 PASS；ContextBench zstd 16-case 重验无回归（14/16�
 | 分析层 D0–D8 报告 | docs/design-analysis-layer-d4/d6/d7/d8-report.md |
 | D8-RV1 历史失败 case 重验 | experiments/analysis_layer/d8/d8_rv1_runner.py + results/D8-RV1-* |
 | D9-C10 受控实验协议 | experiments/context_bundle_v0/formal_harness/d9-c10/controlled-capability-protocol.json |
+| D9 C6–C10 综合（adoption vs capability） | docs/context-bundle-d9-c6-c10-synthesis.md |
 | C 真实 zstd diagnostic（A3.5） | docs/design-analysis-layer-c-a35-zstd-diagnostic.md |
 | C 分析链 R1 集成审计 | docs/c-analysis-release-r1-integration-audit.md |
 | R1 revalidation manifest | revalidation/c-contextbench-zstd-r1-manifest.json |

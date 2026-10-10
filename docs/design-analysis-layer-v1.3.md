@@ -1,5 +1,12 @@
 # ProvenLattice 后续版本实现方向设计：Optional Function Analysis Layer
 
+> **Status: HISTORICAL DESIGN / IMPLEMENTATION SUPERSEDED**
+> 本文为历史设计稿，实现状态以 post-V1.2 实际交付为准（正文不再更新）：
+> - Analysis Layer D0–D8（Python-only 已交付）：`docs/design-analysis-layer-d0-audit.md` … `docs/design-analysis-layer-d8-report.md`
+> - D9 Context Bundle / C10：`experiments/context_bundle_v0/formal_harness/README.md` + `docs/context-bundle-d9-c6-c10-synthesis.md`
+> - C 分析链 A1–A3.6（已集成 main）：`docs/design-analysis-layer-c-a1-report.md` … `docs/design-analysis-layer-c-a36-report.md`
+> - 现状综合报告：`docs/report-post-v1.2.md`
+
 > 版本定位：在保持 V1.2 Foundation Graph 能力与契约不变的前提下，引入可选的函数内分析层（Analysis Layer），面向代码检测、漏洞检测、安全分析与高级 Agent 任务。
 
 ## 1. 目标

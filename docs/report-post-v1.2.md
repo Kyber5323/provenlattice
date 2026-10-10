@@ -153,6 +153,7 @@
 | 分析层 D0–D8 报告 | `docs/design-analysis-layer-d*-report.md` |
 | D8/D8-RV1 结果 | `experiments/analysis_layer/d8/results/` |
 | D9 C6–C10 formal harness | `experiments/context_bundle_v0/formal_harness/` |
+| D9 C6–C10 synthesis | `docs/context-bundle-d9-c6-c10-synthesis.md` |
 | zstd 16-case 外部批目录 | `benchmark-contextbench-zstd/` |
 | C 链 A1–A3.6 报告/审计 | `docs/design-analysis-layer-c-a*-report.md` / `*-audit.md` |
 | C 集成审计 | `docs/c-analysis-release-r1-integration-audit.md` |

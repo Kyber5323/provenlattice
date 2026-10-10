@@ -29,6 +29,7 @@ class NormalizedCNode:
     is_error: bool
     is_missing: bool
     children: tuple["NormalizedCNode", ...]
+    part_role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,28 @@ NORMALIZED_KINDS = {
     "ERROR": "UNKNOWN",
 }
 
+# Normalized child roles, resolved by the frontend from parser field names.
+# This is the only layer allowed to consult parser field APIs; downstream
+# consumers (CFG builder, queries) see roles only.
+FIELD_ROLES = {
+    "if_statement": {
+        "condition": "condition", "consequence": "consequence",
+        "alternative": "alternative",
+    },
+    "while_statement": {"condition": "condition", "body": "body"},
+    "do_statement": {"body": "body", "condition": "condition"},
+    "for_statement": {
+        "initializer": "init", "condition": "condition",
+        "update": "update", "body": "body",
+    },
+    "switch_statement": {"condition": "condition", "body": "body"},
+    "conditional_expression": {
+        "condition": "condition", "consequence": "consequence",
+        "alternative": "alternative",
+    },
+    "case_statement": {"value": "value"},
+}
+
 
 class CFrontend:
     """Convert Tree-sitter C nodes into a small language-neutral vocabulary."""
@@ -89,11 +112,13 @@ class CFrontend:
         outcome = parser_for_language("c").parse_bytes(source, relative_path)
         raw_root = outcome.tree.root_node
         diagnostics = self._diagnostics(raw_root, len(source))
-        root = self._normalize(raw_root, source, child_order=0, in_function=False)
+        root = self._normalize(
+            raw_root, source, child_order=0, in_function=False, part_role=None)
         return CFrontendResult(root, diagnostics)
 
     def _normalize(
-        self, node: Any, source: bytes, *, child_order: int, in_function: bool
+        self, node: Any, source: bytes, *, child_order: int, in_function: bool,
+        part_role: str | None,
     ) -> NormalizedCNode:
         kind = self._kind(node, in_function=in_function)
         nested_in_function = in_function or node.type == "function_definition"
@@ -101,10 +126,12 @@ class CFrontend:
             child for child in node.children
             if child.is_named or child.is_error or child.is_missing
         ]
+        roles = self._child_roles(node)
         children = tuple(
             self._normalize(
                 child, source, child_order=index,
                 in_function=nested_in_function,
+                part_role=roles.get((child.start_byte, child.end_byte)),
             )
             for index, child in enumerate(raw_children)
         )
@@ -120,13 +147,34 @@ class CFrontend:
             is_error=bool(node.is_error),
             is_missing=bool(node.is_missing),
             children=children,
+            part_role=part_role,
         )
+
+    @staticmethod
+    def _child_roles(node: Any) -> dict:
+        fields = FIELD_ROLES.get(node.type)
+        if not fields:
+            return {}
+        roles: dict = {}
+        for field_name, role in fields.items():
+            child = node.child_by_field_name(field_name)
+            if child is not None:
+                roles[(child.start_byte, child.end_byte)] = role
+        return roles
 
     def _kind(self, node: Any, *, in_function: bool) -> str:
         if node.type in CONTROL_KINDS:
             return "CONTROL_STRUCTURE"
         if node.type.startswith("preproc_"):
             return "PREPROCESSOR"
+        if node.type == "binary_expression" and any(
+            child.type == "&&" for child in node.children
+        ):
+            return "LOGICAL_AND"
+        if node.type == "binary_expression" and any(
+            child.type == "||" for child in node.children
+        ):
+            return "LOGICAL_OR"
         if node.type == "declaration":
             if self._is_function_prototype(node):
                 return "FUNCTION"

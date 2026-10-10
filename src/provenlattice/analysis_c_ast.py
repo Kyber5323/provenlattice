@@ -168,6 +168,7 @@ def _materialize(
             "owner_symbol_id": owner_symbol_id,
             "alignment": alignment,
             "partial": node.is_error or node.is_missing,
+            **({"part_role": node.part_role} if node.part_role else {}),
         }))
         for child in reversed(node.children):
             child_path = f"{path}/{child.kind}[{child.child_order}]"

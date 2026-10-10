@@ -20,7 +20,6 @@ from .analysis_c_ast import C_AST_CONTRACT, is_c_ast_source
 from .analysis_c_frontend import CFrontend, NormalizedCNode
 from .analysis_cfg import _FunctionCFG
 from .identity import path_id
-from .parser import parser_for_language
 from .storage import SQLiteStorage
 
 ANALYZER = analyzer_id("cfg", "c")
@@ -47,18 +46,22 @@ def _index_tree(root: NormalizedCNode) -> dict:
 
 
 class _CCfgBuilder:
-    """Build one function CFG from the A1 normalized C AST vocabulary."""
+    """Build one function CFG from the A1 normalized C AST vocabulary.
+
+    This builder consumes only the normalized representation (kinds, part
+    roles, spans, names). It must not import or consult any parser API; the
+    frontend module is the single parser boundary.
+    """
 
     def __init__(
         self, graph: _FunctionCFG, index: dict, ast_ids: set[str],
-        calls_index: dict, scope_symbols: set[str], for_index: dict,
+        calls_index: dict, scope_symbols: set[str],
     ) -> None:
         self.f = graph
         self.index = index
         self.ast_ids = ast_ids
         self.calls_index = calls_index
         self.scope_symbols = scope_symbols
-        self.for_index = for_index
         self.exit_id: str | None = None
         self.labels: dict[str, str] = {}
         self.frames: list[dict] = []
@@ -156,6 +159,9 @@ class _CCfgBuilder:
                 self.counters["stray_cases"] += 1
             return self._simple(statement)
         if kind == "RETURN":
+            value = statement.children[0] if statement.children else None
+            if self._decomposable(value):
+                return self._build_return_expression(statement, value)
             node_id = self._linked("return", "statement", statement)
             self.f.returns.append(node_id)
             return node_id, []
@@ -166,9 +172,112 @@ class _CCfgBuilder:
             if inner is not None and inner.kind == "CALL":
                 node_id = self._callsite(inner)
                 return node_id, [node_id]
+            if self._decomposable(inner):
+                return self._build_expression_statement(statement, inner)
         if kind == "UNKNOWN":
             self.counters["error_statements"] += 1
         return self._simple(statement)
+
+    BOOLEAN_KINDS = frozenset({"LOGICAL_AND", "LOGICAL_OR", "CONDITIONAL"})
+
+    def _unparen(self, node: NormalizedCNode | None) -> NormalizedCNode | None:
+        while node is not None and node.parser_kind == "parenthesized_expression":
+            node = node.children[0] if node.children else None
+        return node
+
+    def _decomposable(self, node: NormalizedCNode | None) -> bool:
+        inner = self._unparen(node)
+        if inner is not None and inner.kind in self.BOOLEAN_KINDS:
+            return True
+        if inner is not None and inner.kind == "ASSIGNMENT" \
+                and len(inner.children) >= 2:
+            rhs = self._unparen(inner.children[1])
+            return rhs is not None and rhs.kind in self.BOOLEAN_KINDS
+        return False
+
+    def _role_parts(self, node: NormalizedCNode) -> dict:
+        return {
+            child.part_role: child for child in node.children if child.part_role
+        }
+
+    def _build_return_expression(
+        self, statement: NormalizedCNode, value: NormalizedCNode
+    ):
+        return_id = self._linked("return", "statement", statement)
+        entry = self._value_flow(value, return_id, "statement")
+        self.f.returns.append(return_id)
+        return entry, []
+
+    def _build_expression_statement(
+        self, statement: NormalizedCNode, inner: NormalizedCNode
+    ):
+        continuation = self._linked("statement", "statement", statement)
+        entry = self._value_flow(inner, continuation, "statement")
+        return entry, [continuation]
+
+    def _value_flow(
+        self, expr: NormalizedCNode, continuation: str, role: str
+    ) -> str:
+        """Wire a value-producing expression flow; return its entry node.
+
+        Ternary and logical operators decompose into condition nodes; both
+        evaluation paths continue into `continuation`. Evaluation order is
+        exact; produced values are not modeled (no data-flow in scope).
+        """
+        inner = self._unparen(expr)
+        if inner is not None and inner.kind == "CONDITIONAL":
+            parts = self._role_parts(inner)
+            t_entry = self._value_flow(parts["consequence"], continuation, role)
+            f_entry = self._value_flow(parts["alternative"], continuation, role)
+            cond_node = self._linked("condition", role, parts["condition"])
+            self.f.edge(cond_node, t_entry, "true")
+            self.f.edge(cond_node, f_entry, "false")
+            return cond_node
+        if inner is not None and inner.kind == "ASSIGNMENT" \
+                and len(inner.children) >= 2:
+            rhs = self._unparen(inner.children[1])
+            if rhs is not None and rhs.kind in self.BOOLEAN_KINDS:
+                return self._value_flow(rhs, continuation, role)
+        if inner is not None and inner.kind in {"LOGICAL_AND", "LOGICAL_OR"}:
+            return self._condition_flow(inner, continuation, continuation, role)
+        if inner is not None and inner.kind == "CALL":
+            node_id = self._callsite(inner)
+            self.f.edge(node_id, continuation, "next")
+            return node_id
+        target = inner if inner is not None else expr
+        node_id = self._linked("statement", role, target)
+        self.f.edge(node_id, continuation, "next")
+        return node_id
+
+    def _condition_flow(
+        self, expr: NormalizedCNode, true_id: str, false_id: str, role: str
+    ) -> str:
+        """Wire a boolean condition flow; return its entry node."""
+        inner = self._unparen(expr)
+        if inner is not None and inner.kind in {"LOGICAL_AND", "LOGICAL_OR"}:
+            rhs_entry = self._condition_flow(
+                inner.children[1], true_id, false_id, role)
+            if inner.kind == "LOGICAL_AND":
+                return self._condition_flow(
+                    inner.children[0], rhs_entry, false_id, role)
+            return self._condition_flow(
+                inner.children[0], true_id, rhs_entry, role)
+        if inner is not None and inner.kind == "CONDITIONAL":
+            parts = self._role_parts(inner)
+            t_entry = (
+                self._condition_flow(parts["consequence"], true_id, false_id, role)
+                if "consequence" in parts else true_id)
+            f_entry = (
+                self._condition_flow(parts["alternative"], true_id, false_id, role)
+                if "alternative" in parts else false_id)
+            cond_node = self._linked("condition", role, parts["condition"])
+            self.f.edge(cond_node, t_entry, "true")
+            self.f.edge(cond_node, f_entry, "false")
+            return cond_node
+        node_id = self._linked("condition", role, expr)
+        self.f.edge(node_id, true_id, "true")
+        self.f.edge(node_id, false_id, "false")
+        return node_id
 
     def _simple(self, statement: NormalizedCNode):
         node_id = self._linked("statement", "statement", statement)
@@ -209,112 +318,156 @@ class _CCfgBuilder:
         return list(node.children), None
 
     def _build_if(self, node: NormalizedCNode):
-        condition, rest = self._split_cond_body(node)
-        alternative = None
-        if rest and rest[-1].parser_kind == "else_clause":
-            alternative = rest.pop()
-        condition_id = self._condition(condition, "if_condition", node)
+        condition, consequence, alternative = self._if_parts(node)
         merge = self.f.node("merge", "branch_merge", self._path(node))
-        true_entry, true_ends = self.build_seq(rest)
-        else_entry, else_ends = None, []
-        if alternative is not None:
-            else_entry, else_ends = self.build_seq(alternative.children)
-        self.f.edge(condition_id, true_entry or merge, "true")
-        self.f.edge(condition_id, else_entry or merge, "false")
+        true_entry, true_ends = self.build_seq(consequence)
+        else_entry, else_ends = self.build_seq(alternative)
+        if condition is None:
+            condition_id = self.f.node("condition", "if_condition", self._path(node))
+            self.f.edge(condition_id, true_entry or merge, "true")
+            self.f.edge(condition_id, else_entry or merge, "false")
+        else:
+            condition_id = self._condition_flow(
+                condition, true_entry or merge, else_entry or merge,
+                "if_condition")
         for end in true_ends:
             self.f.edge(end, merge, "next")
         for end in else_ends:
             self.f.edge(end, merge, "next")
         return condition_id, [merge]
 
+    def _if_parts(self, node: NormalizedCNode):
+        parts = self._role_parts(node)
+        condition = parts.get("condition")
+        if condition is not None:
+            consequence = [parts["consequence"]] if "consequence" in parts else []
+            alternative_node = parts.get("alternative")
+        else:
+            condition, rest = self._split_cond_body(node)
+            alternative_node = None
+            consequence = list(rest)
+            if consequence and consequence[-1].parser_kind == "else_clause":
+                alternative_node = consequence.pop()
+        if alternative_node is None:
+            alternative = []
+        elif alternative_node.parser_kind == "else_clause":
+            alternative = list(alternative_node.children)
+        else:
+            alternative = [alternative_node]
+        return condition, consequence, alternative
+
     def _build_while(self, node: NormalizedCNode):
-        condition, body = self._split_cond_body(node)
-        condition_id = self._condition(condition, "loop_header", node)
+        parts = self._role_parts(node)
+        condition = parts.get("condition")
+        body_stmts = [parts["body"]] if "body" in parts else []
+        if condition is None:
+            condition, body_stmts = self._split_cond_body(node)
         exit_merge = self.f.node("merge", "loop_exit", self._path(node))
-        frame = {"type": "loop", "continue": condition_id,
-                 "break": exit_merge, "breaks": []}
+        frame = {"type": "loop", "break": exit_merge, "breaks": [], "continues": []}
         self.frames.append(frame)
-        body_entry, body_ends = self.build_seq(body)
+        body_entry, body_ends = self.build_seq(body_stmts)
         self.frames.pop()
-        self.f.edge(condition_id, body_entry or exit_merge, "true")
-        self.f.edge(condition_id, exit_merge, "false")
+        if condition is None:
+            header = self.f.node("condition", "loop_header", self._path(node))
+            self.f.edge(header, body_entry or exit_merge, "true")
+            self.f.edge(header, exit_merge, "false")
+        else:
+            header = self._condition_flow(
+                condition, body_entry or exit_merge, exit_merge, "loop_header")
         for end in body_ends:
-            self.f.edge(end, condition_id, "back")
+            self.f.edge(end, header, "back")
         for break_id in frame["breaks"]:
             self.f.edge(break_id, exit_merge, "break")
-        return condition_id, [exit_merge]
+        for continue_id in frame["continues"]:
+            self.f.edge(continue_id, header, "continue")
+        return header, [exit_merge]
 
     def _build_do(self, node: NormalizedCNode):
-        body, condition = self._split_body_cond(node)
-        condition_id = self._condition(condition, "loop_header", node)
+        parts = self._role_parts(node)
+        condition = parts.get("condition")
+        body_stmts = [parts["body"]] if "body" in parts else []
+        if condition is None:
+            body_stmts, condition = self._split_body_cond(node)
         exit_merge = self.f.node("merge", "loop_exit", self._path(node))
-        frame = {"type": "loop", "continue": condition_id,
-                 "break": exit_merge, "breaks": []}
+        frame = {"type": "loop", "break": exit_merge, "breaks": [], "continues": []}
         self.frames.append(frame)
-        body_entry, body_ends = self.build_seq(body)
+        body_entry, body_ends = self.build_seq(body_stmts)
         self.frames.pop()
-        if body_entry is None:
-            self.f.edge(condition_id, exit_merge, "true")
-            self.f.edge(condition_id, exit_merge, "false")
-            return condition_id, [exit_merge]
+        if body_entry is None or condition is None:
+            header = self._condition(
+                condition, "loop_header", node)
+            self.f.edge(header, body_entry or exit_merge, "true")
+            self.f.edge(header, exit_merge, "false")
+            if body_entry is not None:
+                for end in body_ends:
+                    self.f.edge(end, header, "back")
+            for break_id in frame["breaks"]:
+                self.f.edge(break_id, exit_merge, "break")
+            for continue_id in frame["continues"]:
+                self.f.edge(continue_id, header, "continue")
+            return body_entry or header, [exit_merge]
+        header = self._condition_flow(condition, body_entry, exit_merge, "loop_header")
         for end in body_ends:
-            self.f.edge(end, condition_id, "back")
-        self.f.edge(condition_id, body_entry, "true")
-        self.f.edge(condition_id, exit_merge, "false")
+            self.f.edge(end, header, "back")
         for break_id in frame["breaks"]:
             self.f.edge(break_id, exit_merge, "break")
+        for continue_id in frame["continues"]:
+            self.f.edge(continue_id, header, "continue")
         return body_entry, [exit_merge]
 
     def _build_for(self, node: NormalizedCNode):
-        raw = self.for_index.get((node.start_byte, node.end_byte))
-        normalized_by_span = {
-            (child.start_byte, child.end_byte): child for child in node.children
-        }
-        init_n = cond_n = update_n = body_n = None
-        if raw is not None:
-            def normalized(field_node):
-                if field_node is None:
-                    return None
-                return normalized_by_span.get(
-                    (field_node.start_byte, field_node.end_byte))
-            init_n = normalized(raw.child_by_field_name("initializer"))
-            cond_n = normalized(raw.child_by_field_name("condition"))
-            update_n = normalized(raw.child_by_field_name("update"))
-            body_n = normalized(raw.child_by_field_name("body"))
-        else:
+        parts = self._role_parts(node)
+        init_n = parts.get("init")
+        cond_n = parts.get("condition")
+        update_n = parts.get("update")
+        body_n = parts.get("body")
+        if not parts:
             condition, rest = self._split_cond_body(node)
             cond_n = condition
             body_n = rest[0] if rest else None
-        condition_id = self._condition(cond_n, "loop_header", node)
         exit_merge = self.f.node("merge", "loop_exit", self._path(node))
         init_id = self._linked("statement", "for_init", init_n) if init_n else None
         update_id = self._linked("statement", "for_update", update_n) if update_n else None
-        frame = {"type": "loop", "continue": update_id or condition_id,
-                 "break": exit_merge, "breaks": []}
+        frame = {"type": "loop", "break": exit_merge, "breaks": [], "continues": []}
         self.frames.append(frame)
         body_entry, body_ends = self.build_seq([body_n]) if body_n else (None, [])
         self.frames.pop()
+        repeat = None
+        if body_entry is None and update_id is None:
+            repeat = self.f.node("merge", "loop_repeat", self._path(node))
+        true_target = body_entry or update_id or repeat
+        if cond_n is None:
+            header = self.f.node("condition", "loop_header", self._path(node))
+            self.f.edge(header, true_target, "true")
+            self.f.edge(header, exit_merge, "false")
+        else:
+            header = self._condition_flow(cond_n, true_target, exit_merge, "loop_header")
+        if repeat is not None:
+            self.f.edge(repeat, header, "back")
         if init_id is not None:
-            self.f.edge(init_id, condition_id, "next")
-        self.f.edge(
-            condition_id, body_entry or update_id or condition_id, "true")
-        self.f.edge(condition_id, exit_merge, "false")
+            self.f.edge(init_id, header, "next")
         for end in body_ends:
             if update_id is not None:
                 self.f.edge(end, update_id, "next")
             else:
-                self.f.edge(end, condition_id, "back")
+                self.f.edge(end, header, "back")
         if update_id is not None:
-            self.f.edge(update_id, condition_id, "back")
+            self.f.edge(update_id, header, "back")
         for break_id in frame["breaks"]:
             self.f.edge(break_id, exit_merge, "break")
-        return init_id or condition_id, [exit_merge]
+        for continue_id in frame["continues"]:
+            self.f.edge(continue_id, update_id or header, "continue")
+        return init_id or header, [exit_merge]
 
     def _build_switch(self, node: NormalizedCNode):
-        condition, rest = self._split_cond_body(node)
+        parts = self._role_parts(node)
+        condition = parts.get("condition")
+        rest = [parts["body"]] if "body" in parts else list(node.children[1:])
+        if condition is None:
+            condition, rest = self._split_cond_body(node)
         condition_id = self._condition(condition, "switch_condition", node)
         exit_merge = self.f.node("merge", "switch_exit", self._path(node))
-        frame = {"type": "switch", "break": exit_merge, "breaks": []}
+        frame = {"type": "switch", "break": exit_merge, "breaks": [], "continues": []}
         self.frames.append(frame)
         segments = []
         for child in rest:
@@ -365,7 +518,11 @@ class _CCfgBuilder:
     def _case_segments(self, case_node: NormalizedCNode):
         children = list(case_node.children)
         value = None
-        if children and not self._is_statement(children[0]):
+        role_values = [c for c in children if c.part_role == "value"]
+        if role_values:
+            value = role_values[0]
+            children.remove(value)
+        elif children and not self._is_statement(children[0]):
             value = children[0]
             children = children[1:]
         statements = []
@@ -389,7 +546,10 @@ class _CCfgBuilder:
         target = None
         for frame in reversed(self.frames):
             if frame["type"] == "loop":
-                target = frame["continue"]
+                target = frame.get("continue")
+                if target is None:
+                    frame["continues"].append(node_id)
+                    return node_id, []
                 break
         if target is None:
             self.counters["unresolved_continues"] += 1
@@ -564,15 +724,7 @@ def analyze_c_cfg_scope(repo: str | Path, scope: str, database: str | Path | Non
 def _build_file_cfg(store, file_id: str, source, ast_read: dict, scope_symbols: set[str]):
     source_bytes = source.path.read_bytes()
     frontend = CFrontend().parse(source_bytes, source.relative_path)
-    raw_outcome = parser_for_language("c").parse_bytes(source_bytes, source.relative_path)
     index = _index_tree(frontend.root)
-    for_index: dict[tuple[int, int], object] = {}
-    raw_stack = [raw_outcome.tree.root_node]
-    while raw_stack:
-        raw_node = raw_stack.pop()
-        if raw_node.type == "for_statement":
-            for_index[(raw_node.start_byte, raw_node.end_byte)] = raw_node
-        raw_stack.extend(raw_node.children)
     function_alignment = {}
     for row in ast_read["nodes"]:
         payload = row["payload"]
@@ -613,7 +765,7 @@ def _build_file_cfg(store, file_id: str, source, ast_read: dict, scope_symbols: 
             counters["functions_skipped_unmatched_owner"] += 1
             continue
         graph = _FunctionCFG(file_id, owner)
-        builder = _CCfgBuilder(graph, index, ast_ids, calls_index, scope_symbols, for_index)
+        builder = _CCfgBuilder(graph, index, ast_ids, calls_index, scope_symbols)
         function_diagnostics = builder.build(function_node)
         nodes.extend(graph.nodes)
         edges.extend(graph.edges)

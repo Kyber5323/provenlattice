@@ -89,7 +89,7 @@ L2 分析层 Analysis Layer（可选，按 scope 物化）
 │   analyze --scope <dir> --features ast,cfg
 │   Function IR + 局部 CFG（真回边、return/break/continue、callsite 不跨函数）
 │   six-state 只读查询（available/not_built/stale/unsupported/…）
-│   Python: AST + CFG；C (.c/.h): normalized AST + function-local CFG；C++ deep analysis: unsupported
+│   Python: AST + CFG；C (.c/.h): normalized AST + function-local CFG（含 &&/||/?: 短路）；C++ deep analysis: unsupported
 │
 L3 上下文层 Context Bundle
 │   task-context <symbols> --json → task-context-v0 事实包
@@ -173,7 +173,7 @@ ContextBench zstd 16-case 重验                                  ✅ 14/16、0 
 V1.3 收尾（正式 qualification 汇总 + tag）                       next
 V1.4      Def-Use / Local Data Flow / Finding Enrichment       not started
 V1.4a     C normalized AST（`.c`/`.h`）                         ✅ A1 implemented
-V1.4b     C CFG V1（函数内控制流）                              ✅ A2 implemented
+V1.4b     C CFG V1 + 表达式短路（&&/||/?:）                     ✅ A2/A2.1 implemented
 V1.4c     C++ deep analysis                                     next candidate
 V1.5     Taint / Security Analysis                            not started
 Overlay V1.1                                                   next candidate

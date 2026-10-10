@@ -60,7 +60,8 @@ schema migration; semantics live in the existing `kind` column.
 ## Not implemented (explicit)
 
 - Expression-level short-circuit CFG (`&&`, `||`, `?:` — a condition is one
-  CFG condition node).
+  CFG condition node). **Superseded by A2.1**: `&&` / `||` / `?:` are
+  supported since `design-analysis-layer-c-a21-report.md`.
 - Computed goto, `setjmp`/`longjmp`, inline-asm control flow, noreturn
   inference.
 - Interprocedural CFG, call-target resolution (direct or indirect).

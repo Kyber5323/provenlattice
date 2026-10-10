@@ -69,7 +69,38 @@ class Evidence:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        """The row as a plain dict, without `dataclasses.asdict`.
+
+        `asdict` introspects the fields and dispatches per value, and the
+        multi-hop queries call this tens of thousands of times per query --
+        once per evidence item, and until stage 8 twice over. The shape is
+        fixed here, so writing it out is both clearer and about twelve times
+        faster. The keys are in declaration order deliberately: `bundle_size`
+        is a `json.dumps` with no `sort_keys`, so key order is part of the
+        byte count it reports.
+
+        `source_range` and `metadata` are copied one level deep. `asdict`
+        copies nested containers all the way down; nothing reads the returned
+        dict for anything but serialisation, so one level is enough to keep
+        the frozen instance from being aliased at the level callers touch.
+        """
+        source_range = self.source_range
+        return {
+            "evidence_id": self.evidence_id,
+            "kind": self.kind,
+            "source_id": self.source_id,
+            "relation": self.relation,
+            "target_id": self.target_id,
+            "repository": self.repository,
+            "commit": self.commit,
+            "generation": self.generation,
+            "provenance": self.provenance,
+            "confidence": self.confidence,
+            "source_path": self.source_path,
+            "source_range": dict(source_range) if source_range is not None else None,
+            "summary": self.summary,
+            "metadata": dict(self.metadata),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,9 +176,15 @@ def rank_evidence(values: Iterable[Evidence], *, profile: str = "generic",
     status_rank = {"resolved": 2, "ambiguous": 1, "unresolved": 0}
     normalized_focus = tuple(str(term).strip() for term in focus_terms if str(term).strip())
 
-    def key(item: Evidence) -> tuple:
+    # The role is a pure function of the item and the profile, and both the sort
+    # key and the annotation below need it. Asking for it in each place did the
+    # work twice per item -- 127,552 calls for one 63,776-item subgraph -- so it
+    # is computed once here and carried through the sort.
+    decorated = [(item, _role_for(item, profile, normalized_focus)) for item in values]
+
+    def key(pair: tuple[Evidence, str]) -> tuple:
+        item, role = pair
         metadata = item.metadata
-        role = _role_for(item, profile, normalized_focus)
         return (
             -({"PRIMARY": 3, "SUPPORTING": 2, "CONTEXTUAL": 1,
                 "SUPPRESSED_CANDIDATE": 0}[role]),
@@ -160,10 +197,10 @@ def rank_evidence(values: Iterable[Evidence], *, profile: str = "generic",
             item.evidence_id,
         )
 
-    ranked = sorted(values, key=key)
-    return [replace(item, metadata={**item.metadata,
-                                    "bundle_role": _role_for(item, profile, normalized_focus),
-                                    "bundle_profile": profile}) for item in ranked]
+    ranked = sorted(decorated, key=key)
+    return [replace(item, metadata={**item.metadata, "bundle_role": role,
+                                    "bundle_profile": profile})
+            for item, role in ranked]
 
 
 @dataclass(frozen=True, slots=True)

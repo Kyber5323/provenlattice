@@ -112,6 +112,10 @@ L5 暴露层 Exposure
 
 ### 五层架构全景图（实现状态 × 任务覆盖）
 
+![ProvenLattice 五层架构全景图](docs/images/provenlattice-five-layer-panorama.png)
+
+*ProvenLattice 五层架构全景图（Gold Target 口径，2026-10-10）*
+
 图例：✅ 已实现　◐ 部分实现　⬜ 未实现（future candidate，见 roadmap §4）
 
 ```text

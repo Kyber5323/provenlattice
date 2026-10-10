@@ -29,12 +29,10 @@ from .storage import SQLiteStorage
 def parsed_to_dict(parsed: ParsedFile) -> dict:
     """The parse cache, deliberately without events or CFG.
 
-    Events are not cached here (appendix B.2.3). `parsed` is already written
-    twice -- into `nodes.metadata.parsed` and into the `parser_cache` table --
-    and it is 94.8% of the nodes table as it is. Caching the event list as well
-    would store every event three times: once here, once in the cache, and once
-    in `semantic_events`, which is the only copy anything reads. A changed file
-    is re-extracted anyway, so the cache buys nothing here. The same reasoning
+    Events are not cached here (appendix B.2.3). Caching the event list would
+    store every event three times: once here, once in the cache, and once in
+    `semantic_events`, which is the only copy anything reads. A changed file is
+    re-extracted anyway, so the cache buys nothing here. The same reasoning
     covers `parsed.cfg` (stage 3): a dataclass with no dict representation
     cannot leak into the cache, and it is rebuilt from source in one walk.
     """

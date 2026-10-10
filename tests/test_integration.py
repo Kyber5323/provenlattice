@@ -431,6 +431,17 @@ def to_legacy_layout(database: Path) -> None:
                 "WHERE tbl_name = 'raw_references' AND sql IS NOT NULL"
             )
         ]
+        # The parse cache goes back into the File nodes' metadata, where every
+        # pre-7A-3 database kept it. Without this the fixture would be a shape
+        # that never existed -- split-era nodes with a legacy reference table --
+        # and an update on it would find no cache and fail (or, worse, rebuild
+        # those files as empty).
+        for row in connection.execute("SELECT file_id, payload FROM cold.parse_cache"):
+            connection.execute(
+                "UPDATE main.nodes SET metadata = json_set(metadata, '$.parsed', json(?)) "
+                "WHERE id = ?",
+                (row["payload"], row["file_id"]),
+            )
         # The TEMP VIEW shadows the main schema for unqualified names, and the
         # DDL read back above is unqualified -- drop the view first so the
         # table and its indexes land in the main file.
@@ -502,6 +513,13 @@ class ColdSplitTests(unittest.TestCase):
             self.assertEqual(storage.reference_table, "raw_references")
             self.assertEqual(storage.cold_database_size, 0)
             rows = storage.connection.execute("SELECT COUNT(*) FROM raw_references").fetchone()[0]
+            # The cache is read out of `nodes.metadata.parsed`, as it always
+            # was: the legacy branch is the pre-7A-3 read path, unchanged.
+            repo_id = storage.connection.execute("SELECT repo_id FROM repositories").fetchone()[0]
+            self.assertEqual(
+                sorted(storage.parser_cache(repo_id)),
+                ["module_a/service.py", "module_b/util.py"],
+            )
         self.assertGreater(rows, 0)
         write(self.root / "module_c" / "api.py", "def extra(value: int) -> int:\n    return value - 1\n")
         update = incremental_update(self.root, self.database)
@@ -512,6 +530,22 @@ class ColdSplitTests(unittest.TestCase):
                 storage.connection.execute("SELECT COUNT(*) FROM raw_references").fetchone()[0], 0
             )
         self.assertFalse(cold_path_for(self.database).exists())
+        # The update has to rebuild the whole graph, not just the file it was
+        # handed: unchanged files come back from the parse cache, so a cache
+        # that reads as empty would quietly drop their symbols. Comparing the
+        # node and edge sets against a fresh index of the same tree is what
+        # makes that failure visible instead of vacuous.
+        fresh = Path(self.temp.name) / "legacy-fresh.db"
+        full_index(self.root, fresh)
+        with SQLiteStorage(self.database) as updated, SQLiteStorage(fresh) as rebuilt:
+            self.assertEqual(
+                {row["id"] for row in updated.rows("SELECT id FROM nodes")},
+                {row["id"] for row in rebuilt.rows("SELECT id FROM nodes")},
+            )
+            self.assertEqual(
+                {row["id"] for row in updated.rows("SELECT id FROM edges")},
+                {row["id"] for row in rebuilt.rows("SELECT id FROM edges")},
+            )
 
     def test_copy_takes_the_cold_store_along(self) -> None:
         target = Path(self.temp.name) / "copy.db"
@@ -551,6 +585,75 @@ class ColdSplitTests(unittest.TestCase):
             self.assertEqual(old.pop("generation"), update["graph_generation"] - 1)
             self.assertEqual(new.pop("generation"), update["graph_generation"])
             self.assertEqual(old, new)
+
+    def test_the_parse_cache_lives_in_the_cold_store(self) -> None:
+        """Stage 7A-3: `parsed` is a cache, no query reads it, and it was 94.8%
+        of the nodes table -- so it is a cold table now, and the File node keeps
+        only what other code reads out of its metadata."""
+        repo_id = repository_id(self.root)
+        with SQLiteStorage(self.database) as storage:
+            cold_rows = storage.rows("SELECT * FROM cold.parse_cache")
+            file_metadata = [
+                json.loads(row["metadata"])
+                for row in storage.rows("SELECT metadata FROM nodes WHERE kind = 'File'")
+            ]
+            cache = storage.parser_cache(repo_id)
+        self.assertEqual(
+            sorted(row["relative_path"] for row in cold_rows),
+            ["module_a/service.py", "module_b/util.py"],
+        )
+        self.assertEqual(len(cold_rows), len(file_metadata))
+        for metadata in file_metadata:
+            self.assertNotIn("parsed", metadata)
+            # What is left is what has a reader: `knowledge.py` looks files up
+            # by `relative_path`, and `shard_path` is part of the File node's
+            # published metadata.
+            self.assertIn("relative_path", metadata)
+            self.assertIn("shard_path", metadata)
+        # The cache is keyed by path and holds the payload the writer built.
+        self.assertEqual(sorted(cache), ["module_a/service.py", "module_b/util.py"])
+        self.assertEqual(
+            sorted(cache["module_b/util.py"]),
+            ["imports", "parser", "references", "symbols"],
+        )
+        self.assertEqual(
+            [symbol["name"] for symbol in cache["module_b/util.py"]["symbols"]], ["helper"]
+        )
+
+    def test_an_update_keeps_the_cache_for_files_it_did_not_reparse(self) -> None:
+        """The cache is rewritten whole on every update, out of the File nodes
+        the graph build produced -- unchanged files included, since their
+        payload came out of the cache in the first place."""
+        repo_id = repository_id(self.root)
+        with SQLiteStorage(self.database) as storage:
+            before = storage.parser_cache(repo_id)
+        write(
+            self.root / "module_c" / "api.py",
+            "def extra(value: int) -> int:\n    return value - 1\n",
+        )
+        incremental_update(self.root, self.database)
+        with SQLiteStorage(self.database) as storage:
+            after = storage.parser_cache(repo_id)
+            rows = storage.rows("SELECT file_id, relative_path FROM cold.parse_cache")
+        self.assertEqual(sorted(after), ["module_a/service.py", "module_b/util.py", "module_c/api.py"])
+        for path, payload in before.items():
+            self.assertEqual(after[path], payload)
+        self.assertEqual(len(rows), len(after))
+
+    def test_a_split_database_without_a_parse_cache_fails_loudly(self) -> None:
+        """A database split before stage 7A-3 keeps its cache in the nodes
+        table; under this code the cold table reads empty and the update must
+        say so rather than rebuild every unchanged file as empty."""
+        write(
+            self.root / "module_c" / "api.py",
+            "def extra(value: int) -> int:\n    return value - 1\n",
+        )
+        with SQLiteStorage(self.database) as storage:
+            storage.connection.execute("DELETE FROM cold.parse_cache")
+            storage.connection.commit()
+        with self.assertRaises(RuntimeError) as caught:
+            incremental_update(self.root, self.database)
+        self.assertIn("missing parser cache", str(caught.exception))
 
 
 class CarriedEdgeTests(unittest.TestCase):

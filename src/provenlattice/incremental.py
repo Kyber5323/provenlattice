@@ -52,11 +52,11 @@ def incremental_update(
             }
 
         # Only past the point where the update is known to touch something: these
-        # loads dominate update memory (raw_references alone is ~57% of the
-        # database, and nodes.metadata.parsed is 94.8% of the nodes table) and a
+        # loads dominate update memory (the parse cache is the largest of them,
+        # and `raw_references` was ~57% of the database before stage 7A) and a
         # no-op update must not pay for them. Even a real update now reads only
-        # the columns it consumes (appendix A, 0.3): the fat `parsed` blobs
-        # appear once in parser_cache and never again.
+        # the columns it consumes (appendix A, 0.3): the `parsed` blobs live in
+        # the cold store (stage 7A-3) and are read once, here, and never again.
         old_cache = storage.parser_cache(repo_id)
         old_nodes = storage.snapshot_columns(
             "nodes", ("id", "kind", "source_hash", "start_line", "end_line")
@@ -168,10 +168,10 @@ def incremental_update(
         for node_id in common_node_ids:
             old = old_nodes[node_id]
             new = new_nodes[node_id]
-            # File metadata is the parsed cache: it changes iff the source
-            # bytes change, which source_hash already reports, so reading it
-            # back here would only re-read 94.8% of the table (B.2.3). Symbol
-            # metadata stays compared json-for-json.
+            # A File node's metadata is derived from its source bytes, which
+            # source_hash already reports, so it is compared by hash alone
+            # (B.2.3; since stage 7A-3 the parse cache is not even in the
+            # column). Symbol metadata stays compared json-for-json.
             old_meta = "" if old["kind"] == "File" else old_nodes_metadata.get(node_id, "")
             new_meta = "" if old["kind"] == "File" else json.dumps(new.metadata, sort_keys=True)
             if (

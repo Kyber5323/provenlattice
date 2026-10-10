@@ -250,10 +250,11 @@ class OwnerIndexTests(unittest.TestCase):
 
 class ParseCacheTests(unittest.TestCase):
     def test_events_are_not_written_into_the_parse_cache(self) -> None:
-        """Appendix B.2.3. `parsed` is already persisted twice -- once in
-        `nodes.metadata.parsed` and once in `parser_cache` -- and is 94.8% of
-        the nodes table. Caching the event list there as well would keep three
-        copies of every event, and `semantic_events` is the only one read."""
+        """Appendix B.2.3. `parsed` used to be persisted twice -- in
+        `nodes.metadata.parsed` and in `parser_cache` -- and was 94.8% of the
+        nodes table; stage 7A-3 left one copy, in the cold store. Caching the
+        event list there as well would keep three copies of every event, and
+        `semantic_events` is the only one read."""
         from provenlattice.graph import parsed_from_dict, parsed_to_dict
 
         parsed = cpp_events(b"void f() {\n  malloc(8);\n}\n")

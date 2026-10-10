@@ -194,6 +194,17 @@ CREATE INDEX IF NOT EXISTS cold.idx_raw_references_name ON raw_references(raw_na
 CREATE INDEX IF NOT EXISTS cold.idx_raw_references_file ON raw_references(file_id);
 CREATE INDEX IF NOT EXISTS cold.idx_raw_references_owner ON raw_references(owner_symbol_id);
 CREATE INDEX IF NOT EXISTS cold.idx_raw_references_resolved ON raw_references(resolved_symbol_id);
+
+-- The parse cache (stage 7A-3). It is a cache: `parsed` is a pure function of
+-- the file's bytes, which `files.source_hash` already reports, and the only
+-- reader is the update path, which needs the whole thing or none of it. It was
+-- `nodes.metadata.parsed` until the split, where it was 94.8% of the nodes
+-- table and of no use to any query.
+CREATE TABLE IF NOT EXISTS cold.parse_cache (
+    file_id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, relative_path TEXT NOT NULL,
+    payload TEXT NOT NULL, generation INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cold.idx_parse_cache_repo ON parse_cache(repo_id);
 """
 
 
@@ -359,6 +370,19 @@ class SQLiteStorage:
         return {row["path"]: dict(row) for row in rows}
 
     def parser_cache(self, repo_id: str) -> dict[str, dict]:
+        """`relative_path -> parsed payload`, from wherever this database keeps it.
+
+        A split database holds the cache in the cold store, where stage 7A-3
+        moved it; a legacy one still holds it in `nodes.metadata.parsed`, where
+        every version before that wrote it. The layout marker is the same one
+        `reference_table` uses -- a database keeps its cold layer in one place.
+        """
+        if self._reference_schema == "cold":
+            rows = self.connection.execute(
+                "SELECT relative_path, payload FROM cold.parse_cache WHERE repo_id = ?",
+                (repo_id,),
+            )
+            return {row["relative_path"]: json.loads(row["payload"]) for row in rows}
         rows = self.connection.execute(
             "SELECT qualified_name, metadata FROM nodes WHERE repo_id = ? AND kind = 'File'",
             (repo_id,),
@@ -366,7 +390,13 @@ class SQLiteStorage:
         result: dict[str, dict] = {}
         for row in rows:
             metadata = json.loads(row["metadata"])
-            result[metadata["relative_path"]] = metadata.get("parsed", {})
+            if "parsed" not in metadata:
+                # A File node without its payload is a database whose cache is
+                # gone, not a file that parses to nothing. Leaving the path out
+                # makes `incremental_update` fail loudly on it; answering `{}`
+                # would rebuild that file as an empty graph and call it success.
+                continue
+            result[metadata["relative_path"]] = metadata["parsed"]
         return result
 
     def snapshot_ids(self, table: str) -> dict[str, dict]:
@@ -377,10 +407,11 @@ class SQLiteStorage:
     def snapshot_columns(self, table: str, columns: tuple[str, ...]) -> dict[str, dict]:
         """Slim cousin of `snapshot_ids`: only the named columns come back.
 
-        `nodes.metadata.parsed` is 94.8% of the table (appendix B.2.3), and an
-        incremental update compares ids, lines, hashes and symbol metadata --
-        never the parsed blobs. Reading the fat column here and throwing it
-        away is the single largest over-read of the update path (P1).
+        An incremental update compares ids, lines, hashes and symbol metadata
+        -- never the parsed blobs, which until stage 7A-3 were 94.8% of the
+        nodes table (appendix B.2.3) and are now in the cold store. Reading a
+        column here and throwing it away is the largest over-read the update
+        path can make.
         """
         if table not in {"nodes", "edges"}:
             raise ValueError("unsupported snapshot table")
@@ -393,10 +424,12 @@ class SQLiteStorage:
     def nodes_metadata(self) -> dict[str, str]:
         """`id -> metadata json string` for every non-File node.
 
-        File nodes are excluded on purpose: their metadata is dominated by the
-        `parsed` cache, which changes iff the source bytes change, which
+        File nodes are excluded on purpose: what their metadata carried was the
+        parse cache, which changes iff the source bytes change, which
         `source_hash` already reports. The updated-node comparison in
-        incremental.py can therefore treat File nodes by hash alone.
+        incremental.py can therefore treat File nodes by hash alone. (Stage
+        7A-3 moved the cache out of the column; the exclusion stands, now on
+        the hash argument alone rather than on the column's size.)
         """
         return {
             row["id"]: row["metadata"]
@@ -648,18 +681,46 @@ class SQLiteStorage:
                 "INSERT INTO file_state VALUES(?, ?, ?, ?)",
                 [(item["file_id"], item["path"], item["source_hash"], generation) for item in files],
             )
-            connection.executemany(
-                "INSERT INTO nodes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
+            # On a split layout the parse cache leaves the nodes table here
+            # (stage 7A-3). The node object is not touched -- the in-memory
+            # File metadata is what `build_graph` and the shard strategies read
+            # -- only the row written for it drops the key, and the payload
+            # becomes a row of its own in the cold store.
+            cold_parse_cache = self._reference_schema == "cold"
+            parse_rows: list[tuple] = []
+            node_rows: list[tuple] = []
+            for node in nodes:
+                metadata = node.metadata
+                if cold_parse_cache and node.kind == "File" and "parsed" in metadata:
+                    parse_rows.append(
+                        (
+                            node.id, repo_id, metadata["relative_path"],
+                            json.dumps(metadata["parsed"], sort_keys=True), generation,
+                        )
+                    )
+                    metadata = {
+                        key: value for key, value in metadata.items() if key != "parsed"
+                    }
+                node_rows.append(
                     (
                         node.id, node.kind, node.repo_id, node.shard_id, node.file_id,
                         node.name, node.qualified_name, node.language, node.start_line,
                         node.end_line, node.signature, node.source_hash, node.generation,
-                        json.dumps(node.metadata, sort_keys=True),
+                        json.dumps(metadata, sort_keys=True),
                     )
-                    for node in nodes
-                ],
+                )
+            connection.executemany(
+                "INSERT INTO nodes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                node_rows,
             )
+            if cold_parse_cache:
+                # The cache is replaced whole, like the nodes it came from: an
+                # update rewrites every file's File node, changed or not, so
+                # every payload is in hand and none of the old ones is wanted.
+                connection.execute("DELETE FROM cold.parse_cache WHERE repo_id = ?", (repo_id,))
+                connection.executemany(
+                    "INSERT INTO cold.parse_cache VALUES(?, ?, ?, ?, ?)", parse_rows
+                )
             connection.executemany(
                 "INSERT INTO edges VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
                 [

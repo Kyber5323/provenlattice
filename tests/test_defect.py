@@ -4415,6 +4415,108 @@ class Stage6QueryTests(unittest.TestCase):
             [("SUBJECT_PATH", True)],
         )
 
+    def test_error_handling_knows_a_compiler_builtin_by_its_spelling(self) -> None:
+        """The two families, and the near-miss that tells them apart.
+
+        `_mmap` is the reason the predicate reads the digits rather than the
+        prefix: it is a libc function that starts like an intrinsic, and
+        dropping a call to it would be the rule firing on a name it has no
+        business reading. `_mm` with no operation after it is the other
+        boundary -- a program is free to call something spelled that way.
+        """
+        for builtin in ("__builtin_expect", "__builtin_unreachable",
+                        "_mm256_add_epi16", "_mm256_maddubs_epi16",
+                        "_mm_shuffle_epi32", "_mm_set1_epi32", "_mm512_and_si512"):
+            self.assertTrue(defect._is_builtin_call(builtin), builtin)
+        for name in ("_mmap", "_mm", "_mm256", "_memset", "malloc", "g",
+                     "_mmap_read", "__builtinish"):
+            self.assertFalse(defect._is_builtin_call(name), name)
+
+    def test_error_handling_drops_the_line_that_spells_only_builtins(self) -> None:
+        """The ruled shape: every name on the line is the compiler's, so the
+        stored value is arithmetic and "was the result checked" has no reading.
+
+        The rows are the extractor's own, because the join on
+        `(file_id, owner_symbol_id, start_line)` is the rule's whole wiring --
+        a row keyed differently would leave the candidate standing, and a test
+        that made up its own key would not notice.
+        """
+        events, edges, points, references = self.publish_with_references(
+            "__m256i g_a, g_b;\n"
+            "__m256i f(void) {\n"
+            "  __m256i v = _mm256_add_epi16(g_a, g_b);\n"
+            "  return v;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            [(row["start_line"], row["raw_name"]) for row in references],
+            [(3, "_mm256_add_epi16")],
+        )
+        result = defect.error_handling(
+            events, edges, points=points, references=references
+        )
+        self.assertEqual(len(result.candidates), 0)
+        self.assertEqual(
+            result.coverage["population"],
+            {"stored-call-result": 1, "stored-call-result-pure-computation": 1},
+        )
+
+        # The same graph without the rows is the same graph as before the rule:
+        # no reference row is not evidence of a builtin.
+        plain = defect.error_handling(events, edges, points=points)
+        self.assertEqual(len(plain.candidates), 1)
+        self.assertEqual(plain.coverage["population"], {"stored-call-result": 1})
+
+    def test_error_handling_keeps_the_line_an_intrinsic_shares_with_a_call(self) -> None:
+        """`x = g(_mm256_add_epi16(a, b))` spells a real call as well, and a
+        real call has a failure mode. The rule is "every name on the line", not
+        "any", and this is the fixture that pins the difference: under "any" it
+        would drop two candidates whose subject is `g`'s result.
+        """
+        events, edges, points, references = self.publish_with_references(
+            "int g(int);\n"
+            "__m256i g_a, g_b;\n"
+            "int f(void) {\n"
+            "  int x = g(_mm256_add_epi16(g_a, g_b));\n"
+            "  return x;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            sorted(row["raw_name"] for row in references),
+            ["_mm256_add_epi16", "g"],
+        )
+        result = defect.error_handling(
+            events, edges, points=points, references=references
+        )
+        self.assertEqual(
+            [candidate.subject["name"] for candidate in result.candidates],
+            ["x", "x"],
+        )
+        self.assertEqual(result.coverage["population"], {"stored-call-result": 2})
+
+    def test_error_handling_keeps_the_line_that_spells_a_lookalike(self) -> None:
+        """`mmap_ish` starts the way an intrinsic does and is not one, so its
+        line is not pure and the candidate stands. This is the false-match
+        guard at the query level rather than at the predicate: one wrong name
+        in the row set is enough to keep the whole line, which is the direction
+        the rule errs in.
+        """
+        events, edges, points, references = self.publish_with_references(
+            "char *mmap_ish(unsigned long, int, int, int, int, long);\n"
+            "int f(void) {\n"
+            "  char *p = mmap_ish(0, 1, 2, 3, 4, 5);\n"
+            "  return p != 0;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            [(row["start_line"], row["raw_name"]) for row in references],
+            [(3, "mmap_ish")],
+        )
+        result = defect.error_handling(
+            events, edges, points=points, references=references
+        )
+        self.assertEqual(len(result.candidates), 1)
+
     # -- dispatch, determinism, and the one key that is not a matrix number -
 
     def test_query_for_resolves_the_three_new_matrix_keys(self) -> None:

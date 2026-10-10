@@ -4904,6 +4904,76 @@ _BRANCHED_BEFORE_USE = {
     ),
 }
 
+# A call whose every spelled name is one the *compiler* resolves -- a vector
+# intrinsic or a `__builtin_*` -- is pure computation: its result is a value,
+# not a status, and "was the result checked" has no reading for it. The
+# stage-6 ruling on matrix 9.1's idx 27 says exactly that
+# (`ggml/src/ggml-cpu/arch/x86/repack.cpp:1646`,
+# `iacc_1 = _mm256_add_epi16(iacc_1, _mm256_maddubs_epi16(...))`).
+#
+# The rule is "**every** name the line spells", not "any", and that is the
+# whole of its safety argument: `x = f(_mm256_add_epi16(a, b))` spells `f` as
+# well, so the line keeps its candidate -- a real call with a real failure mode
+# is never dropped because an intrinsic shares its line. Measured on the frozen
+# corpora, "any" would have taken those with it. A line that spells no name at
+# all is kept too: absence of a reference row is not evidence of a builtin.
+#
+# The reference layer is the only place a spelled name exists -- a CALL point
+# carries `matched_name`, which is the *node type* (`call_expression`), not the
+# callee -- so this reads `raw_references` the way the taint query does, and
+# the query layer hands the rows in.
+_BUILTIN_PREFIX = "__builtin_"
+_VECTOR_PREFIX = "_mm"
+
+
+def _is_builtin_call(name: str) -> bool:
+    """Whether this is a name the compiler resolves, not the program.
+
+    Two families, both with a shape a program name can imitate only by
+    accident. `__builtin_*` is the GCC/Clang spelling and has no userland
+    convention. The vector intrinsics are `_mm<digits>_<op>`, with the digits
+    allowed to be empty (`_mm_shuffle_epi32`); the digits are what separates
+    them from a program symbol that merely starts the same way -- `_mmap` is a
+    libc function, not an intrinsic, and the head-before-the-underscore test is
+    what tells the two apart. On the frozen corpora every one of llama.cpp's
+    266 distinct `_mm*` names and redis's 54 matches the pattern and no
+    program name does, so the test has no false matches to answer for today;
+    the digit clause is what keeps that true of the next corpus.
+    """
+    if name.startswith(_BUILTIN_PREFIX):
+        return True
+    if not name.startswith(_VECTOR_PREFIX):
+        return False
+    head, underscore, _ = name[len(_VECTOR_PREFIX):].partition("_")
+    return bool(underscore) and (not head or head.isdigit())
+
+
+def _pure_computation_sites(
+    references: Iterable[Mapping[str, Any]],
+) -> frozenset[tuple[str, str, int]]:
+    """The `(file_id, owner_symbol_id, start_line)` keys whose calls are all builtins.
+
+    Grouped by the key a CALL point is identified by rather than by the
+    reference row's own id, because the point is what the query walks and the
+    rows are what the extractor saw on that line. A call the extractor did not
+    record leaves no row, so a line is only ever dropped on positive evidence
+    about *every* name on it.
+    """
+    spelled: dict[tuple[str, str, int], set[str]] = {}
+    for row in references:
+        name = row.get("raw_name")
+        if not name:
+            continue
+        key = (
+            str(row.get("file_id", "")),
+            str(row.get("owner_symbol_id", "")),
+            int(row.get("start_line", 0) or 0),
+        )
+        spelled.setdefault(key, set()).add(str(name))
+    return frozenset(
+        key for key, names in spelled.items() if all(_is_builtin_call(n) for n in names)
+    )
+
 
 def _branch_scan(
     call_id: str,
@@ -5213,6 +5283,7 @@ def error_handling(
     defect_keys: Collection[str] | None = None,
     points: Points | None = None,
     adjacency: Adjacency | None = None,
+    references: Iterable[Mapping[str, Any]] = (),
 ) -> DefectQueryResult:
     """Matrix 9.1: a call's result was stored and never examined.
 
@@ -5237,6 +5308,15 @@ def error_handling(
     to the graph, and matrix 9.1 says in its own semantics column that telling
     them apart is the AI side's job. So the population is large by construction
     and the candidate is a question, not an accusation.
+
+    One class of call is excluded rather than asked about, because the question
+    has no reading for it: a call whose every name on its line is one the
+    compiler resolves -- a vector intrinsic or a `__builtin_*` -- returns a
+    value, not a status. `_pure_computation_sites` carries the rule and the
+    measurement behind it. This is a *word-level* narrowing of the population
+    and not the API vocabulary matrix 9.1 asks for: it removes 6.6% of
+    llama.cpp-69's stored-call population and 0.8% of redis-50's, and the rest
+    is still a question.
 
     There is no `max_paths` knob, unlike its four siblings. The evidence route
     is the one the scan walked, read off its own breadth-first tree, so there is
@@ -5263,6 +5343,7 @@ def error_handling(
     wanted = _wanted(ERROR_HANDLING_KEY, defect_keys)
     verdicts: Counter = Counter()
     backward_total = 0
+    pure_sites = _pure_computation_sites(references)
 
     for owner in sorted(by_owner):
         for call_id in by_owner[owner]:
@@ -5276,6 +5357,15 @@ def error_handling(
                 # follow and the window has no end to look for. Counted, not
                 # guessed at.
                 population["stored-call-result-undeclared"] += 1
+                continue
+            if (str(info.get("file_id", "")), str(info.get("owner_symbol_id", "")),
+                    int(info.get("start_line", 0) or 0)) in pure_sites:
+                # Every name on this line is the compiler's, so the stored
+                # value is arithmetic and there is no failure to have checked.
+                # Counted apart from the population above: the two buckets
+                # together are still every assignment-shaped CALL point, and a
+                # reader can see how much the rule took without re-deriving it.
+                population["stored-call-result-pure-computation"] += 1
                 continue
             if not wanted or (subject is not None and _identity_display(info) != subject):
                 continue

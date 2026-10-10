@@ -718,7 +718,7 @@ class GraphQuery:
         )
 
     def _taint_references(self) -> list[dict]:
-        """The CALLS rows the taint query resolves its two ends through.
+        """The CALLS rows two queries resolve names through.
 
         The same table `_contracts` reads, with one column more: `target_module`
         is what separates a global call from a method that happens to end in the
@@ -728,8 +728,14 @@ class GraphQuery:
         the column; the taint query cannot do without it, and a second reader is
         cheaper than widening a shared one for a caller that ignores it.
 
-        Read only when the taint query runs: it is a scan of the largest table
-        in the graph, and no other query touches it.
+        The taint query resolves its two ends through these rows; the error
+        query reads the same rows to ask whether every name on a line is a
+        compiler builtin. Neither has a cheaper source -- a CALL point carries
+        `matched_name`, which is the node type, not the callee.
+
+        Read only when one of those two queries runs: it is a scan of the
+        largest table in the graph, and no other query touches it. `all` runs
+        both, so the caller loads it once and hands the same list to each.
         """
         repository = self.storage.repository()
         repo_id = str(decode_row(repository)["repo_id"]) if repository else ""
@@ -1000,6 +1006,7 @@ class GraphQuery:
         candidates: list[defect.Candidate] = []
         coverage: dict = {}
         truncated = False
+        calls_references: list | None = None
         for query in queries:
             # The stage 5B parameter join rides the contracts switch: one
             # control column (`use_contracts=False`) turns off both the
@@ -1014,13 +1021,20 @@ class GraphQuery:
                     callees=contracts, signatures=self._signatures(), names=names,
                 )
             # The taint query's two ends are callee names, and a CALL event does
-            # not carry one -- it carries the node type. Same discipline as the
-            # bindings above: read the extra table only for the query that
-            # needs it, and let `run` hand it to nobody else.
+            # not carry one -- it carries the node type. The error query reads
+            # the same table for the same reason: whether every name on a line
+            # is a compiler builtin is a fact about the reference layer, and the
+            # point has no field for it. Same discipline as the bindings above:
+            # read the extra table only for the queries that need it, and let
+            # `run` hand it to nobody else. `all` runs both, so the scan is done
+            # once and shared rather than once per query.
             references: list = []
             taint = None
+            if query in (defect.TAINT_PATH, defect.ERROR_HANDLING):
+                if calls_references is None:
+                    calls_references = self._taint_references()
+                references = calls_references
             if query == defect.TAINT_PATH:
-                references = self._taint_references()
                 taint = defect.load_taint()
             result = defect.run(
                 query, events, edges, points=points, adjacency=adjacency,

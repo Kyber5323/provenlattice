@@ -118,60 +118,86 @@ L5 暴露层 Exposure
 
 图例：✅ 已实现　◐ 部分实现　⬜ 未实现（future candidate，见 roadmap §4）
 
+> 实现状态与证据等级是两个维度：`已实现` 表示代码能力已存在；`formal / controlled / diagnostic` 表示该能力目前拥有的验证证据等级。
+
 ```text
-L1 Foundation/Knowledge      ✅ 已实现（formal：RQ1 / RQ2 / SQI-V1/V1.1/V1.2）
-│   ✅ Python + C/C++ 确定性解析、三态引用、Impact、Knowledge
-│   ⬜ S3+ scale / 跨仓统一索引 / 分布式 / canonical vector index
+L1 Foundation / Knowledge      ✅ 已实现
+│   ✅ Python + C/C++ 基础解析、Symbol / Definition / Reference / Call、
+│      resolved / ambiguous / unresolved 三态引用、Impact、Knowledge
+│   ✅ 相关 foundation/query 能力已有 RQ1 / RQ2 / SQI-V1/V1.1/V1.2 正式证据支撑
+│   ⬜ S3+ scale / 跨仓统一索引 / 分布式索引
 │   ⬜ Runtime Log / Commit History / Validation Result ingestion（→ L1 + L4）
+│   ⬜ Vector index：
+│      repository-level canonical index → L1；
+│      task-context retrieval accelerator → L3
 │
-L2 Optional Analysis         ◐ 部分实现（Python：formal QUALIFIED；C A1–A3.6：diagnostic）
-│   ✅ Python AST + CFG；C normalized AST + function-local CFG（含 &&/||/?: 短路）
-│      + 调用语义分类（direct/indirect/unresolved）+ 紧凑符号上下文
-│   ⬜ def-use / local data flow（not justified yet）
-│   ⬜ points-to / 精确 function-pointer target（当前仅 indirect 识别）
-│   ⬜ taint / security analysis、C++ deep analysis、Clang/compile_commands、
-│      interprocedural CFG
+L2 Optional Analysis           ◐ 部分实现
+│   ✅ Python AST + CFG（formal QUALIFIED）
+│   ✅ C normalized AST + function-local CFG（含 && / || / ?: 短路）
+│      + 调用语义分类（direct / indirect / unresolved）
+│      （A1–A3.6：diagnostic / regression validated）
+│   ⬜ def-use / local data flow（当前真实任务尚未证明必须，A4_DEFUSE_NOT_YET_JUSTIFIED）
+│   ⬜ points-to / 精确 function-pointer target
+│      （当前只识别 indirect call，不解析 concrete target）
+│   ⬜ taint / security analysis
+│   ⬜ C++ deep analysis
+│   ⬜ Clang / compile_commands-aware semantic enrichment
+│   ⬜ interprocedural CFG
 │
-L3 Task Context              ✅ 已实现（task-context-v0；diagnostic + C10 受控协议内验证）
-│   ✅ 按任务打包最小必要事实（fact_id + evidence_ids 可追溯）
-│   ⬜ semantic/vector retrieval accelerator、context budgeting / profile selection
+L3 Task Context                ✅ 已实现
+│   ✅ task-context-v0
+│   ✅ primary targets / source spans / relations / candidates / unresolved
+│   ✅ definition-preference、symbol-scoped compact analysis summary、预算有界
+│   ✅ controlled protocol 中已验证事实可达与稳定性
+│   ⬜ profile-driven capability policy
+│   ⬜ semantic/vector retrieval accelerator
+│   ⬜ automatic capability planning
 │
-L4 Evidence & Normalization  ✅ 已实现（core provenance = formal；normalization-v2 已实现）
-│   ✅ evidence 链 + SQI citation closure 18/18；raw≡normalized 校验（C10 ×6）
-│   ⬜ runtime / validation evidence provenance、richer normalization
+L4 Evidence & Normalization    ✅ 核心能力已实现
+│   ✅ Core provenance：fact_id / evidence_ids / source span / 三态引用
+│   ✅ SQI citation closure
+│   ✅ normalization-v2 + raw≡normalized 校验
+│   ⬜ Runtime evidence provenance
+│   ⬜ Validation-result evidence
+│   ⬜ richer normalization / audit extensions
 │
-L5 Exposure                  ◐ 部分实现
-│   ✅ CLI（baseline，全命令面）；✅ native MCP（可按配置启用）
-│   ⬜ Plugin / SDK / REST-API（future candidate）
+L5 Exposure                    ◐ 部分实现
+│   ✅ CLI（baseline，全命令面）
+│   ✅ native MCP（可按配置启用）
+│   ⬜ Plugin
+│   ⬜ SDK
+│   ⬜ REST / API service
 ```
 
-**已实现部分覆盖的任务**（证据：vision §3 任务映射 + D8 真实 Agent 观察 + SQI formal）：
+**已实现部分当前可覆盖的任务**
 
-| 层 | 可覆盖任务 |
+| 层 | 当前可覆盖任务 |
 | --- | --- |
-| L1 | 代码理解、caller/callee/reference 查询、需求→代码定位、影响面分析、Agent 日常开发问答、review / refactor / bug 定位 |
-| L2（Python/C 现有 analyzer） | 函数内部结构理解、复杂函数 review、结构化代码讲解、控制流理解、分支/不可达路径、错误处理分支覆盖检查、C 短路求值路径、间接调用如实识别、definition-preference 符号上下文 |
-| L3 | Agent 任务上下文按需打包（primary targets / spans / relations，预算有界） |
-| L4 | 事实可信性与证据追溯（resolved/ambiguous/unresolved 三态）、citation closure、Agent trace 规范化审计 |
-| L5 | CLI 直接消费全部命令面；MCP 客户端（如 Claude Code）原生接入 |
+| L1 | 代码理解、definition/reference/caller/callee 查询、依赖与影响面分析、需求/文档→代码定位、日常 bug 定位、review / refactor 辅助 |
+| L2（Python/C 已有 analyzer） | 函数内部结构理解、复杂函数解释、局部控制流分析、条件/循环/return/break/continue/switch/fallthrough 路径理解、C 短路求值结构、direct/indirect/unresolved call 识别 |
+| L3 | 针对 Agent 任务按需选择并打包 primary targets / spans / relations / analysis summary，控制上下文规模 |
+| L4 | 事实来源追溯、resolved/ambiguous/unresolved 状态保真、citation closure、Agent trace 规范化与实验审计 |
+| L5 | CLI 直接消费全部查询/分析能力；MCP 客户端原生接入 ProvenLattice |
 
-**未实现部分对应的潜在任务**（全部为 future candidate，未排期、不承诺；def-use 为 not justified yet）：
+**未实现能力及其潜在任务价值**
 
-| 未实现能力 | 潜在任务覆盖 |
+> 以下均为 future candidates，不表示已排期或已证明必须；是否启动仍遵循 evidence-driven 原则。
+
+| 未实现能力 | 潜在任务价值 |
 | --- | --- |
-| def-use / local data flow | 参数污染路径、危险 API 输入路径、空指针传播、未初始化使用 |
-| points-to / 精确 function-pointer target | 函数指针/间接调用目标确认（当前仅识别为 indirect，不解析 target） |
-| taint / security analysis | 漏洞检测、source/sink/sanitizer 路径、finding 上下文增强与解释、Agent 辅助修复 |
-| C++ deep analysis | C++ 函数内结构 / 控制流分析（当前 unsupported） |
-| Clang / compile_commands 增强 | 宏、模板实例化、复杂重载下更精确的语义解析 |
-| interprocedural CFG | 跨函数路径分析（当前 CFG 明确不跨函数） |
-| Runtime/Commit/Validation ingestion | 运行时与工程历史证据的跨层追溯（L1+L4） |
-| Plugin / SDK / REST | 非 CLI 生态的程序化集成 |
-| Capability Profiles | basic/development/deep/security 一键组合配置（UX shortcut，规划中） |
+| def-use / local data flow | 提供 parameter → local → branch → store / call 的值流基础，用于更精确的数据依赖理解，并为后续空指针、未初始化值、危险输入分析提供基础 |
+| points-to / 精确 function-pointer target | 收敛 callback / function pointer 的 concrete target，提升间接调用定位和相关修复任务精度 |
+| taint / security analysis | source → propagation → sink / sanitizer 路径、漏洞检测、安全审计、finding 解释与修复辅助 |
+| C++ deep analysis | C++ 函数内部 AST / CFG / 调用语义分析；当前 C++ 仅有 Foundation Graph |
+| Clang / compile_commands 增强 | 在宏、模板、复杂重载、类型绑定、跨翻译单元场景下提高 C/C++ 语义精度 |
+| interprocedural CFG | 跨函数控制路径、跨调用链流程理解；当前 CFG 明确限定为 function-local |
+| Runtime / Commit / Validation ingestion | 将运行时、开发历史和验证结果作为新的工程证据源接入 L1，并通过 L4 保留 provenance |
+| Plugin / SDK / REST | IDE、平台和第三方工具的程序化集成 |
+| Capability Profiles | `basic / development / deep / security` 等能力组合配置；属于 future productization target，不改变五层架构 |
 
-> 说明：层 = 数据生命周期阶段（Layer ≠ Maturity Level）；"更高级"的分析能力
-> 仍属 L2，不构成新层。长期目标见 [docs/roadmap.md](docs/roadmap.md) Gold
-> Target 节；未实现项启动均以真实需求信号为前提（evidence-driven）。
+> **架构原则：** 五层表示数据生命周期阶段，而不是能力成熟度等级（Layer ≠ Maturity Level）。  
+> AST、CFG、def-use、points-to、taint 等即使复杂度逐步提高，仍属于 L2 Analysis；新增 analyzer 不意味着新增架构层。  
+> 长期产品化目标见 [docs/roadmap.md](docs/roadmap.md) 的 Gold Target 节。
 
 ### 支持的操作（CLI 命令面）
 

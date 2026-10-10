@@ -1,5 +1,10 @@
 # C-ANALYSIS-A1 report
 
+> Status note: the C CFG `not implemented` boundary below was superseded by
+> C-ANALYSIS-A2 (`design-analysis-layer-c-a2-report.md`), which adds optional
+> function-local `cfg:c`. The A1 normalized AST contract described here is
+> unchanged.
+
 ## Implemented
 
 - Optional `ast:c` analyzer with contract `c-ast-v1`.

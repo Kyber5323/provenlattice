@@ -140,12 +140,12 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(result["features"]["ast"]["materialized"],
                          ["src/a.py", "src/b.c", "src/sub/b.py"])
         self.assertEqual(result["features"]["cfg"]["materialized"],
-                         ["src/a.py", "src/sub/b.py"])
-        self.assertEqual(result["features"]["cfg"]["skipped"]["not_implemented"],
-                         ["src/b.c"])
+                         ["src/a.py", "src/b.c", "src/sub/b.py"])
+        self.assertEqual(result["features"]["cfg"]["skipped"]["unsupported_language"],
+                         ["src/README.md", "src/x.js"])
         self.assertEqual(result["files"],
-                         {"seen": 5, "analyzed": 2, "reused": 0, "skipped": 3})
-        self.assertEqual(len(analysis_state_rows(self.database)), 5)
+                         {"seen": 5, "analyzed": 3, "reused": 0, "skipped": 2})
+        self.assertEqual(len(analysis_state_rows(self.database)), 6)
 
     def test_g3_cfg_only_materializes_ast_dependency(self) -> None:
         result = analyze_scope(self.root, "src", "cfg", self.database)
@@ -154,21 +154,29 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(result["dependencies"]["ast"]["reason"], "required_by_cfg")
         self.assertEqual(result["dependencies"]["ast"]["action"], "materialized")
         self.assertEqual(result["features"]["cfg"]["materialized"],
-                         ["src/a.py", "src/sub/b.py"])
+                         ["src/a.py", "src/b.c", "src/sub/b.py"])
         self.assertEqual(set(result["features"]["cfg"]["skipped"]),
-                         {"not_implemented", "unsupported_language"})
+                         {"unsupported_language"})
         features = [row["feature"] for row in analysis_state_rows(self.database)]
-        self.assertEqual(sorted(features), ["ast:python", "ast:python", "cfg:python", "cfg:python"])
+        self.assertEqual(
+            sorted(features),
+            ["ast:c", "ast:python", "ast:python", "cfg:c", "cfg:python", "cfg:python"])
         self.assertEqual(self.per_file(result, "src/a.py")["cfg_status"], "materialized")
+        self.assertEqual(self.per_file(result, "src/b.c")["cfg_status"], "materialized")
 
     def test_g4_cfg_only_reuses_fresh_ast(self) -> None:
-        analyze_ast_scope(self.root, "src", self.database)
-        before = state_updated_at(self.database, self.fid(), "ast:python")
+        analyze_scope(self.root, "src", "ast", self.database)
+        before = {
+            feature: state_updated_at(self.database, self.fid(), feature)
+            for feature in ("ast:python", "ast:c")
+        }
         result = analyze_scope(self.root, "src", "cfg", self.database)
         self.assertEqual(result["dependencies"]["ast"]["action"], "reused")
         self.assertEqual(result["features"]["cfg"]["materialized"],
-                         ["src/a.py", "src/sub/b.py"])
-        self.assertEqual(state_updated_at(self.database, self.fid(), "ast:python"), before)
+                         ["src/a.py", "src/b.c", "src/sub/b.py"])
+        for feature, updated_at in before.items():
+            self.assertEqual(state_updated_at(self.database, self.fid(), feature),
+                             updated_at, feature)
 
     def fid(self) -> str:
         from provenlattice.identity import path_id
@@ -256,23 +264,22 @@ class OrchestratorTests(unittest.TestCase):
         analyze_scope(self.root, "src", "ast,cfg", self.database)
         before = {
             feature: state_updated_at(self.database, self.fid(), feature)
-            for feature in ("ast:python", "cfg:python")
+            for feature in ("ast:python", "cfg:python", "ast:c", "cfg:c")
         }
         result = analyze_scope(self.root, "src", "ast,cfg", self.database)
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["files"],
-                         {"seen": 5, "analyzed": 0, "reused": 2, "skipped": 3})
+                         {"seen": 5, "analyzed": 0, "reused": 3, "skipped": 2})
         self.assertEqual(result["features"]["ast"]["reused"],
                          ["src/a.py", "src/b.c", "src/sub/b.py"])
         self.assertEqual(result["features"]["cfg"]["reused"],
-                         ["src/a.py", "src/sub/b.py"])
+                         ["src/a.py", "src/b.c", "src/sub/b.py"])
         for feature in ("ast", "cfg"):
             self.assertEqual(result["features"][feature]["materialized"], [])
-        after = {
-            feature: state_updated_at(self.database, self.fid(), feature)
-            for feature in ("ast:python", "cfg:python")
-        }
-        self.assertEqual(after, before)
+        self.assertEqual(
+            {feature: state_updated_at(self.database, self.fid(), feature)
+             for feature in before},
+            before)
 
     def test_g12_base_graph_zero_impact(self) -> None:
         before = base_snapshot(self.database)

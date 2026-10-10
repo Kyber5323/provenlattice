@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 
 from .analysis_ast import analyze_ast_scope, normalize_scope, scoped_sources
 from .analysis_c_ast import analyze_c_ast_scope
+from .analysis_c_cfg import ANALYZER as C_CFG_ANALYZER, analyze_c_cfg_scope
 from .analysis_cfg import ANALYZER as CFG_ANALYZER, analyze_cfg_scope
 from .identity import path_id
 from .scanner import IGNORED_DIRS, SUPPORTED_EXTENSIONS
@@ -14,21 +15,18 @@ from .storage import SQLiteStorage
 
 SUPPORTED_FEATURES = ("ast", "cfg")
 FEATURE_DEPENDENCIES = {"cfg": ("ast",)}
+C_SOURCE_SUFFIXES = frozenset({".c", ".h"})
 REASON_PREFIX = "skipped_"
 
 
 def _supports_feature(entry: dict, feature: str) -> bool:
-    if feature == "cfg":
-        return entry["language"] == "python"
     return (
         entry["language"] == "python"
-        or PurePosixPath(entry["path"]).suffix.lower() in {".c", ".h"}
+        or PurePosixPath(entry["path"]).suffix.lower() in C_SOURCE_SUFFIXES
     )
 
 
 def _unsupported_reason(entry: dict, feature: str) -> str:
-    if feature == "cfg" and PurePosixPath(entry["path"]).suffix.lower() in {".c", ".h"}:
-        return "not_implemented"
     return "unsupported_language"
 
 
@@ -52,13 +50,24 @@ def _merge_feature_results(runs: list[dict]) -> dict:
         "nodes_written": sum(run.get("nodes_written", 0) for run in runs),
         "analyze_time_ms": sum(run.get("analyze_time_ms", 0.0) for run in runs),
     }
-    for key in (
-        "skipped_unsupported", "skipped_not_in_base",
-        "skipped_base_out_of_date", "skipped_payload_too_large",
-    ):
-        merged[key] = sorted({
-            path for run in runs for path in run.get(key, []) if path not in handled
-        })
+    skip_keys = {
+        key for run in runs for key in run if key.startswith(REASON_PREFIX)
+    }
+    # A language-specific run's precise skip reason wins over the generic
+    # unsupported_language fallback emitted by the other language's run.
+    specific = {
+        path for run in runs for key, paths in run.items()
+        if key.startswith(REASON_PREFIX) and key != "skipped_unsupported"
+        for path in paths
+    }
+    for key in sorted(skip_keys):
+        skipped = {
+            path for run in runs for path in run.get(key, [])
+            if path not in handled
+        }
+        if key == "skipped_unsupported":
+            skipped -= specific
+        merged[key] = sorted(skipped)
     return merged
 
 
@@ -119,8 +128,8 @@ def _cfg_file_metadata(database: Path) -> dict[str, dict]:
         return {
             row["file_id"]: json.loads(row["metadata"])
             for row in storage.rows(
-                "SELECT file_id, metadata FROM analysis_state WHERE feature=?",
-                (CFG_ANALYZER,),
+                "SELECT file_id, metadata FROM analysis_state WHERE feature IN (?, ?)",
+                (CFG_ANALYZER, C_CFG_ANALYZER),
             )
         }
 
@@ -144,13 +153,16 @@ def analyze_scope(repo: str | Path, scope: str, features, database: str | Path |
     results = {}
     if "ast" in plan:
         ast_runs = [analyze_ast_scope(root, scope_path.as_posix(), database)]
-        # Do not materialize C AST as an implicit fallback for an unsupported
-        # C CFG-only request. C AST is built only when the caller requests AST.
-        if "ast" in requested:
+        # C AST is materialized when explicitly requested or as the declared
+        # dependency of a C CFG request (mirrors Python cfg -> ast). It is
+        # never built implicitly by a plain query.
+        if "ast" in requested or "cfg" in requested:
             ast_runs.append(analyze_c_ast_scope(root, scope_path.as_posix(), database))
         results["ast"] = _merge_feature_results(ast_runs)
     if "cfg" in plan:
-        results["cfg"] = analyze_cfg_scope(root, scope_path.as_posix(), database)
+        cfg_runs = [analyze_cfg_scope(root, scope_path.as_posix(), database)]
+        cfg_runs.append(analyze_c_cfg_scope(root, scope_path.as_posix(), database))
+        results["cfg"] = _merge_feature_results(cfg_runs)
     categories: dict[str, dict[str, tuple[str, str | None]]] = {}
     for feature, result in results.items():
         mapping: dict[str, tuple[str, str | None]] = {}
@@ -164,14 +176,7 @@ def analyze_scope(repo: str | Path, scope: str, features, database: str | Path |
                 if reason == "unsupported":
                     reason = "unsupported_language"
                 for path in paths:
-                    effective_reason = reason
-                    if (
-                        feature == "cfg"
-                        and PurePosixPath(path).suffix.lower() in {".c", ".h"}
-                        and reason == "unsupported_language"
-                    ):
-                        effective_reason = "not_implemented"
-                    mapping[path] = ("skipped", effective_reason)
+                    mapping[path] = ("skipped", reason)
         categories[feature] = mapping
     if "cfg" in categories:
         metadata_by_file = _cfg_file_metadata(database)
@@ -283,12 +288,16 @@ def analyze_scope(repo: str | Path, scope: str, features, database: str | Path |
             for feature in requested:
                 if not _supports_feature(entry, feature):
                     continue
-                status, _ = categories[feature].get(
+                status, reason = categories[feature].get(
                     entry["path"],
                     ("skipped", _unsupported_reason(entry, feature)),
                 )
                 if status in {"materialized", "reused"}:
                     produced_any = True
+                elif status == "skipped" and reason == "no_functions_built":
+                    # Nothing CFG-able in this file (e.g. prototype-only
+                    # header): an honest N/A, not a run failure.
+                    continue
                 else:
                     all_good = False
         status = "complete" if all_good else ("partial" if produced_any else "failed")

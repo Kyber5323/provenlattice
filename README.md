@@ -41,7 +41,7 @@ AST/CFG 分析层（D0–D8）、`task-context` 事实包（D9-C1/C2）、native
 暴露（D9-C7/C8）、normalization-v2（D9-C9），并完成 D9-C10 六 case × 双臂
 受控能力稳定性实验（12/12 cells、6/6 pairs VALID）。新增能力边界如实记录：
 AST/CFG 分析层当前支持 Python AST/CFG，并新增可选 C `.c`/`.h` normalized
-AST；C CFG 与 C++ deep analysis 仍不支持。ContextBench zstd 16-case 重验 **14/16 解决、0 真实失败、
+AST 与函数内 C CFG V1；C++ deep analysis 仍不支持。ContextBench zstd 16-case 重验 **14/16 解决、0 真实失败、
 2 case 因验证环境限制排除**（详见 `experiments/analysis_layer/d8/results/`
 与 `benchmark-contextbench-zstd/` 外部批目录）。
 
@@ -89,7 +89,7 @@ L2 分析层 Analysis Layer（可选，按 scope 物化）
 │   analyze --scope <dir> --features ast,cfg
 │   Function IR + 局部 CFG（真回边、return/break/continue、callsite 不跨函数）
 │   six-state 只读查询（available/not_built/stale/unsupported/…）
-│   Python: AST + CFG；C (.c/.h): normalized AST；C CFG / C++ deep analysis: unsupported
+│   Python: AST + CFG；C (.c/.h): normalized AST + function-local CFG；C++ deep analysis: unsupported
 │
 L3 上下文层 Context Bundle
 │   task-context <symbols> --json → task-context-v0 事实包
@@ -110,7 +110,7 @@ L5 暴露层 Exposure
 | 类别 | 命令 | 说明 |
 | --- | --- | --- |
 | 建图/维护 | `index` `update` `status` `shard` | 全量/增量索引、状态查询、分片 |
-| 分析层 | `analyze` `analysis` | 按 scope 物化/查询派生分析；Python AST/CFG，C `.c`/`.h` AST；C CFG 与 C++ deep analysis unsupported |
+| 分析层 | `analyze` `analysis` | 按 scope 物化/查询派生分析；Python AST/CFG，C `.c`/`.h` AST + function-local CFG；C++ deep analysis unsupported |
 | 事实包 | `task-context` | 面向 Agent 的上下文事实包（L3 主入口） |
 | 符号查询 | `symbol` `definition` `callers` `callees` `references` | SQI 结构化查询 |
 | 结构关系 | `dependencies` `dependents` `subgraph` `impact`（经 symbol/related） | 模块依赖与影响面 |
@@ -173,7 +173,8 @@ ContextBench zstd 16-case 重验                                  ✅ 14/16、0 
 V1.3 收尾（正式 qualification 汇总 + tag）                       next
 V1.4      Def-Use / Local Data Flow / Finding Enrichment       not started
 V1.4a     C normalized AST（`.c`/`.h`）                         ✅ A1 implemented
-V1.4b     C CFG / C++ deep analysis                             next candidate
+V1.4b     C CFG V1（函数内控制流）                              ✅ A2 implemented
+V1.4c     C++ deep analysis                                     next candidate
 V1.5     Taint / Security Analysis                            not started
 Overlay V1.1                                                   next candidate
 S3+ scale bands / concurrency                                  not started
@@ -202,7 +203,7 @@ D9 context-bundle 线（`experiment/context-bundle`，18+ commits）：C6-C10 fo
 D9-C10 P2 = 12/12 cells、6/6 pairs VALID、PASS。
 
 下一步：V1.3 契约对外口径收敛 + 正式 qualification；DFG 等真实需求信号出现再启动；
-C CFG 与 C++ deep analysis 是后续语言能力缺口；A1 在本阶段止于 C normalized AST。
+C++ deep analysis 是后续语言能力缺口；A2 止于 C 函数内 CFG V1（无 short-circuit/interprocedural）。
 
 接口路线：SQI 契约已冻结（byte-identical envelope + citation closure）；
 **MCP 已落地**（D9-C8 native 单工具暴露，透明桥接 `python -m provenlattice`）；
@@ -250,7 +251,7 @@ Windows PowerShell 中先执行 `$env:PYTHONPATH='src'`。
 
 ✅ **SQI-V1.2 = QUALIFIED / RELEASE READY**（tag `provenlattice-sqi-v1.2`，GitHub Release 已发布）
 
-🧪 **V1.3 开发态（experiment/context-bundle）**：Analysis Layer（Python AST/CFG + C `.c`/`.h` normalized AST）+
+🧪 **V1.3 开发态（experiment/context-bundle）**：Analysis Layer（Python AST/CFG + C `.c`/`.h` normalized AST + C CFG V1）+
 Context Bundle/`task-context` + native MCP 暴露 + normalization-v2 已合入；
 D9-C10 受控稳定性 PASS；ContextBench zstd 16-case 重验无回归（14/16，0 真实失败）。
 

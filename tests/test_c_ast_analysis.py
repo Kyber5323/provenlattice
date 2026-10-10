@@ -214,19 +214,25 @@ class CAstAnalysisTests(unittest.TestCase):
             digest,
         )
 
-    def test_c_cfg_is_explicitly_unsupported_and_not_built(self) -> None:
-        analyze_c_ast_scope(self.root, "src", self.database)
-        result = query_analysis(
+    def test_c_cfg_requires_explicit_request_then_available(self) -> None:
+        not_built = query_analysis(
             self.root, "cfg", file_path="src/add.c", database=self.database
         )
-        self.assertEqual(result["status"], "unsupported")
-        self.assertEqual(result["reason"], "not_implemented")
-        self.assertEqual(result["nodes"], [])
+        self.assertEqual(not_built["status"], "not_built")
+        self.assertEqual(not_built["reason"], "analysis_not_built")
+        result = analyze_scope(self.root, "src", "cfg", self.database)
+        self.assertEqual(result["status"], "complete")
+        self.assertIn("src/add.c", result["features"]["cfg"]["materialized"])
+        available = query_analysis(
+            self.root, "cfg", file_path="src/add.c", database=self.database
+        )
+        self.assertEqual(available["status"], "available")
+        self.assertEqual(available["analyzer"], "cfg:c")
         with closing(sqlite3.connect(self.database)) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM analysis_state WHERE feature='cfg:c'"
             ).fetchone()[0]
-        self.assertEqual(count, 0)
+        self.assertEqual(count, 5)
 
     def test_explain_symbol_uses_shared_optional_analysis_surface(self) -> None:
         analyze_scope(self.root, "src", "ast", self.database)

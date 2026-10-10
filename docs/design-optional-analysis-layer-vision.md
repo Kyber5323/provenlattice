@@ -328,7 +328,8 @@ Evidence-enriched Finding
 | L1 Function Structure | ✅ 已实现（口径：AST 层） | `analysis_ast.py`，feature=`ast:python`，contract `python-ast-v1`；真实 CST 全量节点（含函数体）、parent 链可恢复层级 | D2 报告 §9；D2 测试 11/11 |
 | C Function Structure A1 | ✅ 已实现（`.c`/`.h`，normalized AST） | `analysis_c_frontend.py` + `analysis_c_ast.py`，feature=`ast:c`，contract `c-ast-v1`；Tree-sitter kinds 仅保存在 `parser_kind` | C-A1 audit/report + golden tests |
 | L2 Local CFG | ✅ 已实现（口径：statement 级、intraprocedural） | `analysis_cfg.py`，feature=`cfg:python`，contract `python-cfg-v1`；entry/exit/condition/callsite/merge/statement/return/break/continue + next/true/false/back/return/break/continue 边 | D4 报告；D4 测试 12/12 |
-| C CFG | ⬜ 未实现 | C 请求显式 `unsupported/not_implemented`，不返回空 CFG 或 AST fallback | C-ANALYSIS-A1 boundary |
+| C CFG V1 A2 | ✅ 已实现（函数内控制流） | `analysis_c_cfg.py`，feature=`cfg:c`，contract `c-cfg-v1`；构建于 A1 normalized C AST 之上，复用 AnalysisStore/analysis_v1；sequence/if/else/while/do/for/break/continue/return/switch/case/default/fallthrough/goto/implicit exit | C-A2 audit/report + CCFG-01..15 golden tests |
+| 表达式级 short-circuit CFG | ⬜ 未实现（A2 边界） | C 条件作为单一 condition 节点；`&&`/`||`/`?:` 不拆分 | C-ANALYSIS-A2 boundary |
 | 独立缓存 + 失效 | ✅ 已实现（键维度见 §10.2） | `analysis.py`：`file × analyzer` 原子替换、fail-closed freshness、payload 硬上限 | D1 + D3 报告；contract 测试 9/9 |
 | 按需构建（目录级） | ✅ 已实现 | `orchestrator.py` + CLI `analyze <repo> --scope <dir> --features ast,cfg`；feature/scope 校验先于一切 mutation；`cfg→ast` 依赖编排 | D5 报告；CLI 测试 13/13 |
 | 查询接口（function.structure / function.cfg） | ✅ 已实现（命名：`analysis` 查询层） | `analysis_query.py` `query_analysis(feature, file_path / symbol_id)` + CLI `analysis` 命令；六态契约 available/not_built/stale/unsupported/not_available/corrupt | D6 报告；查询测试 12/12 |

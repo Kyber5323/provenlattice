@@ -19,6 +19,7 @@ QUERY_ANALYZERS = {
     ("ast", "python"): "ast:python",
     ("cfg", "python"): "cfg:python",
     ("ast", "c"): "ast:c",
+    ("cfg", "c"): "cfg:c",
 }
 FUNCTION_KINDS = frozenset({
     "function_definition", "async_function_definition", "FUNCTION",
@@ -222,8 +223,6 @@ def _analyzer_for(feature: str, language: str | None) -> tuple[str | None, str |
     analyzer = QUERY_ANALYZERS.get((feature, language))
     if analyzer is not None:
         return analyzer, None
-    if feature == "cfg" and language == "c":
-        return "cfg:c", "not_implemented"
     return (f"{feature}:{language}" if language else None), "unsupported_language"
 
 

@@ -1,0 +1,15 @@
+{
+  "disposition": "PERMANENT_NEGATIVE_RESULT / RETAIN \u2014 never superseded",
+  "evidence_artifact": "D:\\pl-c4-pilot\\formal-readiness-c8b\\funnel\\funnel-gates.json",
+  "evidence_artifact_sha256": "f0885d1643ca88dfa60106c96ec6605bd79146eba8ea3661f409ff55ba0103bb",
+  "experiment_id": "D9-C8-FORMAL",
+  "finding": "Even as a first-class native MCP tool (mcp__provenlattice__query) enumerated in the agent's tools list with connected registration on 36/36 cells, the agent never invoked it: L1-L5 = 0 across both arms.",
+  "ladder": {
+    "C6": "no exposure -> 0 adoption",
+    "C7-B": "one-line pointer -> delivered, 0 action",
+    "C7-D": "structured tool card -> delivered, 0 action",
+    "C8-B": "native MCP tool registration -> visible 36/36, 0 invocation"
+  },
+  "recorded_at": "2026-09-28T00:00:00+00:00",
+  "schema": "d9-c7-c-negative-finding-v1"
+}

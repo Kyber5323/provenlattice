@@ -1,0 +1,32 @@
+{
+  "anti_contamination_scan": {
+    "affordance_note": "the surface describes tool affordances generically; it names no specific symbol, case, subcommand beyond --help, or solution path",
+    "affordance_words_allowed": [
+      "symbols",
+      "relationships",
+      "documents",
+      "code"
+    ],
+    "mandate_hits": [],
+    "mandate_tokens_checked": 9,
+    "scan_input": "discovery text, case-insensitive substring",
+    "specific_guidance_hits": [],
+    "specific_guidance_tokens_checked": 23
+  },
+  "artifact_sha256": "c6ade621587fb4ef2e52cf3cc8af7ce21918be3ff34174ea86ee5297b8e22e0b",
+  "created_at": "2026-09-28T06:18:44.219790+00:00",
+  "discovery_text": "ProvenLattice is available as a repository-analysis tool for understanding unfamiliar codebases. It can help inspect symbols, relationships, relevant code/documents, and other repository structure when that information would help solve the task.\nEntry point: `python -m provenlattice`\nRun `python -m provenlattice --help` to discover its available commands and usage. Use it when useful; it is optional.",
+  "discovery_text_sha256": "fa93ca5e79472229ac575c2ad078dd64d17b0b3d60bfcfe49baf03ab8ab794f0",
+  "experiment_id": "D9-C7-FORMAL",
+  "prohibitions": [
+    "no task-context naming",
+    "no case-specific guidance",
+    "no specific-symbol guidance",
+    "no CFG-specific guidance",
+    "no subcommand guidance beyond --help",
+    "no invocation mandate (explicitly optional)"
+  ],
+  "schema": "d9-c7-c-discovery-surface-v1",
+  "surface_kind": "structured system tool card (affordance description, not invocation mandate)",
+  "transport": "claude CLI --append-system-prompt, byte-identical for arms A and B"
+}

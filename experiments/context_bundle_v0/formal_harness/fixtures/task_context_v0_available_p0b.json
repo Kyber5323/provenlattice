@@ -1,0 +1,54 @@
+{
+  "anchor": "ZSTD_decompressStream",
+  "base_commit": "3128e03be69b9d3db054a3765ae1310c7b3666f6",
+  "candidates": [],
+  "expansion_handles": [
+    {
+      "command": "explain-symbol",
+      "symbol_id": "symbol:09ddaa84ead587b52566294154609ba42b2196d063d4c0649305f0261eda8fd7"
+    }
+  ],
+  "primary_targets": [
+    {
+      "end_line": 354,
+      "evidence_ids": [
+        "E-CODE-825c5761a7ce165c18a6d0ee"
+      ],
+      "fact_id": "symbol:symbol:09ddaa84ead587b52566294154609ba42b2196d063d4c0649305f0261eda8fd7",
+      "file": "lib/zstd.h",
+      "kind": "symbol",
+      "qualified_name": "ZSTD_decompressStream",
+      "start_line": 354,
+      "symbol_id": "symbol:09ddaa84ead587b52566294154609ba42b2196d063d4c0649305f0261eda8fd7"
+    }
+  ],
+  "relations": [],
+  "repository": "repo:c588ae1266f4fd902faee5cf8c5c5c5f0c62fc0f22d55644ba509db31a21c7f9",
+  "source_spans": [
+    {
+      "content": "ZSTDLIB_API size_t ZSTD_decompressStream(ZSTD_DStream* zds, ZSTD_outBuffer* output, ZSTD_inBuffer* input);",
+      "end_byte": 19084,
+      "end_line": 354,
+      "evidence_ids": [
+        "E-CODE-825c5761a7ce165c18a6d0ee"
+      ],
+      "fact_id": "span:3128e03be69b9d3db054a3765ae1310c7b3666f6:lib/zstd.h:18978:19084",
+      "file": "lib/zstd.h",
+      "kind": "span",
+      "start_byte": 18978,
+      "start_line": 354
+    }
+  ],
+  "status": "available",
+  "truncation": {
+    "max_serialized_chars": 6000,
+    "omitted": {
+      "candidates": 0,
+      "primary_targets": 0,
+      "relations": 0,
+      "source_spans": 0
+    },
+    "truncated": false
+  },
+  "version": "task-context-v0"
+}

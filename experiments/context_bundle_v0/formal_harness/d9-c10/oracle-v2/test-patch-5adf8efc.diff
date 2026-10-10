@@ -1,0 +1,200 @@
+diff --git a/tests/Makefile b/tests/Makefile
+index 4eb77fde..3550b7a9 100644
+--- a/tests/Makefile
++++ b/tests/Makefile
+@@ -20,7 +20,7 @@
+ # zstreamtest32: Same as zstreamtest, but forced to compile in 32-bits mode
+ # ##########################################################################
+ 
+-ZSTD_LEGACY_SUPPORT ?= 0
++ZSTD_LEGACY_SUPPORT ?= 5
+ 
+ DEBUGLEVEL ?= 2
+ export DEBUGLEVEL  # transmit value to sub-makefiles
+@@ -33,28 +33,31 @@ PYTHON ?= python3
+ TESTARTEFACT := versionsTest
+ 
+ DEBUGFLAGS += -g -Wno-c++-compat
+-CPPFLAGS   += -I$(LIB_SRCDIR) -I$(LIB_SRCDIR)/common -I$(LIB_SRCDIR)/compress \
++CPPFLAGS   += -I$(LIB_SRCDIR) -I$(LIB_SRCDIR)/common -I$(LIB_SRCDIR)/compress -I$(LIB_SRCDIR)/legacy \
+               -I$(LIB_SRCDIR)/dictBuilder -I$(LIB_SRCDIR)/deprecated -I$(PRGDIR) \
+               -DZSTD_WINDOW_OVERFLOW_CORRECT_FREQUENTLY=1
+ 
+ ZSTDCOMMON_FILES := $(sort $(ZSTD_COMMON_FILES))
+ ZSTDCOMP_FILES   := $(sort $(ZSTD_COMPRESS_FILES))
+ ZSTDDECOMP_FILES := $(sort $(ZSTD_DECOMPRESS_FILES))
+-ZSTD_FILES  := $(ZSTDDECOMP_FILES) $(ZSTDCOMMON_FILES) $(ZSTDCOMP_FILES)
++ZSTDLEGACY_FILES := $(sort $(wildcard $(LIB_SRCDIR)/legacy/*.c))
++ZSTD_FILES  := $(ZSTDDECOMP_FILES) $(ZSTDCOMMON_FILES) $(ZSTDCOMP_FILES) $(ZSTDLEGACY_FILES)
+ ZDICT_FILES := $(sort $(ZSTD_DICTBUILDER_FILES))
+ 
+ ZSTD_F1 := $(sort $(wildcard $(ZSTD_FILES)))
+ ZSTD_OBJ1 := $(subst $(LIB_SRCDIR)/common/,zstdm_,$(ZSTD_F1))
+ ZSTD_OBJ2 := $(subst $(LIB_SRCDIR)/compress/,zstdc_,$(ZSTD_OBJ1))
+ ZSTD_OBJ3 := $(subst $(LIB_SRCDIR)/decompress/,zstdd_,$(ZSTD_OBJ2))
+-ZSTD_OBJ4 := $(ZSTD_OBJ3:.c=.o)
+-ZSTD_OBJECTS := $(ZSTD_OBJ4:.S=.o)
++ZSTD_OBJ4 := $(subst $(LIB_SRCDIR)/legacy/,zstdl_,$(ZSTD_OBJ3))
++ZSTD_OBJ5 := $(ZSTD_OBJ4:.c=.o)
++ZSTD_OBJECTS := $(ZSTD_OBJ5:.S=.o)
+ 
+ ZSTDMT_OBJ1 := $(subst $(LIB_SRCDIR)/common/,zstdmt_m_,$(ZSTD_F1))
+ ZSTDMT_OBJ2 := $(subst $(LIB_SRCDIR)/compress/,zstdmt_c_,$(ZSTDMT_OBJ1))
+ ZSTDMT_OBJ3 := $(subst $(LIB_SRCDIR)/decompress/,zstdmt_d_,$(ZSTDMT_OBJ2))
+-ZSTDMT_OBJ4 := $(ZSTDMT_OBJ3:.c=.o)
+-ZSTDMT_OBJECTS := $(ZSTDMT_OBJ4:.S=.o)
++ZSTDMT_OBJ4 := $(subst $(LIB_SRCDIR)/legacy/,zstdmt_l_,$(ZSTDMT_OBJ3))
++ZSTDMT_OBJ5 := $(ZSTDMT_OBJ4:.c=.o)
++ZSTDMT_OBJECTS := $(ZSTDMT_OBJ5:.S=.o)
+ 
+ # Define *.exe as extension for Windows systems
+ ifneq (,$(filter Windows%,$(OS)))
+@@ -118,6 +121,9 @@ zstdd_%.o : $(LIB_SRCDIR)/decompress/%.c
+ zstdd_%.o : $(LIB_SRCDIR)/decompress/%.S
+ 	$(CC) -c $(CPPFLAGS) $(ASFLAGS) $< -o $@
+ 
++zstdl_%.o : $(LIB_SRCDIR)/legacy/%.c
++	$(CC) -c $(CPPFLAGS) $(CFLAGS) $< -o $@
++
+ zstdmt%.o : CPPFLAGS += $(MULTITHREAD_CPP)
+ 
+ zstdmt_m_%.o : $(LIB_SRCDIR)/common/%.c
+@@ -132,6 +138,9 @@ zstdmt_d_%.o : $(LIB_SRCDIR)/decompress/%.c
+ zstdmt_d_%.o : $(LIB_SRCDIR)/decompress/%.S
+ 	$(CC) -c $(CPPFLAGS) $(ASFLAGS) $< -o $@
+ 
++zstdmt_l_%.o : $(LIB_SRCDIR)/legacy/%.c
++	$(CC) -c $(CPPFLAGS) $(CFLAGS) $< -o $@
++
+ FULLBENCHS := fullbench fullbench32
+ CLEAN += $(FULLBENCHS)
+ fullbench32: CPPFLAGS += -m32
+@@ -222,8 +231,8 @@ CLEAN += invalidDictionaries
+ invalidDictionaries : $(ZSTD_OBJECTS) invalidDictionaries.c
+ 
+ CLEAN += legacy
+-legacy : CPPFLAGS += -I$(LIB_SRCDIR)/legacy -UZSTD_LEGACY_SUPPORT -DZSTD_LEGACY_SUPPORT=4
+-legacy : $(ZSTD_FILES) $(sort $(wildcard $(LIB_SRCDIR)/legacy/*.c)) legacy.c
++legacy : CPPFLAGS += -UZSTD_LEGACY_SUPPORT -DZSTD_LEGACY_SUPPORT=4
++legacy : $(ZSTD_FILES) legacy.c
+ 
+ CLEAN += decodecorpus
+ decodecorpus : LDLIBS += -lm
+diff --git a/tests/golden-decompression-errors/off0.bin.zst b/tests/golden-decompression-errors/off0.bin.zst
+new file mode 100644
+index 00000000..13493fb3
+Binary files /dev/null and b/tests/golden-decompression-errors/off0.bin.zst differ
+diff --git a/tests/playTests.sh b/tests/playTests.sh
+index bf5fba89..a79c06c9 100755
+--- a/tests/playTests.sh
++++ b/tests/playTests.sh
+@@ -234,12 +234,23 @@ unset ZSTD_CLEVEL
+ println "test : compress to stdout"
+ zstd tmp -c > tmpCompressed
+ zstd tmp --stdout > tmpCompressed       # long command format
+-println "test : compress to named file"
++
++println "test : compress to named file (-o)"
+ rm -f tmpCompressed
+ zstd tmp -o tmpCompressed
+ test -f tmpCompressed   # file must be created
++
+ println "test : force write, correct order"
+ zstd tmp -fo tmpCompressed
++
++println "test : -c + -o : last one wins"
++rm -f tmpOut
++zstd tmp -c > tmpCompressed -o tmpOut
++test -f tmpOut   # file must be created
++rm -f tmpCompressed
++zstd tmp -o tmpOut -c > tmpCompressed
++test -f tmpCompressed   # file must be created
++
+ println "test : forgotten argument"
+ cp tmp tmp2
+ zstd tmp2 -fo && die "-o must be followed by filename "
+@@ -326,6 +337,51 @@ if [ "$isWindows" = false ] && [ "$UNAME" != "AIX" ]; then
+   fi
+ fi
+ 
++println "\n===>  multiple_thread test "
++
++datagen > tmp
++println "test : single-thread "
++zstd --fast --single-thread tmp -o tmpMT0
++println "test : one worker thread (default)"
++zstd --fast -T1 tmp -o tmpMT1
++println "test : two worker threads "
++zstd --fast -T2 tmp -o tmpMT2
++println "test : 16-thread "
++zstd --fast -T16 tmp -o tmpMT3
++println "test : 127-thread "
++zstd --fast -T127 tmp -o tmpMT4
++println "test : 128-thread "
++zstd --fast -T128 tmp -o tmpMT5
++println "test : max allowed numeric value is 4294967295 "
++zstd --fast -4294967295 tmp -o tmpMT6
++println "test : numeric value overflows 32-bit unsigned int "
++zstd --fast -4294967296 tmp -o tmptest9 && die "max allowed numeric value is 4294967295"
++
++datagen > tmp
++println "test : basic compression "
++zstd -f tmp  # trivial compression case, creates tmp.zst
++println "test : basic decompression"
++zstd -d -f -T1 tmp.zst
++println "note : decompression does not support -T mode, but execution support"
++rm -rf tmpMT*
++
++println "\n===>  --fast_argument test "
++datagen > tmp
++println "test : basic compression "
++zstd -f tmp  # trivial compression case, creates tmp.zst
++println "test: --fast=1"
++zstd --fast=1 -f tmp
++println "test: --fast=99"
++zstd --fast=99 -f tmp
++println "test: Invalid value -- negative number"
++zstd --fast=-1 -f tmp && die "error: Invalid value -- negative number"
++println "test: Invalid value -- zero"
++zstd --fast=0 -f tmp && die "error: Invalid value -- 0 number"
++println "test: max allowed numeric argument of --fast is 4294967295"
++zstd --fast=4294967295 -f tmp
++println "test: numeric value overflows 32-bit unsigned int "
++zstd --fast=4294967296 -f tmp && die "max allowed argument of --fast is 4294967295"
++
+ println "\n===>  --exclude-compressed flag"
+ rm -rf precompressedFilterTestDir
+ mkdir -p precompressedFilterTestDir
+@@ -394,6 +450,8 @@ println "test: --rm is disabled when output is stdout"
+ test -f tmp
+ zstd --rm tmp -c > $INTOVOID
+ test -f tmp # tmp shall still be there
++zstd --rm tmp --stdout > $INTOVOID
++test -f tmp # tmp shall still be there
+ zstd -f --rm tmp -c > $INTOVOID
+ test -f tmp # tmp shall still be there
+ zstd -f tmp -c > $INTOVOID --rm
+@@ -411,7 +469,22 @@ zstd -f tmp tmp2 -o tmp3.zst --rm # just warns, no prompt
+ test -f tmp
+ test -f tmp2
+ zstd -q tmp tmp2 -o tmp3.zst --rm && die "should refuse to concatenate"
+-
++println "test: --rm is active with -o when single input"
++rm -f tmp2.zst
++zstd --rm tmp2 -o tmp2.zst
++test -f tmp2.zst
++test ! -f tmp2
++println "test: -c followed by -o => -o wins, so --rm remains active" # (#3719)
++rm tmp2.zst
++cp tmp tmp2
++zstd --rm tmp2 -c > $INTOVOID -o tmp2.zst
++test ! -f tmp2
++println "test: -o followed by -c => -c wins, so --rm is disabled" # (#3719)
++rm tmp3.zst
++cp tmp tmp2
++zstd -v --rm tmp2 -o tmp2.zst -c > tmp3.zst
++test -f tmp2
++test -f tmp3.zst
+ println "test : should quietly not remove non-regular file"
+ println hello > tmp
+ zstd tmp -f -o "$DEVDEVICE" 2>tmplog > "$INTOVOID"

@@ -1,0 +1,11 @@
+{
+  "artifact_class": "formal_dispatch_context_freeze_evidence",
+  "attestation_root": "D:\\pl-c4-pilot\\formal-dispatch-attestations",
+  "execution_binding_sha256": "f90c45b62f06905abb2e2d0ccebe72e7bccbe988e068f6b7badf532c56118e31",
+  "experiment_id": "D9-C5-FORMAL",
+  "frozen_at": "2026-09-24T08:06:09.311591+00:00",
+  "launcher_sha256": "9c2f0ba7611362fad5b4287d268374626c0461d277fc48f3d0c624c1b59b6a4e",
+  "required_dispatch_context": "formal-approved",
+  "required_runner_identity": "desktop-u1amjdf\\sunqinghw",
+  "schema": "d9-c6-approved-dispatch-v1"
+}

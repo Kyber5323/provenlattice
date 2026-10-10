@@ -1,0 +1,429 @@
+diff --git a/.github/workflows/dev-long-tests.yml b/.github/workflows/dev-long-tests.yml
+index 21882f02..eb8f40a9 100644
+--- a/.github/workflows/dev-long-tests.yml
++++ b/.github/workflows/dev-long-tests.yml
+@@ -60,14 +60,14 @@ jobs:
+       run: MOREFLAGS="-DZSTD_NO_INTRINSICS" make -C tests fuzztest
+ 
+   tsan-zstreamtest:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: thread sanitizer zstreamtest
+       run: CC=clang ZSTREAM_TESTTIME=-T3mn make tsan-test-zstream
+ 
+   ubsan-zstreamtest:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: undefined behavior sanitizer zstreamtest
+@@ -75,7 +75,7 @@ jobs:
+ 
+   # lasts ~15mn
+   tsan-fuzztest:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: thread sanitizer fuzztest
+@@ -94,7 +94,7 @@ jobs:
+ 
+   # lasts ~23mn
+   gcc-8-asan-ubsan-testzstd:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: gcc-8 + ASan + UBSan + Test Zstd
+@@ -106,14 +106,14 @@ jobs:
+         CC=gcc-8 make -j uasan-test-zstd </dev/null V=1
+ 
+   clang-asan-ubsan-testzstd:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: clang + ASan + UBSan + Test Zstd
+       run: CC=clang make -j uasan-test-zstd </dev/null V=1
+ 
+   gcc-asan-ubsan-testzstd-32bit:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: ASan + UBSan + Test Zstd, 32bit mode
+@@ -127,7 +127,7 @@ jobs:
+     # so any data coming from these libraries is always considered "uninitialized"
+ 
+   gcc-8-asan-ubsan-fuzz:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: gcc-8 + ASan + UBSan + Fuzz Test
+@@ -139,14 +139,14 @@ jobs:
+         CC=gcc-8 FUZZER_FLAGS="--long-tests" make clean uasan-fuzztest
+ 
+   clang-asan-ubsan-fuzz:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: clang + ASan + UBSan + Fuzz Test
+       run: CC=clang FUZZER_FLAGS="--long-tests" make clean uasan-fuzztest
+ 
+   gcc-asan-ubsan-fuzz32:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: ASan + UBSan + Fuzz Test 32bit
+@@ -156,7 +156,7 @@ jobs:
+         CFLAGS="-O3 -m32" FUZZER_FLAGS="--long-tests" make uasan-fuzztest
+ 
+   clang-asan-ubsan-fuzz32:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: clang + ASan + UBSan + Fuzz Test 32bit
+@@ -166,28 +166,28 @@ jobs:
+         CC=clang CFLAGS="-O3 -m32" FUZZER_FLAGS="--long-tests" make uasan-fuzztest
+ 
+   asan-ubsan-regression:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: ASan + UBSan + Regression Test
+       run: make -j uasanregressiontest
+ 
+   clang-ubsan-regression:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: clang + ASan + UBSan + Regression Test
+       run: CC=clang make -j uasanregressiontest
+ 
+   msan-regression:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: MSan + Regression Test
+       run: make -j msanregressiontest
+ 
+   clang-msan-fuzz-unoptimized:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+       - name: clang + MSan + Fuzz Test
+@@ -197,7 +197,7 @@ jobs:
+           CC=clang MOREFLAGS="-O0" make clean msan-fuzztest
+ 
+   clang-msan-fuzz:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: clang + MSan + Fuzz Test
+@@ -208,7 +208,7 @@ jobs:
+ 
+   # lasts ~24mn
+   clang-msan-testzstd:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     steps:
+     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # tag=v4.1.1
+     - name: clang + MSan + Test Zstd
+@@ -269,7 +269,7 @@ jobs:
+ 
+   # lasts ~20mn
+   oss-fuzz:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-20.04
+     strategy:
+       fail-fast: false
+       matrix:
+diff --git a/build/cmake/CMakeLists.txt b/build/cmake/CMakeLists.txt
+index cb8e4de8..399b818f 100644
+--- a/build/cmake/CMakeLists.txt
++++ b/build/cmake/CMakeLists.txt
+@@ -114,10 +114,26 @@ endif ()
+ #-----------------------------------------------------------------------------
+ # External dependencies
+ #-----------------------------------------------------------------------------
++# Define a function to handle special thread settings for HP-UX
++# See https://github.com/facebook/zstd/pull/3862 for details.
++function(setup_hpux_threads)
++    find_package(Threads)
++    if (NOT Threads_FOUND)
++        set(CMAKE_USE_PTHREADS_INIT 1 PARENT_SCOPE)
++        set(CMAKE_THREAD_LIBS_INIT -lpthread PARENT_SCOPE)
++        set(CMAKE_HAVE_THREADS_LIBRARY 1 PARENT_SCOPE)
++        set(Threads_FOUND TRUE PARENT_SCOPE)
++    endif()
++endfunction()
++
+ if (ZSTD_MULTITHREAD_SUPPORT AND UNIX)
+-    set(THREADS_PREFER_PTHREAD_FLAG ON)
+-    find_package(Threads REQUIRED)
+-    if(CMAKE_USE_PTHREADS_INIT)
++    if (CMAKE_SYSTEM_NAME MATCHES "HP-UX")
++        setup_hpux_threads()
++    else()
++        set(THREADS_PREFER_PTHREAD_FLAG ON)
++        find_package(Threads REQUIRED)
++    endif()
++    if (CMAKE_USE_PTHREADS_INIT)
+         set(THREADS_LIBS "${CMAKE_THREAD_LIBS_INIT}")
+     else()
+         message(SEND_ERROR "ZSTD currently does not support thread libraries other than pthreads")
+diff --git a/doc/decompressor_accepted_invalid_data.md b/doc/decompressor_accepted_invalid_data.md
+deleted file mode 100644
+index f08f963d..00000000
+--- a/doc/decompressor_accepted_invalid_data.md
++++ /dev/null
+@@ -1,14 +0,0 @@
+-Decompressor Accepted Invalid Data
+-==================================
+-
+-This document describes the behavior of the reference decompressor in cases
+-where it accepts an invalid frame instead of reporting an error.
+-
+-Zero offsets converted to 1
+----------------------------
+-If a sequence is decoded with `literals_length = 0` and `offset_value = 3`
+-while `Repeated_Offset_1 = 1`, the computed offset will be `0`, which is
+-invalid.
+-
+-The reference decompressor will process this case as if the computed
+-offset was `1`, including inserting `1` into the repeated offset list.
+\ No newline at end of file
+diff --git a/doc/decompressor_permissive.md b/doc/decompressor_permissive.md
+new file mode 100644
+index 00000000..bd77165f
+--- /dev/null
++++ b/doc/decompressor_permissive.md
+@@ -0,0 +1,60 @@
++Decompressor Permissiveness to Invalid Data
++===========================================
++
++This document describes the behavior of the reference decompressor in cases
++where it accepts formally invalid data instead of reporting an error.
++
++While the reference decompressor *must* decode any compliant frame following
++the specification, its ability to detect erroneous data is on a best effort
++basis: the decoder may accept input data that would be formally invalid,
++when it causes no risk to the decoder, and which detection would cost too much
++complexity or speed regression.
++
++In practice, the vast majority of invalid data are detected, if only because
++many corruption events are dangerous for the decoder process (such as
++requesting an out-of-bound memory access) and many more are easy to check.
++
++This document lists a few known cases where invalid data was formerly accepted
++by the decoder, and what has changed since.
++
++
++Offset == 0
++-----------
++
++**Last affected version**: v1.5.5
++
++**Produced by the reference compressor**: No
++
++**Example Frame**: `28b5 2ffd 0000 4500 0008 0002 002f 430b ae`
++
++If a sequence is decoded with `literals_length = 0` and `offset_value = 3`
++while `Repeated_Offset_1 = 1`, the computed offset will be `0`, which is
++invalid.
++
++The reference decompressor up to v1.5.5 processes this case as if the computed
++offset was `1`, including inserting `1` into the repeated offset list.
++This prevents the output buffer from remaining uninitialized, thus denying a
++potential attack vector from an untrusted source.
++However, in the rare case where this scenario would be the outcome of a
++transmission or storage error, the decoder relies on the checksum to detect
++the error.
++
++In newer versions, this case is always detected and reported as a corruption error.
++
++
++Non-zeroes reserved bits
++------------------------
++
++**Last affected version**: v1.5.5
++
++**Produced by the reference compressor**: No
++
++The Sequences section of each block has a header, and one of its elements is a
++byte, which describes the compression mode of each symbol.
++This byte contains 2 reserved bits which must be set to zero.
++
++The reference decompressor up to v1.5.5 just ignores these 2 bits.
++This behavior has no consequence for the rest of the frame decoding process.
++
++In newer versions, the 2 reserved bits are actively checked for value zero,
++and the decoder reports a corruption error if they are not.
+diff --git a/lib/Makefile b/lib/Makefile
+index 754c9096..8bfdade9 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -8,7 +8,7 @@
+ # You may select, at your option, one of the above-listed licenses.
+ # ################################################################
+ 
+-# default target (when runing `make` with no argument)
++# default target (when running `make` with no argument)
+ lib-release:
+ 
+ # Modules
+diff --git a/lib/decompress/zstd_decompress_block.c b/lib/decompress/zstd_decompress_block.c
+index 8d9fea5f..76d7332e 100644
+--- a/lib/decompress/zstd_decompress_block.c
++++ b/lib/decompress/zstd_decompress_block.c
+@@ -1305,7 +1305,7 @@ ZSTD_decodeSequence(seqState_t* seqState, const ZSTD_longOffset_e longOffsets, c
+                 } else {
+                     offset = ofBase + ll0 + BIT_readBitsFast(&seqState->DStream, 1);
+                     {   size_t temp = (offset==3) ? seqState->prevOffset[0] - 1 : seqState->prevOffset[offset];
+-                        temp += !temp;   /* 0 is not valid; input is corrupted; force offset to 1 */
++                        temp -= !temp; /* 0 is not valid: input corrupted => force offset to -1 => corruption detected at execSequence */
+                         if (offset != 1) seqState->prevOffset[2] = seqState->prevOffset[1];
+                         seqState->prevOffset[1] = seqState->prevOffset[0];
+                         seqState->prevOffset[0] = offset = temp;
+diff --git a/lib/legacy/zstd_v02.c b/lib/legacy/zstd_v02.c
+index 80615e55..6d39b6e5 100644
+--- a/lib/legacy/zstd_v02.c
++++ b/lib/legacy/zstd_v02.c
+@@ -862,7 +862,7 @@ extern "C" {
+ *  Streaming functions
+ ***************************************/
+ 
+-typedef struct ZSTD_DCtx_s ZSTD_DCtx;
++typedef struct ZSTDv02_Dctx_s ZSTD_DCtx;
+ 
+ /*
+   Use above functions alternatively.
+@@ -2737,7 +2737,7 @@ static unsigned ZSTD_isError(size_t code) { return ERR_isError(code); }
+ /* *************************************************************
+ *   Decompression section
+ ***************************************************************/
+-struct ZSTD_DCtx_s
++struct ZSTDv02_Dctx_s
+ {
+     U32 LLTable[FSE_DTABLE_SIZE_U32(LLFSELog)];
+     U32 OffTable[FSE_DTABLE_SIZE_U32(OffFSELog)];
+diff --git a/lib/legacy/zstd_v03.c b/lib/legacy/zstd_v03.c
+index 082fe870..47195f33 100644
+--- a/lib/legacy/zstd_v03.c
++++ b/lib/legacy/zstd_v03.c
+@@ -862,7 +862,7 @@ extern "C" {
+ *  Streaming functions
+ ***************************************/
+ 
+-typedef struct ZSTD_DCtx_s ZSTD_DCtx;
++typedef struct ZSTDv03_Dctx_s ZSTD_DCtx;
+ 
+ /*
+   Use above functions alternatively.
+@@ -2377,7 +2377,7 @@ static unsigned ZSTD_isError(size_t code) { return ERR_isError(code); }
+ /* *************************************************************
+ *   Decompression section
+ ***************************************************************/
+-struct ZSTD_DCtx_s
++struct ZSTDv03_Dctx_s
+ {
+     U32 LLTable[FSE_DTABLE_SIZE_U32(LLFSELog)];
+     U32 OffTable[FSE_DTABLE_SIZE_U32(OffFSELog)];
+diff --git a/programs/Makefile b/programs/Makefile
+index 6cd5c1ee..4dcd8410 100644
+--- a/programs/Makefile
++++ b/programs/Makefile
+@@ -15,7 +15,7 @@
+ # zstd-decompress : decompressor-only version of zstd
+ # ##########################################################################
+ 
+-# default target (when runing `make` with no argument)
++# default target (when running `make` with no argument)
+ zstd-release:
+ 
+ LIBZSTD_MK_DIR = ../lib
+diff --git a/programs/fileio_asyncio.c b/programs/fileio_asyncio.c
+index 5f7bd4a4..ae6db69e 100644
+--- a/programs/fileio_asyncio.c
++++ b/programs/fileio_asyncio.c
+@@ -514,8 +514,7 @@ static void AIO_ReadPool_enqueueRead(ReadPoolCtx_t* ctx) {
+ }
+ 
+ static void AIO_ReadPool_startReading(ReadPoolCtx_t* ctx) {
+-    int i;
+-    for (i = 0; i < ctx->base.availableJobsCount; i++) {
++    while(ctx->base.availableJobsCount) {
+         AIO_ReadPool_enqueueRead(ctx);
+     }
+ }
+diff --git a/programs/zstd.1.md b/programs/zstd.1.md
+index c5d0ef70..646e3cf2 100644
+--- a/programs/zstd.1.md
++++ b/programs/zstd.1.md
+@@ -225,15 +225,17 @@ the last one takes effect.
+     This parameter defines a loose target: compressed blocks will target this size "on average", but individual blocks can still be larger or smaller.
+     Enabling this feature can decrease compression speed by up to ~10% at level 1.
+     Higher levels will see smaller relative speed regression, becoming invisible at higher settings.
+-* `-o FILE`:
+-    save result into `FILE`.
+ * `-f`, `--force`:
+     disable input and output checks. Allows overwriting existing files, input
+     from console, output to stdout, operating on links, block devices, etc.
+     During decompression and when the output destination is stdout, pass-through
+     unrecognized formats as-is.
+ * `-c`, `--stdout`:
+-    write to standard output (even if it is the console); keep original files unchanged.
++    write to standard output (even if it is the console); keep original files (disable `--rm`).
++* `-o FILE`:
++    save result into `FILE`.
++    Note that this operation is in conflict with `-c`.
++    If both operations are present on the command line, the last expressed one wins.
+ * `--[no-]sparse`:
+     enable / disable sparse FS support,
+     to make files with many zeroes smaller on disk.
+diff --git a/programs/zstdcli.c b/programs/zstdcli.c
+index 1cb16ef5..9dd6b051 100644
+--- a/programs/zstdcli.c
++++ b/programs/zstdcli.c
+@@ -962,7 +962,7 @@ int main(int argCount, const char* argv[])
+                 if (!strcmp(argument, "--help")) { usageAdvanced(programName); CLEAN_RETURN(0); }
+                 if (!strcmp(argument, "--verbose")) { g_displayLevel++; continue; }
+                 if (!strcmp(argument, "--quiet")) { g_displayLevel--; continue; }
+-                if (!strcmp(argument, "--stdout")) { forceStdout=1; outFileName=stdoutmark; removeSrcFile=0; continue; }
++                if (!strcmp(argument, "--stdout")) { forceStdout=1; outFileName=stdoutmark; continue; }
+                 if (!strcmp(argument, "--ultra")) { ultra=1; continue; }
+                 if (!strcmp(argument, "--check")) { FIO_setChecksumFlag(prefs, 2); continue; }
+                 if (!strcmp(argument, "--no-check")) { FIO_setChecksumFlag(prefs, 0); continue; }
+@@ -1176,7 +1176,10 @@ int main(int argCount, const char* argv[])
+                         operation=zom_decompress; argument++; break;
+ 
+                     /* Force stdout, even if stdout==console */
+-                case 'c': forceStdout=1; outFileName=stdoutmark; removeSrcFile=0; argument++; break;
++                case 'c': forceStdout=1; outFileName=stdoutmark; argument++; break;
++
++                    /* destination file name */
++                case 'o': argument++; NEXT_FIELD(outFileName); break;
+ 
+                     /* do not store filename - gzip compatibility - nothing to do */
+                 case 'n': argument++; break;
+@@ -1202,9 +1205,6 @@ int main(int argCount, const char* argv[])
+                     /* test compressed file */
+                 case 't': operation=zom_test; argument++; break;
+ 
+-                    /* destination file name */
+-                case 'o': argument++; NEXT_FIELD(outFileName); break;
+-
+                     /* limit memory */
+                 case 'M':
+                     argument++;

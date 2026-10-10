@@ -1,0 +1,138 @@
+{
+  "agent_invocation_count": 0,
+  "experiment_id": "D9-C9",
+  "fixtures": {
+    "task_context_v0_available_p0b.json": {
+      "provenance": "verbatim copy of a D9-C9-P0b archived raw tool response",
+      "sha256": "ae9fa4a1a011ad56fae696ae12f810fd1d94c92acba3bed98b3a8039b2c7e076"
+    },
+    "task_context_v0_not_built_p0b.json": {
+      "provenance": "verbatim copy of a D9-C9-P0b archived raw tool response",
+      "sha256": "ac4ecc248d05ce71e0fe38fe03d0f4272b524a5301a7ab2261cf8065aae898fa"
+    },
+    "task_context_v0_not_found_p0b.json": {
+      "provenance": "verbatim copy of a D9-C9-P0b archived raw tool response",
+      "sha256": "83bd289cd27414d94ba7f584a9eb7c002519251fa83bab938dfee12b0283c919"
+    }
+  },
+  "formal_runs": 0,
+  "generated_at": "2026-10-08T03:20:44.082876+00:00",
+  "historical_artifact_integrity": {
+    "c6_cell_records_ok": true,
+    "c6_mapping_ok": true,
+    "c6_packet_files_ok": true,
+    "c6_packet_set_sha256_ok": true,
+    "c6_r1_verdict_set_ok": true,
+    "c6_r2_verdict_set_ok": true,
+    "c6_unseal_analysis_intact": true,
+    "c7b_cell_records_36": true,
+    "c7b_funnel_ok": true,
+    "c7d_cell_records_36": true,
+    "c7d_funnel_ok": true,
+    "c8b_cell_records_36": true,
+    "c8b_funnel_ok": true,
+    "p0_corrected_intact": true,
+    "p0_result_intact": true,
+    "p0b_corrected_intact": true
+  },
+  "historical_verdict_policy": "C6-C8 historical returned_facts=0 are NOT backfilled: those batches had zero task-context invocations (C6) or zero MCP invocations (C7-B/C7-D/C8-B), so their adoption conclusions are unchanged; P0/P0b verdicts remain as recorded",
+  "integrity_all_ok": true,
+  "mismatch_root_cause": "frozen normalize_trace reads payload['facts'] which does not exist in the real runtime payload; fact_ids live inside primary_targets/source_spans/relations/candidates \u2014 hence raw facts > 0 while normalized facts = 0",
+  "new_mapping_rules": {
+    "contract_id": "d9-c9-c1-normalization-v2",
+    "dedup_rule": "first occurrence in the fixed section order wins; all sections where the fact_id appeared are recorded in 'sections'",
+    "implementation": "formal_c9c1.normalize_trace_v2 / extract_task_context_facts_v2",
+    "ingestion_rule": "only dict payloads with version == 'task-context-v0' AND status == 'available' yield facts",
+    "item_rule": "a section item is a fact iff it carries a non-empty string fact_id; items without fact_id are skipped (not facts)",
+    "legacy_strictness": "facts[] items lacking fact_id still raise FormalDataError (backward fail-closed)",
+    "no_id_generation": "no semantic fact_id is ever synthesized; ids are byte-identical to runtime output",
+    "observability_states": [
+      "available_facts_extracted",
+      "status_not_built_no_facts",
+      "status_not_found_no_facts",
+      "status_unavailable_no_facts",
+      "unknown_version_not_ingested",
+      "unparsed_text_result_not_ingested (only for task-context-shaped text)"
+    ],
+    "provenance_per_fact": [
+      "fact_id",
+      "fact_kind (section-derived)",
+      "source_section",
+      "sections",
+      "evidence_ids",
+      "item (verbatim deepcopy)",
+      "payload_provenance (anchor/status/repository/base_commit)",
+      "returned_sequence"
+    ],
+    "sections": [
+      "facts (legacy, precedence)",
+      "primary_targets",
+      "source_spans",
+      "relations",
+      "candidates"
+    ],
+    "shape_compatibility": "returned_facts entries keep {fact_id, payload, returned_sequence}; record-level returned_fact_ids projection unchanged",
+    "wiring": "future formal runners must call normalize_trace_v2; the frozen normalize_trace and all historical runners are untouched (wiring happens with the next batch task)"
+  },
+  "old_normalization_contract": {
+    "function": "formal_harness.normalize_trace (frozen C5-C, qualified by test_formal_harness)",
+    "qualified_against": "synthetic fixtures shaped as {'version': 'task-context-v0', 'facts': [{'fact_id': ...}]}",
+    "rule": "for each tool_result payload dict with version == 'task-context-v0', read ONLY the top-level 'facts' array; raise if a facts item lacks fact_id"
+  },
+  "real_runtime_schema": {
+    "fact_bearing_sections": {
+      "candidates": "empty in P0b fixtures; covered by the same section rule",
+      "primary_targets": {
+        "item_keys": [
+          "end_line",
+          "evidence_ids",
+          "fact_id",
+          "file",
+          "kind",
+          "qualified_name",
+          "start_line",
+          "symbol_id"
+        ]
+      },
+      "relations": "empty in P0b fixtures; covered by the same section rule",
+      "source_spans": {
+        "item_keys": [
+          "content",
+          "end_byte",
+          "end_line",
+          "evidence_ids",
+          "fact_id",
+          "file",
+          "kind",
+          "start_byte",
+          "start_line"
+        ]
+      }
+    },
+    "non_fact_sections": {
+      "expansion_handles": "items carry symbol_id/command only (no fact_id) \u2014 handles for further queries, excluded by rule"
+    },
+    "output_format_note": "task-context emits JSON only with --json; default output is Python repr (P0 finding)",
+    "source": "D9-C9-P0b archived raw tool responses (verbatim fixtures copied into fixtures/)",
+    "status_lifecycle": "not_built (before index) -> not_found (absent symbol) / available (facts present)",
+    "task_context_version": "task-context-v0",
+    "top_level_keys": [
+      "anchor",
+      "base_commit",
+      "candidates",
+      "expansion_handles",
+      "primary_targets",
+      "relations",
+      "repository",
+      "source_spans",
+      "status",
+      "truncation",
+      "version"
+    ]
+  },
+  "regression_results": {
+    "existing_project_tests": "29/29 PASS (test_formal_harness, test_formal_runner_cutover, test_formal_freeze)",
+    "new_schema_tests": "test_formal_c9c1: 9/9 PASS (A legacy, B real available fixture, C not_built, D not_found, E malformed/unparsed + unknown version + unavailable status, F dedup stable, G exact P0b fact-id assertion, legacy strict identity preserved, non-task-context ignored)"
+  },
+  "schema": "d9-c9-c1-normalization-contract-report-v1"
+}

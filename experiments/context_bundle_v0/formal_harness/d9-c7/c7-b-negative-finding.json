@@ -1,0 +1,11 @@
+{
+  "c7a_pointer_text_sha256": "d4cec644c1df7a3be05ddd750bf74822a0ac88d39712888549c3486880767fb8",
+  "detail": "with the C7-A one-line pointer byte-delivered via --append-system-prompt and all four symmetry invariants passing on 36/36 cells, 0/36 agents ran `python -m provenlattice --help` or any ProvenLattice command",
+  "disposition": "PERMANENT_NEGATIVE_RESULT / RETAIN \u2014 never superseded; informs C7-C surface design",
+  "evidence_artifact": "D:\\pl-c4-pilot\\formal-readiness-c7b\\funnel\\funnel-gates.json",
+  "evidence_artifact_sha256": "b55779fdc6ad9acafaf22e4b74fd8b874d0bcdbf0c7c33549565105f852b0a82",
+  "experiment_id": "D9-C7-FORMAL",
+  "finding": "One-line passive pointer = experimentally insufficient discovery surface.",
+  "recorded_at": "2026-09-28T06:18:44.219790+00:00",
+  "schema": "d9-c7-c-negative-finding-v1"
+}

@@ -1,0 +1,152 @@
+{
+  "contract_sha256": "7fda2facee1de99f61950bbeafc53d1d662586eea06615ca34ded6eac9bed47e",
+  "experiment_id": "D9-C8-FORMAL",
+  "feasibility": {
+    "finding": "the real native registration entry on this execution path is MCP over stdio, loaded per-invocation via --mcp-config with --strict-mcp-config (verified by probe, not assumed); skills/slash-commands are prompt-templates, not tools; no simulated registry is introduced",
+    "investigation_order": [
+      "native tool registration / tool schema",
+      "MCP",
+      "skill/plugin surface"
+    ],
+    "probe_evidence": {
+      "environment": {
+        "claude_code_version": "2.1.280",
+        "model": "deepseek-v4-flash",
+        "permission_flag_in_formal_runner": "--dangerously-skip-permissions",
+        "transport": "stdio MCP via --mcp-config + --strict-mcp-config"
+      },
+      "files": {
+        "mcp.json": {
+          "label": "PROBE / NOT_FORMAL_EVIDENCE",
+          "sha256": "9825322f93d3d60e82e12994bdce16ac56023d6e07ce0755f3434c1ac8a1a824"
+        },
+        "probe-stream.jsonl": {
+          "label": "PROBE / NOT_FORMAL_EVIDENCE",
+          "sha256": "8decf8fadc6f0ca08cdb699c12b15404750d1ff5d1ee43f5bfb91c360249c51d"
+        },
+        "probe-stream2.jsonl": {
+          "label": "PROBE / NOT_FORMAL_EVIDENCE",
+          "sha256": "471289f8cd4f6c5cb5d039419b700a2d2d26918a2d84e70e3387f70107bea15d"
+        },
+        "probe_server.py": {
+          "label": "PROBE / NOT_FORMAL_EVIDENCE",
+          "sha256": "c33fc852436e1604a8f47cc366bea17a6b706ba046d49bc62c41110a73e634e5"
+        }
+      },
+      "label": "PROBE / NOT_FORMAL_EVIDENCE \u2014 feasibility probe outside all formal namespaces",
+      "probe_server": "generic repo_probe_ping tool (no ProvenLattice content, no task-context)",
+      "verified": [
+        "init event mcp_servers: [{name: repo-probe, status: connected, source: dynamic}]",
+        "init event tools list contains the MCP tool (mcp__repo-probe__repo_probe_ping) \u2014 native enumeration",
+        "model (deepseek-v4-flash) spontaneously emitted tool_use for the MCP tool",
+        "under --dangerously-skip-permissions (the formal runner flag) the call executed end-to-end: PONG:BANANA42 returned and reported"
+      ]
+    },
+    "state": "NATIVE_EXPOSURE_CONFIRMED"
+  },
+  "frozen_at": "2026-09-28T09:20:14.612455+00:00",
+  "funnel_levels": {
+    "L0_native_tool_visible": "runtime/registration evidence from the stream init event: mcp_servers contains the provenlattice server with status connected AND the tools enumeration contains mcp__provenlattice__query; NEVER proven by prompt tokens or process exit success",
+    "L1_discovery_action": ">=1 tool_use of mcp__provenlattice__query whose input.command is `--help` (or -h) \u2014 the agent actively probes the capability surface",
+    "L2_tool_invoked": ">=1 tool_use of mcp__provenlattice__query with any input",
+    "L3_task_context_requested": ">=1 such tool_use whose input.command is `task-context`",
+    "L4_facts_returned": "returned_facts >= 1 extracted by the frozen normalize_trace from a task-context-v0 payload in the tool result",
+    "L5_facts_used_proxy": "preregistered PROXY (never causal evidence): the symbol token (last `:`-segment of a returned fact_id) appears in the final patch text or in a later tool_use input after the first task-context-v0 result"
+  },
+  "gates": {
+    "GATE_CAPABILITY_REACHABLE": "B L4 >= 1 -> CAPABILITY_REACHABLE; else CAPABILITY_INCONCLUSIVE",
+    "GATE_DISCOVERY": "B (L1 >= 1 or L2 >= 1); both 0 -> NATIVE_TOOL_VISIBLE_BUT_NO_DISCOVERY_ACTION",
+    "GATE_NATIVE_REGISTRATION": "L0 == 36/36; any miss invalidates the batch for exposure analysis",
+    "GATE_SELECTION": "if discovery and B L3 == 0 -> ADOPTION_GAP_AT_SELECTION"
+  },
+  "immutability": {
+    "c6": {
+      "packet_set_sha256": "826d9fe7bb05f4ecf4696ece9cf70720f140203381098018775be1d93b202b14",
+      "r1_verdict_set_sha256": "9c79c810594c187da0e24073d5ab118166769a05f418246c35fa5c61f522cd8e",
+      "r2_verdict_set_sha256": "28a2293477caa0bafad210a7735e16f3198b611a1f49ba81303658ff2f9f8e69",
+      "sealed_mapping_sha256": "ebd6f6ba67c79b57e0c7c0c7f92f8a2a49a3e2cbaafb11fac8d315a2a03dd3b9"
+    },
+    "c7a_contract_sha256": "9a8d3d3893bafa18fc3bd733e2dfca71102138d6779f62d14de3edc26945ffb0",
+    "c7b_finding_sha256": "de6550780f9402ce41b43bf05decfa2ac7018e3b7650f2465b47f115f2ac3f0d",
+    "c7c_contract_sha256": "35165db62c83c6f94e8a4f969bb72f1d4032b49302e725219fc3a7f5cf568164",
+    "c7d_finding_sha256": "8902a2ec8f96338478df828fb18015b704763949d30c3444fa76c3ecb9562572",
+    "note": "all C6/C7 evidence remains immutable; C8 is an independent new batch"
+  },
+  "mechanism": {
+    "agent_visible_tool": "mcp__provenlattice__query",
+    "arm_env_bindings": {
+      "A": {
+        "PYTHONPATH": "D:\\pl-c4-pilot\\pl-arm-a\\src",
+        "runtime_sha": "cf323c5c6128725f942520a8445a41ab7897213f"
+      },
+      "B": {
+        "PYTHONPATH": "D:\\pl-c4-pilot\\pl-arm-b\\src",
+        "runtime_sha": "e385681146f9d70b08466093060b8cc8204c65a8"
+      }
+    },
+    "arm_treatment_flow": "the MCP server child process runs with PYTHONPATH bound to the arm runtime src dir; tool schema/visibility is byte-identical across arms and the ONLY treatment difference remains the runtime inventory",
+    "mcp_config_shape": {
+      "mcpServers": {
+        "provenlattice": {
+          "args": [
+            "<provenlattice_mcp_server.py>"
+          ],
+          "command": "<python executable>",
+          "env": {
+            "PYTHONPATH": "<arm runtime src dir>"
+          }
+        }
+      }
+    },
+    "server_name": "provenlattice",
+    "single_tool_design": "one generic tool wrapping `python -m provenlattice <command> <args...>`; capabilities are discovered through the tool itself (e.g. command `--help`); task-context is NOT separately registered or named",
+    "tool_entry_frozen_bytes": {
+      "description": "Query repository structure and relationships.",
+      "inputSchema": {
+        "properties": {
+          "args": {
+            "description": "Additional arguments passed through to the command",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "description": "ProvenLattice command to run, or `--help` to discover available commands",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "name": "query"
+    },
+    "tool_entry_sha256": "8f032b61402d43f04d3b2e0cbdb4afc6042c365ed5c4bb11831e40b59b2ad2bf",
+    "tool_name": "query",
+    "transport": "claude -p --mcp-config <config> --strict-mcp-config (per-invocation; no global config writes)"
+  },
+  "non_goals": [
+    "no adapter implementation in this step",
+    "no tool registration beyond the probe",
+    "no new 36-run",
+    "no task-context naming in the schema",
+    "no case-specific guidance",
+    "no fallback to system-prompt strengthening"
+  ],
+  "pre_batch_gates_for_c8b": {
+    "GATE_ADAPTER_PASSTHROUGH": "adapter returns the CLI's raw stdout as the text content without wrapping, so normalization stays byte-faithful",
+    "GATE_ADAPTER_TOOLS_LIST_BYTE_IDENTITY": "the adapter's tools/list response must equal tool_entry_frozen_bytes",
+    "GATE_MCP_INIT_CONNECTED": "init event mcp_servers contains the provenlattice server with status connected",
+    "GATE_NATIVE_TOOL_IN_ENUMERATION": "init event tools list contains mcp__provenlattice__query",
+    "GATE_NO_SYSTEM_PROMPT_SURFACE": "invocation argv contains no --append-system-prompt"
+  },
+  "purpose": "freeze the native tool exposure mechanism that turns ProvenLattice from a prompt-mentioned CLI into an agent-enumerable tool capability, replacing the passive system-prompt route closed by C7-D",
+  "reporting_order": "funnel counts and gate states frozen BEFORE any blind review; review begins only if CAPABILITY_REACHABLE",
+  "schema": "d9-c8-a-native-tool-exposure-contract-v1",
+  "single_variable_declaration": {
+    "attribution_rule": "no system-prompt tool mention may coexist with the MCP surface, otherwise discovery could be attributed to the card",
+    "vs_c7d": "the C7-A/C7-C system-prompt surface (--append-system-prompt) is REMOVED entirely; the only variable is the exposure mechanism swap: system-prompt card OUT, native MCP tool IN; manifest cells, prompts, base commits, inventories, binding, workspace lifecycle, runner, model, review protocol all unchanged"
+  }
+}

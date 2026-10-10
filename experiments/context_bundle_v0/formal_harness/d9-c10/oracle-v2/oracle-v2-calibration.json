@@ -1,0 +1,32 @@
+{
+  "schema": "d9-c10-b2-oracle-v2-calibration-v1",
+  "oracle_impl_sha256": "59765010c0f507a7c015176e415c4b7aaf19acdda049659d6e447320a1380338",
+  "test_patch_sha256": "23a3ee823d57da1a46c673a6d1cf7d422e6959682413711e000983751c60ac0b",
+  "gold_diff": {
+    "path": "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\context_bundle_v0\\formal_harness\\d9-c10\\oracle-v2\\case1-gold.diff",
+    "sha256": "041dc4ce0076ee5578d96718ef6bc3b724ceab3ed8b0f257e2ccdc86845b8645",
+    "bytes": 29785,
+    "visibility": "harness-only; removed from Agent reach; audit token registered"
+  },
+  "baseline": {
+    "repo": "D:\\pl-c10-sealed\\calibration\\sealed-base",
+    "class_v2": "BUG_PRESENT",
+    "legacy_class": "BUILD_FAILURE",
+    "fuzzer_build_exit": 1,
+    "fuzzer_build_tail": ""
+  },
+  "knownfix_gold_apply_rc": 0,
+  "knownfix": {
+    "repo": "D:\\pl-c10-sealed\\calibration\\sealed-knownfix",
+    "class_v2": "FIX_PRESENT",
+    "legacy_class": "PASS",
+    "fuzzer_build_exit": 0,
+    "fuzzer_run_exit": 0
+  },
+  "calibration_gate": {
+    "baseline_bug_present": true,
+    "knownfix_fix_present": true
+  },
+  "baseline_snapshot_restored": true,
+  "knownfix_repo_destroyed_after_calibration": true
+}

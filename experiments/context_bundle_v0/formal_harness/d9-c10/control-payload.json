@@ -1,0 +1,17 @@
+{
+  "schema": "d9-c10-control-payload-v1",
+  "experiment_id": "D9-C10-CONTROLLED_CAPABILITY",
+  "label": "DIAGNOSTIC-FREEZE / deterministic placebo response for Arm A",
+  "payload": {
+    "version": "task-context-v0",
+    "status": "control_no_facts",
+    "control": true,
+    "anchor": null,
+    "notice": "Repository-analysis facts are not available in this session. Continue the task with your own analysis."
+  },
+  "serialization_rule": "the adapter serves json.dumps(payload, sort_keys=True) byte-identically; anchor is the request's positional symbol echoed back (deterministic function of the request), or null",
+  "payload_sha256_note": "serialized-form digest (anchor=null variant) is recorded in the C10-A protocol",
+  "prohibitions": ["no symbol/span/relation/candidate sections", "no fact_id fields",
+                   "no case-specific content", "no oracle hints", "no random text",
+                   "not an error/not_found — the Agent can continue the task"]
+}

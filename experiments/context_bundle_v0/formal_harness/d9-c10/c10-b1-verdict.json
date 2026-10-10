@@ -1,0 +1,72 @@
+{
+  "agent_coding_runs": 0,
+  "blocked_reason": "the frozen 6-case universe's clone contains its own upstream future; the fix commits are mechanically discoverable (one git log grep on the function name named in the task) and the exposure cannot be closed without pruning frozen historical worktrees or changing the frozen workspace model \u2014 both outside the C10-B1 amendment boundary",
+  "components": {
+    "existing_regression_suite": "45/45 PASS",
+    "historical_integrity": {
+      "C6/C7-B/C7-D/C8-B/C8-A/C9-C1/C10-A": "unchanged (digest-verified during C10-B gate and B1)",
+      "P0/P0b/C9-C2": "quarantined during C10-B, restored intact (verdicts re-verified)",
+      "P1_PROTOCOL_FAIL": "preserved verbatim (never overwritten)",
+      "cell_A_outcome": "observation record",
+      "cell_B_outcome": "INVALID_MEMORY_CONTAMINATED (preserved)"
+    },
+    "memory_isolation_contract_v2": {
+      "artifact": "memory-isolation-contract-v2.json",
+      "evidence": {
+        "per_arm_HOME_USERPROFILE_TMP_TEMP": "p1-arms/arm-{A,B}/ home+tmp, disjoint by path",
+        "runtime_resolution_probes": "2 minimal READY-probes (non-coding): memory_paths.auto resolved into each arm's own home (.claude/projects/...)",
+        "sentinel_cross_visibility": "A->B 0, B->A 0"
+      },
+      "verdict": "PASS"
+    },
+    "oracle_v2": {
+      "baseline_discrimination": "BUG_PRESENT confirmed on pristine base (fuzz-build fails: implicit declaration of ZSTD_decodingBufferSize_min)",
+      "known_fix_calibration": "NOT RUN (blocked by leakage verdict before cell-equivalent gold calibration was needed)",
+      "prior_evidence": "C10-B cell addenda already showed FIX_PRESENT on both arm worktrees",
+      "status": "partially calibrated, recorded for future use"
+    },
+    "solution_leakage_audit": {
+      "mitigation_attempted": {
+        "action": "all 124 refs hidden (update-ref -d) + packed-refs/logs/FETCH_HEAD quarantined; reversible, map recorded in git-refs-hidden.json",
+        "artifact": "solution-leakage-audit-post.json",
+        "result": "git log --all STILL exposes 10,494 commits including the fix \u2014 modern git --all includes OTHER WORKTREES' HEADs, and the C6/C7/C8 frozen worktrees (read-only historical artifacts) have HEADs whose ancestry crosses the #836 fix (later-case bases descend from it)"
+      },
+      "pre_mitigation": {
+        "artifact": "solution-leakage-audit-pre.json",
+        "mechanical_path": "git log --all --grep=ZSTD_decodingBufferSize_min -> 2 commits (058ed2ad, b3f33ccf) -> git show -> complete 32,487-byte upstream patch including lib/ changes"
+      },
+      "refs_restored_after_attempt": "124 refs re-created, HEAD back to refs/heads/dev (verified)",
+      "un_closable_reason": "closing it requires pruning frozen historical worktree registrations or replacing the frozen worktree workspace model with per-arm fresh clones \u2014 both are outside the C10-B1 amendment boundary (isolation plumbing + oracle measurement only)",
+      "verdict": "FAIL -> SOLUTION_LEAKAGE_BLOCKED"
+    },
+    "treatment_protocol_unchanged": true
+  },
+  "generated_at": "2026-10-08T07:07:07.705217+00:00",
+  "label": "P1 PRIME VALIDITY AMENDMENT / NOT_FORMAL_EVIDENCE",
+  "probe_id": "D9-C10-B1",
+  "readiness_checks": {
+    "R10_normalization_v2_unchanged": "PASS",
+    "R11_existing_regression": "PASS 45/45",
+    "R1_historical_integrity": "PASS",
+    "R2_memory_roots_disjoint": "PASS",
+    "R3_cross_arm_sentinel_leakage": "PASS (0/0)",
+    "R4_fresh_session_config_identities": "PASS (runtime-proven per-arm homes)",
+    "R5_solution_leakage_audit": "FAIL -> BLOCKED",
+    "R6_oracle_v2_baseline_BUG_PRESENT": "CONFIRMED (via C10-B addendum)",
+    "R7_oracle_v2_known_fix_FIX_PRESENT": "evidence exists (C10-B addendum); formal calibration deferred",
+    "R8_oracle_A_B_identical": "PASS (single implementation by design)",
+    "R9_treatment_control_contract_unchanged": "PASS"
+  },
+  "restored_state": {
+    "claude_memory": "original C9-era memory restored to live path; Arm-A-written P1 memory preserved as p1-arm-memory-evidence/",
+    "git_refs": "124 restored, HEAD = refs/heads/dev (verified)",
+    "quarantine_root": "empty after restore (git artifacts restored, test patch remains as oracle input)"
+  },
+  "schema": "d9-c10-b1-verdict-v1",
+  "unblock_options_requiring_user_decision": [
+    "new frozen case universe whose upstream fixes are NOT present in the agent-visible clone (requires new case selection + new base commits + new oracle inputs)",
+    "accept outcome saturation as a known ceiling and redesign C10 primary outcome around measurement signals other than task correctness (e.g., trajectory efficiency with facts vs without, preregistered)",
+    "a sanctioned one-time workspace-model amendment (per-arm fresh clones with filtered refs) \u2014 protocol drift, requires explicit re-freeze of workspace semantics"
+  ],
+  "verdict": "BLOCKED_SOLUTION_LEAKAGE"
+}

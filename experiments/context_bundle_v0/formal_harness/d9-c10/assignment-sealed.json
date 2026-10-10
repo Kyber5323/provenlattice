@@ -1,0 +1,12 @@
+{
+  "arm_assignment": {
+    "A": "control",
+    "B": "bridge"
+  },
+  "assignment_sha256": "c2a2feeeb19f165a7c4fb83b02a43a274535a834f208d157e66e2f2ed4d00220",
+  "experiment_id": "D9-C10-FORMAL",
+  "frozen_at": "2026-10-08T03:50:46.458585+00:00",
+  "rationale": "B = task-context treatment arm, consistent with D9-C5..C9 semantics",
+  "reviewer_visibility": "NEVER (packets blinded per frozen C6 machinery)",
+  "schema": "d9-c10-assignment-sealed-v1"
+}

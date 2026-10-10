@@ -1,0 +1,22 @@
+{
+  "anti_contamination_scan": {
+    "hits": [],
+    "scan_input": "exposure text, case-insensitive substring",
+    "tokens_checked": 25
+  },
+  "artifact_sha256": "ebb6a001271442cdc0057a50a59b5146e02aac8d37b8595491942c1969256943",
+  "created_at": "2026-09-28T03:13:35.926126+00:00",
+  "experiment_id": "D9-C7-FORMAL",
+  "exposure_text": "ProvenLattice repository-analysis CLI is available via `python -m provenlattice`. Use `--help` to discover available commands when repository analysis would help the task.",
+  "exposure_text_sha256": "d4cec644c1df7a3be05ddd750bf74822a0ac88d39712888549c3486880767fb8",
+  "language": "single identical byte sequence for both arms",
+  "prohibitions": [
+    "no case-specific guidance",
+    "no symbol-specific guidance",
+    "no CFG-specific guidance",
+    "no task-context-specific guidance",
+    "no mandatory invocation",
+    "no repository name hardcoding"
+  ],
+  "schema": "d9-c7-exposure-pointer-v1"
+}

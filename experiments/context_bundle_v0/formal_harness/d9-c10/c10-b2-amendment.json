@@ -1,0 +1,138 @@
+{
+  "amendment_ledger": {
+    "C10-A_original_protocol": {
+      "sha256": "066d06160eb4a04d90ba6e45329ad167fae4c1289bc259b6622bdf52729a0359",
+      "status": "frozen, unchanged"
+    },
+    "C10-B2_workspace_amendment": {
+      "execution_boundary": "icacls deny (OI)(CI)(F) on every sensitive child of D:\\pl-c4-pilot for the runner user SID + ambient zstd claude project dir; applied per agent-run window, removed after; verified 5/5 read-denied",
+      "network_closure": "HTTPS_PROXY/HTTP_PROXY/ALL_PROXY -> dead local proxy; NO_PROXY -> ANTHROPIC gateway host (model traffic unaffected); GIT_CONFIG_COUNT injection protocol.allow=never; claude --disallowed-tools WebFetch,WebSearch; hosts-file block unavailable (non-admin) \u2014 recorded",
+      "runtime_copies": "pl-arm-{a,b}/src copied into the sealed root (outside denied trees); digests recorded",
+      "sealed_standalone_repository": {
+        "construction": "git init -> pack-objects transfer of [base commit + complete base-tree closure] -> index-pack -> replace --graft (no parents) -> master = original frozen base SHA -> checkout",
+        "identity": "original frozen base commit SHA preserved",
+        "no_alternates": true,
+        "no_descendant_commits": true,
+        "no_remotes": true,
+        "no_shared_object_store": true,
+        "reflog_empty": true
+      }
+    },
+    "C10-B_validity_findings": {
+      "b1_leakage_verdict": "BLOCKED_SOLUTION_LEAKAGE (preserved; superseded by this amendment's sealed workspace model)",
+      "cross_arm_memory_contamination": "fixed by memory-isolation-v2 (per-arm HOME)",
+      "frozen_evaluator_exit_code_bug": "documented; v2 oracle uses PIPESTATUS",
+      "non_discriminative_playTests_oracle": "fixed by C10_ORACLE_CONTRACT_V2 (fuzz-build discrimination)",
+      "p1_verdict": "P1_PROTOCOL_FAIL (preserved)"
+    },
+    "c10_original_P1_inference_status": "C10-B original P1 = INVALID for capability inference (cross-arm memory contamination); preserved",
+    "effective_protocol_v2": "C10-A semantics + sealed workspace + per-arm home isolation + network closure + oracle-v2 primary \u2014 everything else unchanged",
+    "unchanged_list": [
+      "six-case universe",
+      "frozen base commits",
+      "task prompts",
+      "required-use instruction",
+      "A/B assignment",
+      "control payload",
+      "treatment payload",
+      "MCP tool/schema",
+      "normalization-v2",
+      "model/config",
+      "retry policy",
+      "correctness primary outcome"
+    ]
+  },
+  "evidence": {
+    "r10": {
+      "baseline_class_v2": "BUG_PRESENT"
+    },
+    "r11": {
+      "knownfix_class_v2": "FIX_PRESENT",
+      "knownfix_fuzz_exit": 0,
+      "knownfix_repo_destroyed": true
+    },
+    "r12": {
+      "control_payload_sha": true,
+      "instruction_sha": true,
+      "mcp_tool_schema": true
+    },
+    "r13": {
+      "c9c1_tests_ok": true
+    },
+    "r14": {
+      "count": "OK",
+      "ok": true
+    },
+    "r2": {
+      "no_shared_object_store": true,
+      "object_transfer_only_base_closure": true
+    },
+    "r3": {
+      "known_fix_shas_unavailable": true,
+      "show_fix_tip_failed": true
+    },
+    "r4": {
+      "log_all_commits": 2,
+      "log_all_grep_hits": []
+    },
+    "r5": {
+      "all_denied": true
+    },
+    "r6": {
+      "dead_proxy_blocks_curl_github": true,
+      "disallowed_tools_planned": [
+        "WebFetch",
+        "WebSearch"
+      ],
+      "git_protocol_block": true,
+      "hosts_block_unavailable_non_admin": false
+    },
+    "r7": {
+      "file_content_mismatches_vs_reference_checkout": 0,
+      "head_tree_identity": "b06adb13c47a6ea232de32f360409ad1e64abe2e"
+    },
+    "r8": {
+      "arm_fixture_construction_digests": {
+        "A": "7ef89b88eb88e818a56cfab1",
+        "B": "7ef89b88eb88e818a56cfab1"
+      },
+      "equal": true
+    },
+    "r9": {
+      "memory_isolation_v2_verdict": "PASS",
+      "sentinel_cross_visibility": {
+        "a_sentinel": "C10_ARM_A_MEMORY_SENTINEL",
+        "a_visible_sentinel_count": 0,
+        "b_sentinel": "C10_ARM_B_MEMORY_SENTINEL",
+        "b_visible_sentinel_count": 0
+      }
+    }
+  },
+  "experiment_namespace": "D9-C10-CONTROLLED_CAPABILITY",
+  "final_verdict": "PASS / READY_FOR_P1_PRIME",
+  "generated_at": "2026-10-08T07:38:11.187537+00:00",
+  "p1_prime_execution_requirements": [
+    "runner re-applies ACL denies before each agent window and removes after",
+    "runner re-applies dead-proxy env + GIT_CONFIG injection + --disallowed-tools per cell",
+    "runner quarantines %TEMP% pl-*/zstd-* per cell window",
+    "runner builds a fresh sealed repo per cell (never reuses)",
+    "post-run access audit tokens on every raw trace"
+  ],
+  "readiness_checks": {
+    "R10_oracle_v2_baseline_bug_present": true,
+    "R11_oracle_v2_known_fix_fix_present": true,
+    "R12_treatment_control_contract_unchanged": true,
+    "R13_normalization_v2_unchanged": true,
+    "R14_existing_regression_suite": true,
+    "R1_historical_integrity": true,
+    "R2_no_shared_git_object_store": true,
+    "R3_known_fix_commits_inaccessible": true,
+    "R4_git_log_leakage_regression": true,
+    "R5_original_clone_and_worktrees_inaccessible": true,
+    "R6_external_solution_retrieval_unavailable": true,
+    "R7_base_tree_fidelity": true,
+    "R8_ab_workspace_symmetry": true,
+    "R9_memory_isolation_v2": true
+  },
+  "schema": "d9-c10-b2-workspace-amendment-v1"
+}

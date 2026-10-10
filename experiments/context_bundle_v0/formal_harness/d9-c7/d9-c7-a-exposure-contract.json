@@ -1,0 +1,85 @@
+{
+  "adoption_funnel": {
+    "L1_CLI_discovered": ">=1 Bash tool_use command containing `python -m provenlattice` together with `--help` or `-h`",
+    "L2_CLI_invoked": ">=1 Bash tool_use command containing `python -m provenlattice` (any arguments)",
+    "L3_task_context_requested": ">=1 such command whose arguments include the `task-context` subcommand",
+    "L4_facts_returned": "returned_facts >= 1 extracted by the frozen normalize_trace from a task-context-v0 payload",
+    "L5_facts_used": "preregistered proxy: the symbol token (last `:`-segment of a returned fact_id) appears in the final patch text or in a tool_use command issued after the first task-context-v0 tool_result",
+    "note": "recorded per cell from frozen normalized traces + records; identical detectors for both arms; L3/L4 are impossible on arm A by inventory and their absence there is expected, not a failure"
+  },
+  "basis_frozen_from_d9_c6": {
+    "binding_sha256": "f90c45b62f06905abb2e2d0ccebe72e7bccbe988e068f6b7badf532c56118e31",
+    "cases": [
+      "Multi-SWE-Bench__c__maintenance__bugfix__21d59e43",
+      "Multi-SWE-Bench__c__maintenance__bugfix__2b5e5e23",
+      "Multi-SWE-Bench__c__maintenance__bugfix__5adf8efc",
+      "Multi-SWE-Bench__c__maintenance__bugfix__616889c2",
+      "Multi-SWE-Bench__c__maintenance__bugfix__9a7be8ba",
+      "Multi-SWE-Bench__c__maintenance__bugfix__a47dfbbf"
+    ],
+    "manifest_sha256": "3916b3c78c79a5ac491f33182bed57cf44f749db533a75097bbb6517fd367bea",
+    "prompt_arm_independent_verified": true,
+    "prompt_config_sha256": {
+      "Multi-SWE-Bench__c__maintenance__bugfix__21d59e43": "cad6a01645cf1a91792db171b2da85080336a631a8677e664839eb213b57e420",
+      "Multi-SWE-Bench__c__maintenance__bugfix__2b5e5e23": "eeca1453a529f29ef8df1c5889997dff82fd898428e4bb02f2b2c802bbd953f5",
+      "Multi-SWE-Bench__c__maintenance__bugfix__5adf8efc": "4031103d349ebec9c152467b16a7384fb580baf35e8c3eedf49104eeb03b0248",
+      "Multi-SWE-Bench__c__maintenance__bugfix__616889c2": "cf655f04d6461248f407ce823ce8d27d5aa17d6bc6d0aed293e9b4613d54a572",
+      "Multi-SWE-Bench__c__maintenance__bugfix__9a7be8ba": "9ae49e3c80bc22a91620edbb5dffe0a991c9eda895896ef09d8f3a177d48fbfa",
+      "Multi-SWE-Bench__c__maintenance__bugfix__a47dfbbf": "7dc4c4e5f873234a4c407253477efc2b39751b5a45f8f8ea706bd72f84b5b08c"
+    },
+    "runtime_sha": {
+      "A": "cf323c5c6128725f942520a8445a41ab7897213f",
+      "B": "e385681146f9d70b08466093060b8cc8204c65a8"
+    }
+  },
+  "change_scope": "exposure pointer is the ONLY variable added on top of the frozen D9-C6 protocol (same manifest cells, same problem_statement bytes, same frozen base commits, same inventories/runtimes, same runner lifecycle, same blinded review protocol); fresh workspaces are materialized by the frozen prepare lifecycle; D9-C6 post-run worktrees are never reused",
+  "contract_sha256": "9a8d3d3893bafa18fc3bd733e2dfca71102138d6779f62d14de3edc26945ffb0",
+  "experiment_id": "D9-C7-FORMAL",
+  "exposure_gates": {
+    "GATE_CAPABILITY_REACHABLE": "capability conclusions require >= 1 B cell with L4; with 0 the batch must conclude capability INCONCLUSIVE regardless of outcome delta",
+    "GATE_EXPOSURE_L2": "B cells with L2 >= 1, else EXPOSURE_FAILED_AT_DISCOVERY",
+    "GATE_EXPOSURE_L3": "if L2 >= 1 and B cells with L3 == 0, then ADOPTION_GAP_AT_SELECTION",
+    "purpose": "no repeat of D9-C6 where returned_facts=0 was only explained after unseal; exposure status is now a first-class early result",
+    "reporting_order": "funnel counts and gate states are computed from execution records and reported BEFORE the blind review phase begins; outcome unblinding happens only after the review freeze"
+  },
+  "exposure_pointer": {
+    "artifact": "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\context_bundle_v0\\formal_harness\\d9-c7\\exposure-pointer.json",
+    "artifact_sha256": "ebb6a001271442cdc0057a50a59b5146e02aac8d37b8595491942c1969256943",
+    "text": "ProvenLattice repository-analysis CLI is available via `python -m provenlattice`. Use `--help` to discover available commands when repository analysis would help the task.",
+    "text_sha256": "d4cec644c1df7a3be05ddd750bf74822a0ac88d39712888549c3486880767fb8"
+  },
+  "frozen_at": "2026-09-28T03:13:35.926126+00:00",
+  "mechanism": {
+    "applied_identically_to": [
+      "A",
+      "B"
+    ],
+    "argv_appendment": [
+      "--append-system-prompt",
+      "ProvenLattice repository-analysis CLI is available via `python -m provenlattice`. Use `--help` to discover available commands when repository analysis would help the task."
+    ],
+    "forbidden": [
+      "naming task-context or any specific subcommand beyond --help",
+      "instructing or encouraging invocation of any specific command",
+      "arm-differentiated exposure text"
+    ],
+    "precedent": "pilot_runner.py (PILOT_ONLY) already exercised this flag on claude 2.1.280",
+    "transport": "claude CLI --append-system-prompt"
+  },
+  "non_goals": [
+    "no agent runs",
+    "no new formal cells",
+    "no task-context implementation changes",
+    "no return-content optimization",
+    "no case-specific prompt writing",
+    "no forced adoption"
+  ],
+  "purpose": "freeze the minimal, arm-symmetric, discoverability-only exposure mechanism for the next formal batch; fix tool discoverability without forcing adoption",
+  "schema": "d9-c7-a-exposure-contract-v1",
+  "symmetry_invariants_machine_checked_at_c7b_runtime": [
+    "exposure argv tokens byte-identical for arm A and arm B",
+    "prompt bytes (problem_statement) identical per case across arms; prompt_sha256 arm-independent",
+    "the only arm-dependent invocation inputs are runtime_root and the runtime inventory itself",
+    "per-cell command_sha256 must be equal across arms for the same exposure contract"
+  ]
+}

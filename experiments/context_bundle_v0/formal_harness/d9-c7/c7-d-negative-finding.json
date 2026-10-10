@@ -1,0 +1,16 @@
+{
+  "c7c_surface_text_sha256": "fa93ca5e79472229ac575c2ad078dd64d17b0b3d60bfcfe49baf03ab8ab794f0",
+  "disposition": "PERMANENT_NEGATIVE_RESULT / RETAIN \u2014 never superseded",
+  "engineering_signal": "passive system-prompt discoverability route should be stopped; next phase should move to agent-native tool registration / skill discovery / tool schema exposure mechanisms",
+  "evidence_artifact": "D:\\pl-c4-pilot\\formal-readiness-c7d\\funnel\\funnel-gates.json",
+  "evidence_artifact_sha256": "cd29a6e8b36036deeaf11be3aa37f8d7ba7c3b379cf5543a7c5aa3c68e97a9c5",
+  "experiment_id": "D9-C7-FORMAL",
+  "finding": "Structured affordance tool card in the system prompt is also experimentally insufficient for discovery: L0=36/36 delivered, but 0/36 agents ran python -m provenlattice --help or any ProvenLattice command.",
+  "ladder": {
+    "C6": "no exposure surface -> 0/36 CLI awareness (returned_facts=0 unexplained until unseal)",
+    "C7-B": "one-line passive pointer -> L0 delivered, L1-L5 all 0",
+    "C7-D": "structured affordance tool card -> L0=36/36, L1-L5 all 0"
+  },
+  "recorded_at": "2026-09-28T09:07:40.549828+00:00",
+  "schema": "d9-c7-c-negative-finding-v1"
+}

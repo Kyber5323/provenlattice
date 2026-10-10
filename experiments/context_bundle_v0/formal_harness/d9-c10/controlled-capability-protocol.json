@@ -1,0 +1,197 @@
+{
+  "anti_guidance_scan": {
+    "adapter": {
+      "hits": []
+    },
+    "control_payload": {
+      "hits": []
+    },
+    "instruction": {
+      "hits": []
+    }
+  },
+  "expansion_ladder": {
+    "candidate_universe": 6,
+    "rule": "each stage requires explicit PASS before the next; nothing runs automatically",
+    "stage_P1": {
+      "cells": "1 case (first frozen case) x A/B x 1 repeat = 2 cells",
+      "gate": "both arms L0-L3 true; A: control_response_received \u2227 semantic_facts==0 \u2227 normalizer state control_no_facts; B: L4_treatment_facts>0 \u2227 state available_facts_extracted; all symmetry invariants PASS; oracle executable on both worktrees; 0 infra failures / 0 retries; memory-surface handling recorded",
+      "unlocks": "P2"
+    },
+    "stage_P2": {
+      "cells": "6 cases x A/B x 1 repeat = 12 cells",
+      "gate": "per-cell conditions as P1 for all 12; per-case A/B pairing complete; 0 protocol violations \u2014 protocol stability demonstrated",
+      "unlocks": "Formal"
+    },
+    "stage_formal": {
+      "cells": "6 x 2 x 3 = 36 cells",
+      "gate": "P2 PASS; blinded review with the frozen C6 packet machinery; unseal outcome analysis"
+    }
+  },
+  "experiment_id": "D9-C10-FORMAL",
+  "experiment_namespace": "D9-C10-CONTROLLED_CAPABILITY",
+  "frozen_at": "2026-10-08T03:50:46.458585+00:00",
+  "funnel": {
+    "L5_facts_used_proxy": "observational only; never a task-success prerequisite",
+    "arm_A": {
+      "control_response_received": true,
+      "normalizer_state": "control_no_facts",
+      "semantic_facts": 0
+    },
+    "arm_B": {
+      "L4_treatment_facts": ">0",
+      "normalizer_state": "available_facts_extracted"
+    },
+    "both_arms_required": [
+      "L0_native_tool_visible",
+      "L1_discovery_action",
+      "L2_tool_invoked",
+      "L3_task_context_requested"
+    ],
+    "distinctions": [
+      "tool interaction success",
+      "treatment facts returned",
+      "facts used proxy",
+      "final task outcome"
+    ]
+  },
+  "memory_surface_requirement": {
+    "frozen_requirement": "C10-B must isolate or disable the memory surface identically for both arms if technically available (MEMORY_ISOLATION_CHECK gate); if not available, the threat must be recorded and factored into interpretation",
+    "threat": "the claude CLI memory persists across runs per project cwd and demonstrably influenced C9 probe behavior (upstream-patch recovery) \u2014 an outcome-saturation risk for both arms"
+  },
+  "non_goals": [
+    "no real Agent cell in C10-A",
+    "no P1/P2/Formal execution",
+    "no modification of C6-C9 history",
+    "no task-context runtime changes",
+    "no prompt weakening/strengthening beyond the frozen instruction"
+  ],
+  "normalization": {
+    "contract": "d9-c9-c1-normalization-v2",
+    "control_state_added": "control_no_facts (payload marked control:true or status==control_no_facts -> 0 facts, explicit state)",
+    "fallback_to_v1": "PROHIBITED",
+    "record_identity": "normalization_contract stamped in every normalized trace and cell record",
+    "treatment_state": "available_facts_extracted (unchanged from C9-C1)"
+  },
+  "outcome_design": {
+    "L5_is_not_primary": true,
+    "primary": "task correctness / bugfix success via the frozen C6 oracle (build + test patch + playTests)",
+    "secondary": [
+      "tool/fact usage",
+      "trajectory length",
+      "tool calls",
+      "token usage (result event usage)",
+      "wall time",
+      "patch characteristics (bytes/files)"
+    ]
+  },
+  "protocol_sha256": "066d06160eb4a04d90ba6e45329ad167fae4c1289bc259b6622bdf52729a0359",
+  "readiness_self_tests": {
+    "covered": [
+      "control payload schema + serialized digest",
+      "normalizer control_no_facts state",
+      "treatment path unchanged (C9-C1 fixture)",
+      "adapter dual-mode JSON-RPC (tools/list identity, control response, bridge passthrough)",
+      "sealed assignment",
+      "instruction byte-identity",
+      "no case-specific branch scan"
+    ],
+    "file": "test_formal_c10.py"
+  },
+  "relationship_to_history": {
+    "C10": "first experiment answering the CONTROLLED capability question",
+    "C6-C8": "answered the OPTIONAL adoption question (adoption = 0 under optional exposure)",
+    "C9-P0/P0b/C1/C2": "answered reachability + measurement validity (chain works; normalization v2 ingests facts)",
+    "no_back_write": "C10 results must never be used to claim 'C8 should have worked' or 'optional adoption is solved' \u2014 different questions"
+  },
+  "required_use_contract": {
+    "agent_must_before_first_code_change": [
+      "call the tool",
+      "request task-context --json",
+      "read the result"
+    ],
+    "byte_identical_arms": true,
+    "conditional_index_step": "byte-identical instruction; its conditional applicability differs by response content \u2014 inherent to the treatment",
+    "forbidden_content": [
+      "arm identity",
+      "which result is 'better'",
+      "treatment disclosure",
+      "answer preference"
+    ],
+    "instruction_sha256": "83e7ef52be8bc4cc89f2a4367ed193838feaf89ec268eda1d4102edf2451e265",
+    "instruction_text": "MANDATORY REPOSITORY-ANALYSIS PROTOCOL for this session:\n1. Before you make ANY code change, call the mcp__provenlattice__query tool.\n2. Request task-context facts relevant to this task: command \"task-context\" with the --json flag and the anchor symbol(s) you consider relevant.\n3. If the tool reports that no analysis is built yet, run the tool's index command for this repository, then repeat the task-context request with --json.\n4. Read the returned result carefully before continuing.\n5. After the protocol steps above, complete the bugfix described below as best you can."
+  },
+  "research_question": "When repository-analysis is actually consumed by the Agent, do ProvenLattice facts improve real coding-task outcomes?",
+  "schema": "d9-c10-a-controlled-capability-protocol-v1",
+  "status": "CONTROLLED_CAPABILITY_PROTOCOL_FROZEN",
+  "symmetry_invariants": [
+    "task prompt hash A==B (per case)",
+    "required-use instruction hash A==B (byte-identical)",
+    "model/config A==B",
+    "base commit A==B (per case)",
+    "MCP registration A==B (init event server entry + tool enumeration)",
+    "tool schema A==B (frozen C8-A tool entry bytes served by both arms)",
+    "normalizer identity A==B (normalization_contract stamped)",
+    "runtime/runner code identical except treatment response source (adapter digest identical; only arm env differs)",
+    "control/treatment binding auditable via the sealed assignment artifact",
+    "no case-specific branch anywhere in adapter/runner/instruction (scan-enforced)",
+    "one invocation per planned cell; no silent retry",
+    "raw trace retained per cell",
+    "normalization provenance retained per cell (v2 parse states)",
+    "treatment assignment hidden from reviewers (packets blinded per frozen C6 machinery)"
+  ],
+  "threats_to_validity": [
+    "response size/token asymmetry is inherent to the treatment (measured, not padded)",
+    "deterministic control may signal 'tool unavailable' \u2014 agents may diverge in downstream strategy; the notice is honest and the divergence is measured",
+    "required-use changes ecological validity vs C6-C8 optional use (separate questions by design)",
+    "single model/gateway (deepseek-v4-flash); findings are path-specific",
+    "agent memory persistence (see memory_surface_requirement)",
+    "upstream-patch memorization may saturate task success on frozen cases (ceiling risk)",
+    "A-arm task-context interception replaces a would-fail CLI call by design; error-path behavior of a real missing command is not experienced"
+  ],
+  "treatment_contract": {
+    "adapter": {
+      "arm_env": {
+        "A": {
+          "PL_C10_RESPONSE_SOURCE": "control",
+          "PYTHONPATH": "D:\\pl-c4-pilot\\pl-arm-a\\src"
+        },
+        "B": {
+          "PL_C10_RESPONSE_SOURCE": "bridge",
+          "PYTHONPATH": "D:\\pl-c4-pilot\\pl-arm-b\\src"
+        }
+      },
+      "byte_identity": "one adapter file serves both arms; tool entry from the frozen C8-A contract",
+      "file": "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\context_bundle_v0\\formal_harness\\d9-c10\\provenlattice_control_adapter.py",
+      "modes": {
+        "bridge": "transparent `python -m provenlattice` bridge (Arm B)",
+        "control": "task-context -> frozen deterministic CONTROL payload; all other commands bridged identically (Arm A)"
+      },
+      "sha256": "ff7d60d5a7eb5356712c5ee0c63b24b33cb648e3a3054dce79f224815f3d1f86"
+    },
+    "arm_assignment": {
+      "A": "control",
+      "B": "bridge"
+    },
+    "assignment_sealed": {
+      "artifact": "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\context_bundle_v0\\formal_harness\\d9-c10\\assignment-sealed.json",
+      "note": "arm->response-source mapping stored with digest; never shown to reviewers"
+    },
+    "candidate_universe": "6 frozen zstd bugfix cases (D9-C5 manifest, unchanged)",
+    "control_payload": {
+      "design_rationale": "same version/envelope as real payloads for schema/transport symmetry; explicitly marked control; anchor echo is a deterministic function of the request, not a repository fact",
+      "deterministic": true,
+      "file": "D:\\ChatGPT\\codegraph\\provenlattice\\experiments\\context_bundle_v0\\formal_harness\\d9-c10\\control-payload.json",
+      "payload": {
+        "anchor": null,
+        "control": true,
+        "notice": "Repository-analysis facts are not available in this session. Continue the task with your own analysis.",
+        "status": "control_no_facts",
+        "version": "task-context-v0"
+      },
+      "serialized_form": "{\"anchor\": null, \"control\": true, \"notice\": \"Repository-analysis facts are not available in this session. Continue the task with your own analysis.\", \"status\": \"control_no_facts\", \"version\": \"task-context-v0\"}",
+      "serialized_sha256_anchor_null": "9a74cc9b7cca20853391668494e3191b26e24e85eaa56151da5b38535ec09c13"
+    },
+    "response_size_asymmetry_policy": "NOT padded: token/content asymmetry is part of the treatment; both response byte sizes are recorded as secondary metrics"
+  }
+}

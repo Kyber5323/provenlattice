@@ -1,0 +1,29 @@
+{
+  "schema": "c-analysis-revalidation-manifest-r1",
+  "generated_at": "2026-10-10",
+  "purpose": "environment-controlled comparison of the 16 ContextBench-zstd cases with the prior Graphify-era local run, using the integrated post-V1.2 C analysis chain",
+  "provenlattice_commit": "8e194ab76faea086cb6ed873e4acfdf2da46318a",
+  "package": {
+    "filename": "revalidation/packages/provenlattice-1.0.0-py3-none-any.whl",
+    "sha256": "3F7F3434753F3A7AA9BA3D3063FD8F3DE6862A851F69C64D5172386DCBF10774",
+    "python_requirement": ">=3.11",
+    "install_command": "pip install revalidation/packages/provenlattice-1.0.0-py3-none-any.whl"
+  },
+  "test_count": 16,
+  "case_ids": [
+    "00c0ba3f", "0f495035", "21d59e43", "2687f1e4", "2b5e5e23", "35ed56f6",
+    "40aed09e", "5adf8efc", "5b90848f", "616889c2", "6b844996", "8bffb1b1",
+    "9a7be8ba", "a47dfbbf", "b9b45262", "f9bb5442"
+  ],
+  "expected_validation_protocol": "per-case agent run at the case base_commit, followed by the standard playTests verification; no patch/oracle modifications",
+  "previous_local_result": {
+    "pass": 14,
+    "infra_limited": 2,
+    "genuine_failure": 0,
+    "source": "revalidation-summary.json of the 2026-10-09 batch"
+  },
+  "infra_cases": ["35ed56f6", "8bffb1b1"],
+  "infra_context": "2016-era zstd CLI benchmark hang under MSYS2 pipes; official reference fix reproduces the hang; see docs/design-analysis-layer-c-a35-zstd-diagnostic.md",
+  "colleague_rerun_purpose": "environment-controlled comparison with prior Graphify run",
+  "pre_recorded_results_for_colleague": "none — the colleague's outcomes are not assumed or pre-written"
+}

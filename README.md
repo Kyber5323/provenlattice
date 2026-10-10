@@ -195,8 +195,8 @@ L5 Exposure                    ◐ 部分实现
 | Plugin / SDK / REST | IDE、平台和第三方工具的程序化集成 |
 | Capability Profiles | `basic / development / deep / security` 等能力组合配置；属于 future productization target，不改变五层架构 |
 
-> **架构原则：** 五层表示数据生命周期阶段，而不是能力成熟度等级（Layer ≠ Maturity Level）。  
-> AST、CFG、def-use、points-to、taint 等即使复杂度逐步提高，仍属于 L2 Analysis；新增 analyzer 不意味着新增架构层。  
+> **架构原则：** 五层表示数据生命周期阶段，而不是能力成熟度等级（Layer ≠ Maturity Level）。\
+> AST、CFG、def-use、points-to、taint 等即使复杂度逐步提高，仍属于 L2 Analysis；新增 analyzer 不意味着新增架构层。\
 > 长期产品化目标见 [docs/roadmap.md](docs/roadmap.md) 的 Gold Target 节。
 
 ### 支持的操作（CLI 命令面）

@@ -231,7 +231,17 @@ class GraphQuery:
         return self._result(data, started, [self._node_evidence(row) for row in data],
                             query_type="symbol", anchor=name)
 
-    def _resolve(self, symbol: str) -> dict | None:
+    @staticmethod
+    def _definition_flag(row) -> bool:
+        metadata = row.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except ValueError:
+                metadata = {}
+        return bool(metadata.get("definition"))
+
+    def _resolve_candidates(self, symbol: str):
         matches = lambda row: (
             row.get("id") == symbol or row.get("qualified_name") == symbol
             or row.get("name") == symbol
@@ -241,18 +251,54 @@ class GraphQuery:
             (symbol, symbol, symbol), matches,
         )
         if not rows:
-            return None
-        return min(rows, key=lambda row: (
+            return None, []
+        chosen = min(rows, key=lambda row: (
             0 if row["id"] == symbol else 1 if row["qualified_name"] == symbol else 2,
             row["qualified_name"], row["id"],
         ))
+        if len(rows) > 1:
+            # C declaration/definition preference: when the same name matches
+            # declarations and exactly one implementation definition, prefer
+            # the definition. Python nodes carry no `definition` flag, so this
+            # can only fire for C/C++ symbols. Multiple definitions keep the
+            # deterministic legacy choice (ambiguity is surfaced by
+            # get_definition, never silently resolved).
+            functions = [row for row in rows
+                         if row.get("kind") in {"Function", "Method"}]
+            definitions = [row for row in functions if self._definition_flag(row)]
+            declarations = [row for row in functions
+                            if not self._definition_flag(row)]
+            if len(definitions) == 1 and declarations:
+                chosen = definitions[0]
+        return chosen, rows
+
+    def _resolve(self, symbol: str) -> dict | None:
+        chosen, _ = self._resolve_candidates(symbol)
+        return chosen
 
     def get_definition(self, symbol: str) -> dict:
         started = time.perf_counter()
-        row = self._resolve(symbol)
-        data = decode_row(row) if row else None
-        return self._result(data, started, [self._node_evidence(data)] if data else [],
-                            query_type="definition", anchor=symbol)
+        chosen, candidates = self._resolve_candidates(symbol)
+        data = decode_row(chosen) if chosen else None
+        result = self._result(data, started, [self._node_evidence(data)] if data else [],
+                              query_type="definition", anchor=symbol)
+        if chosen is not None and len(candidates) > 1:
+            functions = [row for row in candidates
+                         if row.get("kind") in {"Function", "Method"}]
+            definitions = [row for row in functions if self._definition_flag(row)]
+            declarations = [row for row in functions
+                            if not self._definition_flag(row)]
+            if len(definitions) == 1 and declarations:
+                result["related_declarations"] = [
+                    decode_row(row) for row in
+                    sorted(declarations, key=lambda row: (row["qualified_name"], row["id"]))]
+            elif len(definitions) > 1:
+                result["definition_ambiguous"] = True
+                result["definition_candidates"] = [
+                    {"symbol_id": row["id"], "kind": row["kind"],
+                     "qualified_name": row["qualified_name"]}
+                    for row in sorted(definitions, key=lambda row: (row["qualified_name"], row["id"]))]
+        return result
 
     def _neighbors(self, symbol: str, edge_type: str, incoming: bool) -> dict:
         started = time.perf_counter()
@@ -380,6 +426,84 @@ class GraphQuery:
         return self._result(
             {"counts": counts, "sites": sites[:self.MAX_CALL_SITES]}, started,
             query_type="call_semantics", anchor=node["id"])
+
+    def get_analysis_summary(self, symbol: str) -> dict:
+        """Compact, read-only symbol context: definition span, call groups and
+        AST/CFG shape summaries from existing analyzer state. Never builds."""
+        started = time.perf_counter()
+        anchor = self._resolve(symbol)
+        if not anchor:
+            return self._result({}, started, query_type="analysis_summary",
+                                anchor=symbol)
+        decoded = decode_row(anchor)
+        metadata = decoded.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except ValueError:
+                metadata = {}
+        summary = {
+            "symbol_id": anchor["id"],
+            "file": metadata.get("relative_path", ""),
+            "lines": [decoded.get("start_line"), decoded.get("end_line")],
+        }
+        calls = self.get_call_semantics(anchor["id"])["data"]
+        grouped = {"direct": [], "indirect": [], "unresolved": [], "ambiguous": []}
+        ambiguous_sites: dict[str, dict] = {}
+        for site in calls.get("sites", []):
+            bucket = site["class"]
+            if bucket == "ambiguous":
+                entry = ambiguous_sites.setdefault(
+                    site["callee"],
+                    {"callee": site["callee"],
+                     "candidate_count": len(site["candidates"]), "sites": 0})
+                entry["sites"] += 1
+                entry["candidate_count"] = max(
+                    entry["candidate_count"], len(site["candidates"]))
+            elif site["callee"] not in grouped[bucket]:
+                grouped[bucket].append(site["callee"])
+        grouped["direct"] = sorted(grouped["direct"])
+        grouped["indirect"] = sorted(grouped["indirect"])
+        grouped["unresolved"] = sorted(grouped["unresolved"])
+        grouped["ambiguous"] = [
+            ambiguous_sites[name] for name in sorted(ambiguous_sites)]
+        summary["calls"] = grouped
+        summary["call_counts"] = calls.get("counts", {})
+        repository = self.storage.repository()
+        root_path = repository["root_path"] if repository else None
+        for feature in ("ast", "cfg"):
+            section = {"status": "not_built"}
+            if root_path:
+                result = query_analysis(root_path, feature,
+                                        symbol_id=anchor["id"],
+                                        database=self.storage.path)
+                section = {"status": result["status"]}
+                if result["status"] == "available":
+                    if feature == "ast":
+                        root_tree = result.get("root")
+                        section["node_count"] = (
+                            _count_tree(root_tree) if root_tree
+                            else len(result.get("nodes", [])))
+                    else:
+                        edge_kinds, node_kinds = {}, {}
+                        for edge in result["edges"]:
+                            edge_kinds[edge["kind"]] = edge_kinds.get(edge["kind"], 0) + 1
+                        for node in result["nodes"]:
+                            node_kinds[node["kind"]] = node_kinds.get(node["kind"], 0) + 1
+                        section.update({
+                            "node_count": len(result["nodes"]),
+                            "edge_count": len(result["edges"]),
+                            "branches": edge_kinds.get("true", 0) + edge_kinds.get("false", 0),
+                            "switch_cases": node_kinds.get("case", 0),
+                            "fallthroughs": edge_kinds.get("fallthrough", 0),
+                            "returns": edge_kinds.get("return", 0),
+                            "calls": node_kinds.get("callsite", 0),
+                            "gotos": edge_kinds.get("goto", 0),
+                            "loop_back_edges": edge_kinds.get("back", 0),
+                        })
+            summary[feature] = section
+        return self._result(summary, started, query_type="analysis_summary",
+                            anchor=anchor["id"])
 
     def get_evidence_links(
         self, *, source_node_id: str | None = None,

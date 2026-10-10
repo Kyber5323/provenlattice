@@ -50,7 +50,7 @@ Clang/compile_commands 增强与跨过程 CFG 仍不支持。ContextBench zstd 1
 2 case 因验证环境限制排除**（详见 `experiments/analysis_layer/d8/results/`
 与 `benchmark-contextbench-zstd/` 外部批目录）。
 
-## Qualification Evidence（基座 → Agent 证据链）
+## Qualification & Development Evidence（基座 → Agent 证据链）
 
 ProvenLattice 的能力不是 demo 叙事，而是按
 
@@ -58,7 +58,7 @@ ProvenLattice 的能力不是 demo 叙事，而是按
 图构得出来 → 图事实正确 → 大仓可运行 → 增量仍正确 → Agent 可消费 → 成本可控
 ```
 
-逐层取得正式资格（全部数字来自冻结 artifact，详证见
+逐层取得正式资格与 Post-V1.2 development evidence（全部数字来自冻结 artifact，各项状态按自身证据等级 formal / controlled / diagnostic 标注，详证见
 [experiments/foundation_analysis/reviews/provenlattice-foundation-evidence-review.md](experiments/foundation_analysis/reviews/provenlattice-foundation-evidence-review.md)）：
 
 | 验证线 | 回答的问题 | 正式结果 | 状态 |
@@ -116,6 +116,8 @@ L5 暴露层 Exposure
 
 *ProvenLattice 五层架构全景图（Gold Target 口径，2026-10-10）*
 
+> 注：图片为示意版；各层实现状态与证据等级**以下方文字版为准**（文字版统一口径：L3 / L4 = 核心能力已实现，L5 = 部分实现）。
+
 图例：✅ 已实现　◐ 部分实现　⬜ 未实现（future candidate，见 roadmap §4）
 
 > 实现状态与证据等级是两个维度：`已实现` 表示代码能力已存在；`formal / controlled / diagnostic` 表示该能力目前拥有的验证证据等级。
@@ -144,7 +146,7 @@ L2 Optional Analysis           ◐ 部分实现
 │   ⬜ Clang / compile_commands-aware semantic enrichment
 │   ⬜ interprocedural CFG
 │
-L3 Task Context                ✅ 已实现
+L3 Task Context                ✅ 核心能力已实现
 │   ✅ task-context-v0
 │   ✅ primary targets / source spans / relations / candidates / unresolved
 │   ✅ definition-preference、symbol-scoped compact analysis summary、预算有界
@@ -287,14 +289,15 @@ MCP / Plugin / SDK        MCP 已落地（native exposure）；Plugin/SDK  evide
 [docs/design-optional-analysis-layer-vision.md](docs/design-optional-analysis-layer-vision.md)。
 
 该方向已冻结为 **Gold Target**（canonical planning entry 见
-[docs/roadmap.md](docs/roadmap.md) Gold Target 节）：**L1 = 默认开启的基础服务
-（Always-on），L2+ = 按 capability × scope 双维按需增强**，通过渐进增强平衡
+[docs/roadmap.md](docs/roadmap.md) Gold Target 节）：**L1 默认常驻；L2 高成本
+分析按 Capability × Scope 按需物化；L3 按任务调用；L4 Core Provenance 与
+L5 CLI 保持 baseline，其余增强能力/adapter 按需启用。**通过渐进增强平衡
 能力、延迟、存储与上下文成本；五层 = 数据生命周期阶段（Layer ≠ Maturity
 Level），当前不规划 L6。
 
 分析层已按 D0–D8 完成实证交付并集成 main（报告见 `docs/design-analysis-layer-d*.md`）：
 
-- **Base Graph 默认 OFF 承诺**：analysis 表惰性创建、基础源码零修改、index/update 行为不变（每阶段零影响测试 + 全量回归 137/137）；
+- **Analysis 默认 OFF / Base Graph 默认路径不变承诺**：analysis 表惰性创建、基础源码零修改，未请求分析时 index/update 基础行为不变（每阶段零影响测试 + 全量回归 137/137）；
 - **D1–D3**：`file × analyzer` 派生缓存（`ast:python` / `cfg:python`）、fail-closed freshness、payload 硬上限；
 - **D2/D4**：第一条真实能力链——Python AST（函数体全量层级）与 intraprocedural CFG（真回边、return/break/continue 无 fallthrough、callsite 不跨函数）；
 - **D5**：`provenlattice analyze <repo> --scope <dir> --features ast,cfg`（orchestrator，feature/scope 校验先于 mutation，CFG→AST 依赖编排）；
@@ -366,7 +369,7 @@ Context Bundle/`task-context` + native MCP 暴露 + normalization-v2 已合入�
 D9-C10 受控稳定性 PASS；ContextBench zstd 16-case 重验无回归（14/16，0 真实失败）。
 正式 V1.3 qualification 待 colleague 16-case rerun 后收敛，尚未宣称。
 
-当前实现覆盖 Python/C/C++ CodeGraph，以及 Markdown Spec/Requirement/Document 到代码的可追溯确定性证据；RQ1 图保真度与 RQ2 系统规模资格已闭合，SQI 已完成 V1 → V1.1 → V1.2 三代 Agent 侧资格。Runtime Log、Commit History、Validation Result、Embedding、Vector DB、LLM linker、UI、TASCO 与 Agent 集成均未引入。
+当前实现覆盖 Python/C/C++ CodeGraph，以及 Markdown Spec/Requirement/Document 到代码的可追溯确定性证据；RQ1 图保真度与 RQ2 系统规模资格已闭合，SQI 已完成 V1 → V1.1 → V1.2 三代 Agent 侧资格。Runtime Log、Commit History、Validation Result、Embedding、Vector DB、LLM linker、UI、TASCO、Plugin/SDK/REST 产品层尚未引入。
 
 关键文档索引：
 

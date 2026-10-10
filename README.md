@@ -41,7 +41,11 @@ AST/CFG 分析层（D0–D8）、`task-context` 事实包（D9-C1/C2）、native
 暴露（D9-C7/C8）、normalization-v2（D9-C9），并完成 D9-C10 六 case × 双臂
 受控能力稳定性实验（12/12 cells、6/6 pairs VALID）。新增能力边界如实记录：
 AST/CFG 分析层当前支持 Python AST/CFG，并新增可选 C `.c`/`.h` normalized
-AST 与函数内 C CFG V1；C++ deep analysis 仍不支持。ContextBench zstd 16-case 重验 **14/16 解决、0 真实失败、
+AST、函数内 C CFG V1（含 `&&`/`||`/`?:` 短路）、调用语义分类
+（direct/indirect/unresolved）与定义优先的紧凑符号上下文；C++ deep
+analysis、精确 function-pointer target 解析、points-to、def-use、taint、
+Clang/compile_commands 增强与跨过程 CFG 仍不支持。ContextBench zstd 16-case
+重验 **14/16 解决、0 真实失败、
 2 case 因验证环境限制排除**（详见 `experiments/analysis_layer/d8/results/`
 与 `benchmark-contextbench-zstd/` 外部批目录）。
 
@@ -110,7 +114,7 @@ L5 暴露层 Exposure
 | 类别 | 命令 | 说明 |
 | --- | --- | --- |
 | 建图/维护 | `index` `update` `status` `shard` | 全量/增量索引、状态查询、分片 |
-| 分析层 | `analyze` `analysis` | 按 scope 物化/查询派生分析；Python AST/CFG，C `.c`/`.h` AST + function-local CFG；C++ deep analysis unsupported |
+| 分析层 | `analyze` `analysis` | 按 scope 物化/查询派生分析；Python AST/CFG，C `.c`/`.h` AST + function-local CFG + 调用语义分类 + 紧凑符号上下文（`get_analysis_summary`）；C++ deep analysis unsupported |
 | 事实包 | `task-context` | 面向 Agent 的上下文事实包（L3 主入口） |
 | 符号查询 | `symbol` `definition` `callers` `callees` `references` | SQI 结构化查询 |
 | 结构关系 | `dependencies` `dependents` `subgraph` `impact`（经 symbol/related） | 模块依赖与影响面 |
@@ -204,7 +208,9 @@ D9 context-bundle 线（`experiment/context-bundle`，18+ commits）：C6-C10 fo
 D9-C10 P2 = 12/12 cells、6/6 pairs VALID、PASS。
 
 下一步：V1.3 契约对外口径收敛 + 正式 qualification；DFG 等真实需求信号出现再启动；
-C++ deep analysis 是后续语言能力缺口；A2 止于 C 函数内 CFG V1（无 short-circuit/interprocedural）。
+C 能力链（AST/CFG/短路/调用语义/紧凑上下文）已集成（post-V1.2 checkpoint），
+待同环境 16-case Agent revalidation；C++ deep analysis、精确 function-pointer
+target 解析与 def-use（真实 case 未证明必要）为后续候选。
 
 接口路线：SQI 契约已冻结（byte-identical envelope + citation closure）；
 **MCP 已落地**（D9-C8 native 单工具暴露，透明桥接 `python -m provenlattice`）；

@@ -3,6 +3,36 @@
 所有已发布里程碑按时间倒序记录。tag 命名遵循 `provenlattice-*` 前缀约定；
 各阶段的"已完成 / 明确未包含"以对应发布文档为准（`docs/releases/`）。
 
+## Post-V1.2 C Analysis Development（2026-10-10，codex/c-analysis-a1 分支）
+
+**Post-V1.2 development checkpoint**：在 V1.3 开发态（analysis layer +
+context bundle）之上扩展 C deep analysis。这是开发进展记录，**不是新的
+formal V1.3 qualification**；尚未完成同环境 16-case Agent revalidation。
+
+- **C 能力链（A1→A3.6，commits 235ef4e→af6d66d）**：C deep analysis 已从
+  基础 symbol graph 扩展到 AST / CFG / call semantics：
+  - A1 `235ef4e`：Optional C normalized AST（`.c`/`.h`，`ast:c`，
+    tree-sitter kinds 仅存于 `parser_kind`）。
+  - A2 `d0297dc`：函数内 statement 级 CFG（`cfg:c`）——sequence、if/else、
+    while/do/for、break/continue、switch/case/default/fallthrough、
+    goto/label、implicit exit。
+  - A2.1 `90db29f`：CFG 消除 raw parser 依赖 + 表达式级短路
+    （`&&`/`||`/`?:`）。
+  - A3 `61b5012`：调用语义分类（direct/indirect/unresolved）——indirect
+    调用永不 name-bind；foundation `call_kind` metadata（schema 不变）。
+  - A3.5 `ebecea0`：真实 zstd diagnostic —— 两个 INFRA_LIMITED case
+    （35ed56f6 / 8bffb1b1）上 **current facts appear sufficient**；
+    def-use 未被真实 case 证明必要（`A4_DEFUSE_NOT_YET_JUSTIFIED`）。
+  - A3.6 `af6d66d`：definition-preference retrieval + compact analysis
+    summary（符号级 AST/CFG/调用摘要，只读不构建）。
+- **明确未支持**：精确 function-pointer target 解析、points-to、def-use、
+  taint、Clang 语义增强、compile_commands 感知分析、跨过程 CFG。
+- **验证**：全量回归 254/254 PASS；真实 zstd 索引/查询 diagnostic 通过
+  （false direct bindings = 0）。
+- **待办**：同环境 16-case Agent revalidation（见
+  `revalidation/c-contextbench-zstd-r1-manifest.json` 与
+  `docs/c-analysis-colleague-revalidation-guide.md`）。
+
 ## provenlattice-v1.3（2026-10-09，experiment/context-bundle 分支）— ANALYSIS LAYER + CONTEXT BUNDLE（开发态）
 
 **V1.3 Optional Function Analysis Layer + Context Bundle**：Foundation Graph

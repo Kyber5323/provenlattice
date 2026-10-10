@@ -110,6 +110,65 @@ L5 暴露层 Exposure
 │   MCP：native 单工具暴露 mcp__provenlattice__query（透明桥接，C8-A 冻结合约）
 ```
 
+### 五层架构全景图（实现状态 × 任务覆盖）
+
+图例：✅ 已实现　◐ 部分实现　⬜ 未实现（future candidate，见 roadmap §4）
+
+```text
+L1 Foundation/Knowledge      ✅ 已实现（formal：RQ1 / RQ2 / SQI-V1/V1.1/V1.2）
+│   ✅ Python + C/C++ 确定性解析、三态引用、Impact、Knowledge
+│   ⬜ S3+ scale / 跨仓统一索引 / 分布式 / canonical vector index
+│   ⬜ Runtime Log / Commit History / Validation Result ingestion（→ L1 + L4）
+│
+L2 Optional Analysis         ◐ 部分实现（Python：formal QUALIFIED；C A1–A3.6：diagnostic）
+│   ✅ Python AST + CFG；C normalized AST + function-local CFG（含 &&/||/?: 短路）
+│      + 调用语义分类（direct/indirect/unresolved）+ 紧凑符号上下文
+│   ⬜ def-use / local data flow（not justified yet）
+│   ⬜ points-to / 精确 function-pointer target（当前仅 indirect 识别）
+│   ⬜ taint / security analysis、C++ deep analysis、Clang/compile_commands、
+│      interprocedural CFG
+│
+L3 Task Context              ✅ 已实现（task-context-v0；diagnostic + C10 受控协议内验证）
+│   ✅ 按任务打包最小必要事实（fact_id + evidence_ids 可追溯）
+│   ⬜ semantic/vector retrieval accelerator、context budgeting / profile selection
+│
+L4 Evidence & Normalization  ✅ 已实现（core provenance = formal；normalization-v2 已实现）
+│   ✅ evidence 链 + SQI citation closure 18/18；raw≡normalized 校验（C10 ×6）
+│   ⬜ runtime / validation evidence provenance、richer normalization
+│
+L5 Exposure                  ◐ 部分实现
+│   ✅ CLI（baseline，全命令面）；✅ native MCP（可按配置启用）
+│   ⬜ Plugin / SDK / REST-API（future candidate）
+```
+
+**已实现部分覆盖的任务**（证据：vision §3 任务映射 + D8 真实 Agent 观察 + SQI formal）：
+
+| 层 | 可覆盖任务 |
+| --- | --- |
+| L1 | 代码理解、caller/callee/reference 查询、需求→代码定位、影响面分析、Agent 日常开发问答、review / refactor / bug 定位 |
+| L2（Python/C 现有 analyzer） | 函数内部结构理解、复杂函数 review、结构化代码讲解、控制流理解、分支/不可达路径、错误处理分支覆盖检查、C 短路求值路径、间接调用如实识别、definition-preference 符号上下文 |
+| L3 | Agent 任务上下文按需打包（primary targets / spans / relations，预算有界） |
+| L4 | 事实可信性与证据追溯（resolved/ambiguous/unresolved 三态）、citation closure、Agent trace 规范化审计 |
+| L5 | CLI 直接消费全部命令面；MCP 客户端（如 Claude Code）原生接入 |
+
+**未实现部分对应的潜在任务**（全部为 future candidate，未排期、不承诺；def-use 为 not justified yet）：
+
+| 未实现能力 | 潜在任务覆盖 |
+| --- | --- |
+| def-use / local data flow | 参数污染路径、危险 API 输入路径、空指针传播、未初始化使用 |
+| points-to / 精确 function-pointer target | 函数指针/间接调用目标确认（当前仅识别为 indirect，不解析 target） |
+| taint / security analysis | 漏洞检测、source/sink/sanitizer 路径、finding 上下文增强与解释、Agent 辅助修复 |
+| C++ deep analysis | C++ 函数内结构 / 控制流分析（当前 unsupported） |
+| Clang / compile_commands 增强 | 宏、模板实例化、复杂重载下更精确的语义解析 |
+| interprocedural CFG | 跨函数路径分析（当前 CFG 明确不跨函数） |
+| Runtime/Commit/Validation ingestion | 运行时与工程历史证据的跨层追溯（L1+L4） |
+| Plugin / SDK / REST | 非 CLI 生态的程序化集成 |
+| Capability Profiles | basic/development/deep/security 一键组合配置（UX shortcut，规划中） |
+
+> 说明：层 = 数据生命周期阶段（Layer ≠ Maturity Level）；"更高级"的分析能力
+> 仍属 L2，不构成新层。长期目标见 [docs/roadmap.md](docs/roadmap.md) Gold
+> Target 节；未实现项启动均以真实需求信号为前提（evidence-driven）。
+
 ### 支持的操作（CLI 命令面）
 
 | 类别 | 命令 | 说明 |

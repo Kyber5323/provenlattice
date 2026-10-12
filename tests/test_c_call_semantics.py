@@ -14,6 +14,7 @@ from provenlattice.analysis_query import query_analysis
 from provenlattice.graph import full_index
 from provenlattice.incremental import incremental_update
 from provenlattice.query import GraphQuery
+from provenlattice.storage import SQLiteStorage
 
 
 SOURCES = {
@@ -73,7 +74,8 @@ class CCallSemanticsTests(unittest.TestCase):
         self.temp.cleanup()
 
     def refs(self, raw_name: str | None = None, file_suffix: str | None = None) -> list[dict]:
-        with closing(sqlite3.connect(self.database)) as connection:
+        with closing(SQLiteStorage(self.database)) as storage:
+            connection = storage.connection
             connection.row_factory = sqlite3.Row
             rows = [dict(row) for row in connection.execute(
                 "SELECT r.*, f.path AS file_path FROM raw_references r "
@@ -295,10 +297,12 @@ class CCallSemanticsTests(unittest.TestCase):
 
     def test_full_index_determinism_and_incremental_parity(self) -> None:
         def snapshot(database: Path) -> list[tuple]:
-            with closing(sqlite3.connect(database)) as connection:
-                return sorted(connection.execute(
+            with closing(SQLiteStorage(database)) as storage:
+                connection = storage.connection
+                return list(connection.execute(
                     "SELECT id, status, resolved_symbol_id, resolution_strategy, "
-                    "metadata FROM raw_references WHERE reference_type='CALLS'"))
+                    "metadata FROM raw_references WHERE reference_type='CALLS' "
+                    "ORDER BY id"))
 
         second = Path(self.temp.name) / "second.db"
         full_index(self.root, second)
@@ -333,7 +337,8 @@ class CCallSemanticsTests(unittest.TestCase):
         self.assertEqual(step["callee"], "pipe->step")
         self.assertEqual(step["call_kind"], "indirect")
         self.assertEqual(step["candidates"], [])
-        with closing(sqlite3.connect(database)) as connection:
+        with closing(SQLiteStorage(database)) as storage:
+            connection = storage.connection
             connection.row_factory = sqlite3.Row
             rows = [dict(row) for row in connection.execute(
                 "SELECT metadata FROM raw_references WHERE reference_type='CALLS' "
@@ -343,7 +348,8 @@ class CCallSemanticsTests(unittest.TestCase):
             sorted(metadata.get("function_reference_args", [])),
             ["negate_value"])
         # false direct bindings = 0: no indirect call gained a CALLS edge
-        with closing(sqlite3.connect(database)) as connection:
+        with closing(SQLiteStorage(database)) as storage:
+            connection = storage.connection
             indirect_lines = [
                 row[0] for row in connection.execute(
                     "SELECT start_line FROM raw_references WHERE reference_type='CALLS' "

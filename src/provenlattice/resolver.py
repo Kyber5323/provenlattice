@@ -174,6 +174,11 @@ class ReferenceResolver:
         by_qualified: dict[str, list[Node]],
         by_name: dict[str, list[Node]],
     ) -> tuple[list[Node], Node | None, str, float]:
+        if (reference.metadata or {}).get("call_kind") == "indirect":
+            # Indirect calls are never name-bound: a member callback, a
+            # function-pointer variable or a complex callee expression must
+            # not reach a same-named function.
+            return [], None, "indirect_call_shape", 0.0
         target = reference.target.strip(".")
         short = target.rsplit(".", 1)[-1]
         same_file = [candidate for candidate in by_name.get(short, []) if candidate.file_id == source.file_id]

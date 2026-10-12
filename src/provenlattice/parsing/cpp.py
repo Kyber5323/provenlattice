@@ -196,7 +196,11 @@ class CppExtractor:
         if node.type != "function_definition":
             if self._find_function_declarator(declarator) is None:
                 return False
-            if node.type == "declaration" and self._in_function_body():
+            if (
+                node.type == "declaration"
+                and self._in_function_body()
+                and not self._is_function_pointer_declarator(declarator)
+            ):
                 # Most-vexing-parse. Inside a body, `std::lock_guard<std::mutex>
                 # lock(mutex);` *is* a declaration whose declarator is a
                 # function declarator -- `lock(mutex)` reads as a prototype --
@@ -208,7 +212,11 @@ class CppExtractor:
                 # could not see the lock at all (`llama.cpp` had 101 of these,
                 # named `lock`, `lk`, `guard`). A real prototype inside a body
                 # is rare and was itself a one-line phantom, so nothing of value
-                # is given up here.
+                # is given up here. The gate above exempts function-pointer
+                # declarators: `int (*fp)(int,int);` in a body declares a
+                # callable variable (parenthesised declarator), not a
+                # constructor argument list, and must still reach
+                # `local_callables` so a later `fp(...)` classifies indirect.
                 #
                 # Counted only here, after the declarator check: the counter is
                 # the price of the heuristic, and `int n = 1;` -- a declaration

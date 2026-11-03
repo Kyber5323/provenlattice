@@ -22,7 +22,7 @@ from pathlib import Path
 from . import defect
 from .analysis import AnalysisStore, dependency_staleness
 from .analysis_query import AnalysisRequestError
-from .evidence import DefectEvidenceBundle
+from .evidence import DefectEvidenceBundle, assemble_evidence_v2
 from .semantics.vocabulary import load_defect_patterns
 from .storage import SQLiteStorage
 
@@ -279,9 +279,10 @@ def query_defect_candidates(
                 "unknown must be resolved before any finding is confirmed",
             ),
         )
-        evidence_pairs.append(
-            ({**candidate.to_dict(), "evidence_id": evidence.evidence_id},
-             bundle.to_dict()))
+        candidate_dict = {**candidate.to_dict(),
+                          "evidence_id": evidence.evidence_id}
+        candidate_dict["evidence_v2"] = assemble_evidence_v2(candidate_dict)
+        evidence_pairs.append((candidate_dict, bundle.to_dict()))
 
     patterns = {p.key: p for p in load_defect_patterns()}
     return {

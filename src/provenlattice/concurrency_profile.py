@@ -25,9 +25,9 @@ from typing import Any, Mapping
 
 from .analysis_ast import normalize_scope, scoped_sources
 from .analysis_query import query_analysis
-from .concurrency_lock_scenarios import build_lock_scenarios
+from .concurrency_lock_scenarios import build_access_lockset, build_lock_scenarios
 from .concurrency_race_scenarios import build_race_scenarios
-from .evidence import Evidence
+from .evidence import Evidence, assemble_evidence_v2
 from .orchestrator import analyze_scope
 from .planner import PlannerRequest, plan_capabilities
 from .storage import SQLiteStorage
@@ -148,6 +148,25 @@ def _collect_events(
     return events, event_paths, file_statuses
 
 
+def _collect_sparse_cfg_edges(
+    root: Path, scope: str, database: Path,
+) -> list[dict]:
+    """Collect the sparse_cfg ``CONTROL_REACHES`` edges across the scope.
+
+    These are the edges ``build_access_lockset`` consumes to project a
+    per-access held-lockset (SUB-04). The projection itself lives in
+    ``concurrency_lock_scenarios``; here the edges are only passed through,
+    never re-derived, re-ordered or re-implemented (contract §5.4 / §5.10).
+    """
+    edges: list[dict] = []
+    for source in scoped_sources(root, normalize_scope(scope)):
+        env = query_analysis(root, "sparse_cfg", file_path=source.relative_path,
+                             database=database)
+        if env.get("status") == "available":
+            edges.extend(env.get("edges", []))
+    return edges
+
+
 def _candidate_to_evidence(
     candidate: Mapping[str, Any], repository: str, generation: int,
     event_paths: Mapping[str, str],
@@ -232,7 +251,15 @@ def run_concurrency_profile(
     event_events, event_paths, event_file_statuses = _collect_events(
         root, scope, "events", database)
 
-    race = build_race_scenarios(sparse_events)
+    # SUB-04/SUB-05 production wiring (contract §5.4): pass the already-materialized
+    # sparse-cfg edges and events lock facts through so the SUB-05 pair builder can
+    # consume SUB-04's held-lockset projection. The projection is SUB-04's own;
+    # nothing here re-derives access, lock, pair or confidence logic.
+    sparse_edges = _collect_sparse_cfg_edges(root, scope, database)
+    lockset = build_access_lockset(sparse_events, sparse_edges, event_events)
+
+    race = build_race_scenarios(
+        sparse_events, edges=sparse_edges, lock_facts=event_events)
     lock = build_lock_scenarios(event_events)
 
     candidates_by_scenario: dict[str, list[dict]] = {
@@ -270,6 +297,12 @@ def run_concurrency_profile(
             candidate["evidence_id"] = item.evidence_id
             candidate["trace_evidence"] = assemble_trace_chain(
                 candidate, item.evidence_id, event_paths_for_scenario)
+            candidate["evidence_v2"] = assemble_evidence_v2(
+                candidate,
+                access_locksets=lockset["access_locksets"],
+                lock_relations=lockset["relations"],
+                competing_access=race["competing_access"],
+            )
             evidence.append(item)
 
     return {

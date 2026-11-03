@@ -306,4 +306,422 @@ def build_lock_scenarios(events: Iterable[Mapping[str, Any]]) -> dict:
     }
 
 
-__all__ = ["build_lock_scenarios"]
+# ---------------------------------------------------------------------------
+# SUB-04 (R4): per-access lockset + lock identity relations
+#
+# The access layer's READ/WRITE points are deliberately edgeless (stage 5A
+# keeps them off the CONTROL_REACHES chain), so a per-access held-lockset is a
+# projection the lock scenarios compute here, never a graph change: the
+# must-hold set (meet = intersection) is propagated over the *threaded* points
+# (LOCK/UNLOCK/CALL/CHECK/...) and each access point is attributed to the
+# threaded point its source position falls under. This keeps the result
+# candidate-grade always -- never a verified "definitely held" -- and never
+# invents a points-to or underlying relation (Frozen G0 contract §3).
+
+_READ = "READ"
+_WRITE = "WRITE"
+_ACCESS_EVENT_TYPES = frozenset({_READ, _WRITE})
+
+# A CALL that is attributable to one of these sibling vocabulary events is a
+# known call; any other CALL is an unknown function call whose effect on locks
+# held across it is unprovable (cross-function limitation).
+_KNOWN_CALL_KINDS = frozenset({
+    _LOCK, _UNLOCK, "ATOMIC", "THREAD_SPAWN", "THREAD_JOIN", "ALLOC", "RELEASE",
+})
+
+_CONTROL_REACHES = "CONTROL_REACHES"
+_CFG_EXIT_PREFIX = "cfg-exit:"
+_ENTRY = "\x00entry"
+_EXIT = "\x00exit"
+
+
+def _owner_symbol(event: Mapping[str, Any]) -> str:
+    return event.get("owner_symbol_id") or ""
+
+
+def _owner_label(event: Mapping[str, Any]) -> str:
+    return event.get("owner_qualified_name") or event.get("owner_symbol_id") or ""
+
+
+def _lock_fact_of(event: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "lock_identity": event.get("lock_identity") or "",
+        "subject_exact": bool(event.get("subject_exact")),
+        "acquire_kind": event.get("acquire_kind") or _ACQUIRE_BLOCKING,
+        "raii": bool(event.get("raii")),
+    }
+
+
+def _threaded_dataflow(
+    threaded: Mapping[str, Mapping[str, Any]],
+    edges: Iterable[Mapping[str, Any]],
+    lock_by_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, frozenset[str]], dict[str, list[str]]]:
+    """Must-hold lockset at every threaded point (meet = intersection).
+
+    Returns ``(held_in, succ)``. ``held_in[n]`` is the set of lock identities
+    provably held on **every** path reaching ``n`` (empty at the synthetic
+    entry), with ``_ENTRY`` and ``_EXIT`` materialised as pseudo nodes so a
+    loop header that is also the method entry still meets the empty entry set.
+    ``succ`` is the intra-method successor map (including the ``_EXIT`` sink)
+    reused later for the unlock-omission walk.
+    """
+    ids = set(threaded)
+    pred: dict[str, list[str]] = {n: [] for n in ids}
+    succ: dict[str, list[str]] = {n: [] for n in ids}
+    pred[_ENTRY] = []
+    pred[_EXIT] = []
+    succ[_ENTRY] = []
+    succ[_EXIT] = []
+    for edge in edges:
+        src = edge.get("src_id")
+        dst = edge.get("dst_id")
+        if src not in ids:
+            continue
+        if dst is None or str(dst).startswith(_CFG_EXIT_PREFIX):
+            dst = _EXIT
+        elif dst not in ids:
+            continue
+        succ[src].append(dst)
+        pred[dst].append(src)
+
+    # Synthetic entry: the first point in source order plus every point with no
+    # incoming edge (a body fragmented by returns keeps the entry explicit).
+    entries: set[str] = {nid for nid in ids if not pred[nid]}
+    if ids:
+        first = min(ids, key=lambda nid: (int(threaded[nid].get("start_line") or 0), nid))
+        entries.add(first)
+    for nid in entries:
+        succ[_ENTRY].append(nid)
+        pred[nid].append(_ENTRY)
+
+    def transfer(nid: str, held: frozenset[str]) -> frozenset[str]:
+        if nid in (_ENTRY, _EXIT):
+            return held
+        node = threaded[nid]
+        event_type = node.get("event_type")
+        fact = lock_by_id.get(nid)
+        if event_type == _LOCK:
+            # Only a provably-identified blocking acquisition is a held lock.
+            # try/timed may fail, RAII is released at scope exit, a `wait` is a
+            # condition wait, and an inexact identity names a root rather than
+            # one distinguishable lock -- none of them count as held.
+            if (
+                fact is not None
+                and fact["acquire_kind"] == _ACQUIRE_BLOCKING
+                and not fact["raii"]
+                and fact["subject_exact"]
+                and fact["lock_identity"]
+            ):
+                return held | {fact["lock_identity"]}
+            return held
+        if event_type == _UNLOCK:
+            if fact is not None and fact["lock_identity"]:
+                return held - {fact["lock_identity"]}
+            return held
+        return held
+
+    held_in: dict[str, frozenset[str]] = {
+        n: frozenset() for n in list(ids) + [_ENTRY, _EXIT]
+    }
+    held_out: dict[str, frozenset[str]] = {
+        n: frozenset() for n in list(ids) + [_ENTRY, _EXIT]
+    }
+    order = sorted(list(ids) + [_ENTRY, _EXIT])
+    for _ in range(1000):
+        changed = False
+        for nid in order:
+            preds = pred[nid]
+            new_in = frozenset()
+            if preds:
+                new_in = held_out[preds[0]]
+                for p in preds[1:]:
+                    new_in = new_in & held_out[p]
+            new_out = transfer(nid, new_in)
+            if new_out != held_out[nid] or new_in != held_in[nid]:
+                held_out[nid] = new_out
+                held_in[nid] = new_in
+                changed = True
+        if not changed:
+            break
+    return held_in, succ
+
+
+def _flow_successor(
+    access: Mapping[str, Any], threaded: Mapping[str, Mapping[str, Any]]
+) -> str | None:
+    """The threaded point an access point flows into, or None for the exit.
+
+    An access inside a threaded statement's span is an argument/sub-expression
+    of that statement, so it "flows into" the statement itself. An access on
+    its own edgeless statement flows into the next threaded point in source
+    order (or the method exit when there is none).
+    """
+    lo = int(access.get("start_line") or 0)
+    hi = int(access.get("end_line") or lo)
+    for nid in sorted(threaded):
+        node = threaded[nid]
+        s = int(node.get("start_line") or 0)
+        e = int(node.get("end_line") or s)
+        if s <= lo and hi <= e:
+            return nid
+    for nid in sorted(threaded):
+        if int(threaded[nid].get("start_line") or 0) > hi:
+            return nid
+    return None
+
+
+def _omits_unlock_on_path(
+    successor: str | None,
+    lock: str,
+    succ: Mapping[str, list[str]],
+    threaded: Mapping[str, Mapping[str, Any]],
+    lock_by_id: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """Whether a path from the access to the exit never unlocks ``lock``.
+
+    The path starts at the access's flow successor: when that successor is the
+    release itself the lock is provably released on the only path, so there is
+    no omission; when the successor is the exit the lock is never released.
+    """
+    if successor is None:
+        return True
+    if successor == _EXIT:
+        return True
+    blocked = {
+        nid
+        for nid, node in threaded.items()
+        if node.get("event_type") == _UNLOCK
+        and (lock_by_id.get(nid) or {}).get("lock_identity") == lock
+    }
+    if successor in blocked:
+        return False
+    stack = [successor]
+    seen = {successor}
+    while stack:
+        current = stack.pop()
+        for nxt in succ.get(current, ()):
+            if nxt == _EXIT:
+                return True
+            if nxt in blocked or nxt in seen:
+                continue
+            seen.add(nxt)
+            stack.append(nxt)
+    return False
+
+
+def _access_record(
+    owner_symbol: str, owner: str, access: Mapping[str, Any],
+    held: frozenset[str], limitations: list[str],
+) -> dict[str, Any]:
+    annotations = access.get("annotations") or {}
+    return {
+        "access_event_id": access.get("event_id"),
+        "event_type": access.get("event_type"),
+        "owner": owner,
+        "owner_symbol_id": owner_symbol,
+        "subject": annotations.get("subject", ""),
+        "subject_decl": annotations.get("subject_decl", ""),
+        "start_line": int(access.get("start_line") or 0),
+        "end_line": int(access.get("end_line") or 0),
+        "held_locks": sorted(held),
+        "limitation": list(limitations),
+        "candidate_state": "ambiguous",
+    }
+
+
+def _subject_key(record: Mapping[str, Any]) -> str:
+    decl = record.get("subject_decl") or ""
+    subject = record.get("subject") or ""
+    if not decl and not subject:
+        return ""
+    return decl or f"unresolved\x1f{subject}"
+
+
+def _relation_sort_key(relation: Mapping[str, Any]) -> tuple:
+    return (
+        relation.get("relation", ""),
+        relation.get("subject") or "",
+        tuple(sorted(relation.get("locks", []))),
+        tuple(relation.get("access_event_ids", ())),
+        relation.get("access_event_id") or "",
+        relation.get("lock") or "",
+        relation.get("owner") or "",
+    )
+
+
+def build_access_lockset(
+    sparse_events: Iterable[Mapping[str, Any]],
+    edges: Iterable[Mapping[str, Any]] = (),
+    lock_facts: Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Project a per-access held-lockset and lock identity relations (SUB-04/R4).
+
+    ``sparse_events`` and ``edges`` are a `sparse_cfg` query's ``events`` and
+    ``edges`` lists; ``lock_facts`` is an `events` query's ``events`` list (the
+    S3 lock facts: ``lock_identity``/``subject_exact``/``acquire_kind``/
+    ``raii``). LOCK/UNLOCK ids are shared across the two analyzers, so the lock
+    facts join onto the sparse CFG by event id.
+
+    The function is pure and deterministic. It never modifies the graph, never
+    derives a new points-to or underlying relation, and never reports a locked
+    access as "definite" -- every record is ``candidate_state: "ambiguous"``.
+    """
+    sparse = list(sparse_events)
+    edges = list(edges)
+    lock_by_id: dict[str, dict[str, Any]] = {
+        event.get("event_id"): _lock_fact_of(event)
+        for event in lock_facts
+        if event.get("event_type") in (_LOCK, _UNLOCK) and event.get("event_id")
+    }
+
+    nodes_by_owner: dict[str, dict[str, Mapping[str, Any]]] = {}
+    owner_labels: dict[str, str] = {}
+    for event in sparse:
+        owner = _owner_symbol(event)
+        if not owner:
+            continue
+        nodes_by_owner.setdefault(owner, {})[event.get("event_id")] = event
+        owner_labels.setdefault(owner, _owner_label(event))
+
+    edges_by_owner: dict[str, list[Mapping[str, Any]]] = {}
+    for edge in edges:
+        if edge.get("kind") != _CONTROL_REACHES:
+            continue
+        owner = (edge.get("payload") or {}).get("owner_symbol_id") or ""
+        if owner:
+            edges_by_owner.setdefault(owner, []).append(edge)
+
+    access_records: list[dict[str, Any]] = []
+    relations: list[dict[str, Any]] = []
+
+    for owner in sorted(nodes_by_owner):
+        node_map = nodes_by_owner[owner]
+        threaded = {
+            eid: ev for eid, ev in node_map.items()
+            if ev.get("event_type") not in _ACCESS_EVENT_TYPES
+        }
+        accesses = {
+            eid: ev for eid, ev in node_map.items()
+            if ev.get("event_type") in _ACCESS_EVENT_TYPES
+        }
+        owner_label = owner_labels.get(owner, owner)
+        if not threaded:
+            # No control-flow points: nothing to propagate on, so every access
+            # is provably unprotected.
+            for eid, ev in sorted(
+                accesses.items(),
+                key=lambda pair: (int(pair[1].get("start_line") or 0), pair[0]),
+            ):
+                access_records.append(
+                    _access_record(owner, owner_label, ev, frozenset(), []))
+            continue
+
+        held_in, succ = _threaded_dataflow(
+            threaded, edges_by_owner.get(owner, ()), lock_by_id)
+
+        # Method-level, conservative limitations.
+        limitations: list[str] = []
+        known_call_bytes = {
+            int(ev.get("start_byte") or 0)
+            for ev in threaded.values()
+            if ev.get("event_type") in _KNOWN_CALL_KINDS
+        }
+        for ev in threaded.values():
+            if (
+                ev.get("event_type") == "CALL"
+                and int(ev.get("start_byte") or 0) not in known_call_bytes
+            ):
+                limitations.append("cross_function_call")
+                break
+        for eid, ev in threaded.items():
+            if ev.get("event_type") in (_LOCK, _UNLOCK):
+                fact = lock_by_id.get(eid)
+                if fact is not None and (not fact["subject_exact"] or not fact["lock_identity"]):
+                    limitations.append("lock_identity_inexact")
+                    break
+
+        for eid, ev in sorted(
+            accesses.items(),
+            key=lambda pair: (int(pair[1].get("start_byte") or 0), pair[0]),
+        ):
+            successor = _flow_successor(ev, threaded)
+            held = held_in[successor] if successor is not None else held_in[_EXIT]
+            access_records.append(
+                _access_record(owner, owner_label, ev, held, limitations))
+            for lock in sorted(held):
+                relations.append({
+                    "relation": "PROTECTS",
+                    "lock": lock,
+                    "access_event_id": eid,
+                    "owner": owner_label,
+                    "owner_symbol_id": owner,
+                })
+                if _omits_unlock_on_path(successor, lock, succ, threaded, lock_by_id):
+                    relations.append({
+                        "relation": "UNLOCK_OMITTED_ON_PATH",
+                        "lock": lock,
+                        "access_event_id": eid,
+                        "owner": owner_label,
+                        "owner_symbol_id": owner,
+                        "candidate_state": "ambiguous",
+                    })
+
+    # SAME_LOCK / DIFFERENT_LOCK over access pairs sharing one subject identity.
+    by_subject: dict[str, list[dict[str, Any]]] = {}
+    for record in access_records:
+        key = _subject_key(record)
+        if key:
+            by_subject.setdefault(key, []).append(record)
+    for key in sorted(by_subject):
+        group = sorted(
+            by_subject[key],
+            key=lambda rec: (rec["start_line"], rec["access_event_id"] or ""),
+        )
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                left, right = group[i], group[j]
+                common = sorted(set(left["held_locks"]) & set(right["held_locks"]))
+                pair = [left["access_event_id"], right["access_event_id"]]
+                owners = sorted({left["owner"], right["owner"]})
+                if common:
+                    relations.append({
+                        "relation": "SAME_LOCK",
+                        "subject": key,
+                        "subject_decl": left["subject_decl"] or right["subject_decl"],
+                        "access_event_ids": pair,
+                        "owners": owners,
+                        "locks": common,
+                    })
+                else:
+                    relations.append({
+                        "relation": "DIFFERENT_LOCK",
+                        "subject": key,
+                        "subject_decl": left["subject_decl"] or right["subject_decl"],
+                        "access_event_ids": pair,
+                        "owners": owners,
+                        "unprotected": not left["held_locks"] or not right["held_locks"],
+                    })
+
+    access_records.sort(key=lambda rec: (
+        rec["owner_symbol_id"], rec["start_line"], rec["access_event_id"] or "",
+    ))
+    relations.sort(key=_relation_sort_key)
+
+    relation_order = ("PROTECTS", "SAME_LOCK", "DIFFERENT_LOCK", "UNLOCK_OMITTED_ON_PATH")
+    return {
+        "access_locksets": access_records,
+        "relations": relations,
+        "coverage": {
+            "accesses": len(access_records),
+            "protected_accesses": sum(1 for rec in access_records if rec["held_locks"]),
+            "unprotected_accesses": sum(1 for rec in access_records if not rec["held_locks"]),
+            "relations": {
+                rel: sum(1 for relation in relations if relation["relation"] == rel)
+                for rel in relation_order
+            },
+        },
+    }
+
+
+__all__ = ["build_lock_scenarios", "build_access_lockset"]

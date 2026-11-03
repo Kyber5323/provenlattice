@@ -178,6 +178,222 @@ class DeterminismTests(RaceScenarioTestBase):
         without_context = build_race_scenarios(events)
         self.assertEqual(with_context, without_context)
 
+    def test_competing_access_is_empty_without_lock_facts(self):
+        # No held-lockset can be derived without SUB-04's inputs, so the
+        # access-level pairs must stay empty rather than fabricate "unprotected".
+        self.assertEqual(self.result()["competing_access"], [])
+
+
+class CompetingAccessBase(unittest.TestCase):
+    """Base for SUB-05 (R5) access-level competing-access pair tests.
+
+    Analyses both ``events`` (lock facts) and ``sparse_cfg`` (access facts +
+    control-flow edges) so ``build_race_scenarios`` can consume SUB-04's
+    held-lockset projection.
+    """
+
+    FIXTURE = ""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "repo"
+        write(self.root, "src/a.c", self.FIXTURE)
+        self.database = Path(self.temp.name) / "graph.db"
+        full_index(self.root, self.database)
+        analyze_scope(self.root, "src", ("events", "sparse_cfg"),
+                      database=self.database)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def result(self, top_k=3) -> dict:
+        sparse = query_analysis(
+            self.root, "sparse_cfg", file_path="src/a.c", database=self.database)
+        self.assertEqual(sparse["status"], "available", sparse.get("reason"))
+        locks = query_analysis(
+            self.root, "events", file_path="src/a.c", database=self.database)
+        self.assertEqual(locks["status"], "available", locks.get("reason"))
+        return build_race_scenarios(
+            sparse["events"], edges=sparse["edges"], lock_facts=locks["events"],
+            top_k=top_k)
+
+    def competing(self, top_k=3) -> list[dict]:
+        return self.result(top_k)["competing_access"]
+
+
+class ReadReadNotCompetingTests(CompetingAccessBase):
+    FIXTURE = (
+        "int g;\n"
+        "int a(void) {\n    return g;\n}\n"
+        "int b(void) {\n    return g;\n}\n"
+    )
+
+    def test_read_read_is_zero(self):
+        self.assertEqual(self.competing(), [])
+
+
+class ReadWriteCompetingTests(CompetingAccessBase):
+    FIXTURE = (
+        "int g;\n"
+        "void a(void) {\n    g = 1;\n}\n"
+        "int b(void) {\n    return g;\n}\n"
+    )
+
+    def test_read_write_is_one_pair(self):
+        pairs = self.competing()
+        self.assertEqual(len(pairs), 1)
+
+    def test_pair_carries_frozen_fields(self):
+        pair = self.competing()[0]
+        for field in ("same_storage", "at_least_one_write",
+                      "may_execute_concurrently", "common_lock",
+                      "different_lock", "unprotected", "confidence"):
+            self.assertIn(field, pair)
+        self.assertEqual(pair["subject"], "g")
+        self.assertEqual(pair["identity"], "global:g")
+        self.assertEqual(pair["same_storage"], "true")
+        self.assertTrue(pair["at_least_one_write"])
+        self.assertTrue(pair["may_execute_concurrently"])
+        self.assertFalse(pair["common_lock"])
+        self.assertTrue(pair["different_lock"])
+        self.assertTrue(pair["unprotected"])
+        self.assertEqual(pair["confidence"], 0.5)
+        self.assertEqual(pair["candidate_state"], "ambiguous")
+
+
+class SameLockExcludedTests(CompetingAccessBase):
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "pthread_mutex_t m;\n"
+        "int g;\n"
+        "void a(void) {\n"
+        "    pthread_mutex_lock(&m);\n"
+        "    g = 1;\n"
+        "    pthread_mutex_unlock(&m);\n"
+        "}\n"
+        "void b(void) {\n"
+        "    pthread_mutex_lock(&m);\n"
+        "    g = 2;\n"
+        "    pthread_mutex_unlock(&m);\n"
+        "}\n"
+    )
+
+    def test_same_lock_is_excluded(self):
+        self.assertEqual(self.competing(), [])
+
+
+class DifferentLockCompetingTests(CompetingAccessBase):
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "pthread_mutex_t m1, m2;\n"
+        "int g;\n"
+        "void a(void) {\n"
+        "    pthread_mutex_lock(&m1);\n"
+        "    g = 1;\n"
+        "    pthread_mutex_unlock(&m1);\n"
+        "}\n"
+        "void b(void) {\n"
+        "    pthread_mutex_lock(&m2);\n"
+        "    g = 2;\n"
+        "    pthread_mutex_unlock(&m2);\n"
+        "}\n"
+    )
+
+    def test_different_lock_is_one_pair_not_unprotected(self):
+        pairs = self.competing()
+        self.assertEqual(len(pairs), 1)
+        self.assertFalse(pairs[0]["unprotected"])
+        self.assertTrue(pairs[0]["different_lock"])
+        self.assertFalse(pairs[0]["common_lock"])
+        # Both sides hold a lock, just not the same one -> the lowest band.
+        self.assertEqual(pairs[0]["confidence"], 0.3)
+        self.assertEqual(
+            [side["held_locks"] for side in pairs[0]["accesses"]],
+            [["m1"], ["m2"]],
+        )
+
+
+class CompetingConfidenceOrderingTests(CompetingAccessBase):
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "pthread_mutex_t m1, m2;\n"
+        "int g_unprot;\n"
+        "int g_half;\n"
+        "int g_diff;\n"
+        "void a(void) {\n"
+        "    g_unprot = 1;\n"
+        "    pthread_mutex_lock(&m1);\n"
+        "    g_half = 1;\n"
+        "    g_diff = 1;\n"
+        "    pthread_mutex_unlock(&m1);\n"
+        "}\n"
+        "void b(void) {\n"
+        "    g_unprot = 2;\n"
+        "    g_half = 2;\n"
+        "    pthread_mutex_lock(&m2);\n"
+        "    g_diff = 2;\n"
+        "    pthread_mutex_unlock(&m2);\n"
+        "}\n"
+    )
+
+    def test_ranked_by_confidence_descending(self):
+        pairs = self.competing()
+        confidences = [pair["confidence"] for pair in pairs]
+        self.assertEqual(confidences, sorted(confidences, reverse=True))
+        self.assertEqual(
+            [pair["subject"] for pair in pairs],
+            ["g_unprot", "g_half", "g_diff"],
+        )
+        by_subject = {pair["subject"]: pair for pair in pairs}
+        self.assertEqual(by_subject["g_unprot"]["confidence"], 0.5)
+        self.assertEqual(by_subject["g_half"]["confidence"], 0.4)
+        self.assertEqual(by_subject["g_diff"]["confidence"], 0.3)
+
+    def test_top_k_is_configurable_and_does_not_drop_ties(self):
+        result = self.result(top_k=2)
+        coverage = result["coverage"]["competing_access"]
+        self.assertEqual(coverage["total"], 3)
+        self.assertEqual(coverage["returned"], 2)
+        self.assertTrue(coverage["truncated"])
+        self.assertEqual(
+            [pair["subject"] for pair in result["competing_access"]],
+            ["g_unprot", "g_half"],
+        )
+
+
+class UnresolvedSameStorageTests(CompetingAccessBase):
+    FIXTURE = (
+        "void a(void) { g_undeclared++; }\n"
+        "void b(void) { g_undeclared = 2; }\n"
+    )
+
+    def test_unresolved_identity_is_unknown_not_same(self):
+        pairs = self.competing()
+        self.assertTrue(pairs)
+        for pair in pairs:
+            self.assertEqual(pair["same_storage"], "unknown")
+            self.assertIsNone(pair["identity"])
+
+
+class CompetingDeterminismTests(CompetingAccessBase):
+    FIXTURE = (
+        "int g;\n"
+        "void a(void) {\n    g = 1;\n}\n"
+        "int b(void) {\n    return g;\n}\n"
+    )
+
+    def test_competing_access_is_deterministic(self):
+        sparse = query_analysis(
+            self.root, "sparse_cfg", file_path="src/a.c", database=self.database)
+        locks = query_analysis(
+            self.root, "events", file_path="src/a.c", database=self.database)
+        first = build_race_scenarios(
+            sparse["events"], edges=sparse["edges"], lock_facts=locks["events"])
+        second = build_race_scenarios(
+            list(sparse["events"]), edges=list(sparse["edges"]),
+            lock_facts=list(locks["events"]))
+        self.assertEqual(first, second)
+
 
 if __name__ == "__main__":
     unittest.main()

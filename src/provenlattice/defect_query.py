@@ -30,6 +30,16 @@ SUPPORTED_DEFECT_QUERIES = tuple(defect.QUERY_NAMES)
 UPSTREAM_FEATURES = ("events:cpp", "sparse_cfg:cpp", "sparse_dfg:cpp")
 CAPABILITY_GRADE = "local-only, diagnostic"
 
+# SUB-06 / R10: the non-race mechanism queries whose already-computed results
+# are exposed as the additive ``mechanism_facts`` block (cwe1123_v2_query_contract.md
+# §4). ``unlock_discipline`` has no existing query state, so it is deliberately
+# absent -- not filled, not diverged (contract §4.1 / §6 U3).
+MECHANISM_QUERIES = (
+    defect.RACE_CONDITION,
+    defect.LOCK_ORDER,
+    defect.RESOURCE_LIFETIME,
+)
+
 
 def _upstream_state(store: AnalysisStore) -> dict:
     """The freshness of every upstream feature, per file, fail-closed.
@@ -224,6 +234,16 @@ def query_defect_candidates(
                 (c for r in results for c in r.candidates),
                 key=lambda c: c.sort_key())
             query = "all (" + ", ".join(SUPPORTED_DEFECT_QUERIES) + ")"
+            # SUB-06 / R10: expose the non-race mechanism results as their own
+            # additive block, keyed by mechanism name. This is a re-grouping of
+            # the already-serialized candidates (no new computation); the block
+            # is present even when race_condition produced zero candidates, so
+            # lock_order / resource_lifetime state stays visible.
+            mechanism_facts = {
+                one.query: [candidate.to_dict() for candidate in one.candidates]
+                for one in results
+                if one.query in MECHANISM_QUERIES
+            }
         else:
             try:
                 result = defect.run(
@@ -237,6 +257,13 @@ def query_defect_candidates(
             candidates = list(result.candidates)
             truncated = result.truncated
             coverage = dict(result.coverage)
+            # Same additive block as the "all" path, but only the one query that
+            # was actually run can have computed state to expose.
+            mechanism_facts = (
+                {result.query: [candidate.to_dict() for candidate in result.candidates]}
+                if result.query in MECHANISM_QUERIES
+                else {}
+            )
 
     with SQLiteStorage(database) as storage:
         generation = storage.current_generation(repo_id)
@@ -263,6 +290,7 @@ def query_defect_candidates(
         "status": "available",
         "candidates": [pair[0] for pair in evidence_pairs],
         "evidence_bundles": [pair[1] for pair in evidence_pairs],
+        "mechanism_facts": mechanism_facts,
         "coverage": coverage,
         "truncated": truncated,
         "grade": CAPABILITY_GRADE,

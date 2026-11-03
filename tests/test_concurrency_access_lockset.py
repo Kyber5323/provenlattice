@@ -201,6 +201,63 @@ class TryTimedNotHeldTests(AccessLocksetBase):
         self.assertEqual(self.relations("PROTECTS"), [])
 
 
+class LoopProtectedTests(AccessLocksetBase):
+    """Regression: a held lock must survive a for/while loop back-edge.
+
+    The must-hold analysis must start non-entry nodes from TOP (the function's
+    full lock universe) and shrink with meet = intersection; a loop back-edge
+    whose first-round value is empty must not under-approximate the header to
+    "not held".
+    """
+
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "pthread_mutex_t g_lock;\n"
+        "int g_count;\n"
+        "void f(void) {\n"
+        "    pthread_mutex_lock(&g_lock);\n"
+        "    for (int i = 0; i < 10; i++) {\n"
+        "        g_count++;\n"
+        "    }\n"
+        "    pthread_mutex_unlock(&g_lock);\n"
+        "}\n"
+    )
+
+    def test_loop_body_access_is_held(self) -> None:
+        for record in self.accesses("g_count"):
+            self.assertEqual(record["held_locks"], ["g_lock"])
+        self.assertTrue(self.relations("PROTECTS"))
+
+
+class TwoLockLoopTests(AccessLocksetBase):
+    """Regression: the flow-successor attribution must follow source line
+    order, so a loop body under the first lock is not attributed to a later
+    lock's release."""
+
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "pthread_mutex_t a, b;\n"
+        "int g_count;\n"
+        "void f(void) {\n"
+        "    pthread_mutex_lock(&a);\n"
+        "    for (int i = 0; i < 3; i++) {\n"
+        "        g_count++;\n"
+        "    }\n"
+        "    pthread_mutex_unlock(&a);\n"
+        "    pthread_mutex_lock(&b);\n"
+        "    g_count++;\n"
+        "    pthread_mutex_unlock(&b);\n"
+        "}\n"
+    )
+
+    def test_loop_body_holds_first_lock_only(self) -> None:
+        held_by_line = {}
+        for record in self.accesses("g_count"):
+            held_by_line[record["start_line"]] = record["held_locks"]
+        self.assertEqual(held_by_line[7], ["a"])
+        self.assertEqual(held_by_line[11], ["b"])
+
+
 class RaiiNotHeldNotLeakTests(AccessLocksetBase):
     FIXTURE = (
         "#include <mutex>\n"

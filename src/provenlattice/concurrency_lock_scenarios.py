@@ -365,6 +365,13 @@ def _threaded_dataflow(
     loop header that is also the method entry still meets the empty entry set.
     ``succ`` is the intra-method successor map (including the ``_EXIT`` sink)
     reused later for the unlock-omission walk.
+
+    This is a greatest-fixed-point must analysis: non-entry nodes start at TOP
+    (the function's full lock-identity universe) and shrink monotonically via
+    meet = intersection, so a loop back-edge's first-round value does not
+    under-approximate a held lock to empty. Starting every node at the empty
+    set would turn the meet over ``{entry-path, back-edge}`` into ``{}`` on the
+    first pass and never recover.
     """
     ids = set(threaded)
     pred: dict[str, list[str]] = {n: [] for n in ids}
@@ -421,22 +428,34 @@ def _threaded_dataflow(
             return held
         return held
 
+    # Greatest fixed point: non-entry nodes start at the function's full lock
+    # universe (TOP) and shrink via meet = intersection. The synthetic entry
+    # holds nothing. An empty predecessor meet is vacuous TOP (universe), which
+    # only ever applies to a node without any reaching path.
+    universe = frozenset({
+        (lock_by_id.get(nid) or {}).get("lock_identity")
+        for nid in ids
+        if threaded[nid].get("event_type") in (_LOCK, _UNLOCK)
+        and (lock_by_id.get(nid) or {}).get("lock_identity")
+    })
     held_in: dict[str, frozenset[str]] = {
-        n: frozenset() for n in list(ids) + [_ENTRY, _EXIT]
+        n: universe for n in list(ids) + [_EXIT]
     }
     held_out: dict[str, frozenset[str]] = {
-        n: frozenset() for n in list(ids) + [_ENTRY, _EXIT]
+        n: universe for n in list(ids) + [_EXIT]
     }
+    held_in[_ENTRY] = frozenset()
+    held_out[_ENTRY] = frozenset()
     order = sorted(list(ids) + [_ENTRY, _EXIT])
     for _ in range(1000):
         changed = False
         for nid in order:
+            if nid == _ENTRY:
+                continue
             preds = pred[nid]
-            new_in = frozenset()
-            if preds:
-                new_in = held_out[preds[0]]
-                for p in preds[1:]:
-                    new_in = new_in & held_out[p]
+            new_in = held_out[preds[0]] if preds else universe
+            for p in preds[1:]:
+                new_in = new_in & held_out[p]
             new_out = transfer(nid, new_in)
             if new_out != held_out[nid] or new_in != held_in[nid]:
                 held_out[nid] = new_out
@@ -465,7 +484,10 @@ def _flow_successor(
         e = int(node.get("end_line") or s)
         if s <= lo and hi <= e:
             return nid
-    for nid in sorted(threaded):
+    for nid in sorted(
+        threaded,
+        key=lambda key: (int(threaded[key].get("start_line") or 0), key),
+    ):
         if int(threaded[nid].get("start_line") or 0) > hi:
             return nid
     return None

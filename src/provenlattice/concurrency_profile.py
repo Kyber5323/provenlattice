@@ -31,6 +31,7 @@ from .evidence import Evidence
 from .orchestrator import analyze_scope
 from .planner import PlannerRequest, plan_capabilities
 from .storage import SQLiteStorage
+from .trace_chain import assemble_trace_chain
 
 CONCURRENCY_PROFILE_ID = "concurrency-v1"
 
@@ -264,8 +265,12 @@ def run_concurrency_profile(
             "candidates": candidates,
         }
         for candidate in candidates:
-            evidence.append(_candidate_to_evidence(
-                candidate, repo_id, generation, event_paths_for_scenario))
+            item = _candidate_to_evidence(
+                candidate, repo_id, generation, event_paths_for_scenario)
+            candidate["evidence_id"] = item.evidence_id
+            candidate["trace_evidence"] = assemble_trace_chain(
+                candidate, item.evidence_id, event_paths_for_scenario)
+            evidence.append(item)
 
     return {
         "status": "complete",

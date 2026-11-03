@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from .analysis_query import query_analysis
+from .concurrency_lock_scenarios import build_access_lockset
 from .models import (
     STORAGE_FIELD,
     STORAGE_FILE_STATIC,
@@ -227,4 +228,34 @@ def query_concurrency_context(
     return context
 
 
-__all__ = ["build_concurrency_context", "query_concurrency_context"]
+def query_access_lockset(
+    repo, file_path: str | None = None, database=None,
+) -> dict:
+    """Read one file's sparse_cfg + events facts and build its access locksets.
+
+    The per-access ``held_locks`` projection joins S3's lock facts (events) onto
+    the sparse-cfg control-flow (edges) by shared lock event id. Python/Java and
+    unbuilt/stale files fall through to the sparse_cfg query's own honest status
+    -- this capability is C/C++ only and never fabricates a lockset where its
+    inputs are absent.
+    """
+    env = query_analysis(repo, "sparse_cfg", file_path=file_path, database=database)
+    if env["status"] != "available":
+        return {"status": env["status"], "reason": env.get("reason")}
+    lock_env = query_analysis(repo, "events", file_path=file_path, database=database)
+    if lock_env["status"] != "available":
+        return {"status": lock_env["status"], "reason": lock_env.get("reason")}
+    bundle = build_access_lockset(
+        env.get("events", []),
+        env.get("edges", []),
+        lock_env.get("events", []),
+    )
+    bundle["status"] = "available"
+    return bundle
+
+
+__all__ = [
+    "build_concurrency_context",
+    "query_concurrency_context",
+    "query_access_lockset",
+]

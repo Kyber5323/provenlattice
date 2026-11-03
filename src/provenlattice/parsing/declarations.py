@@ -107,6 +107,10 @@ class _Scope:
     parent: int
     kind: str
     class_name: str = ""
+    # The name the scope's function binds, for `function_definition` frames.
+    # Recorded so a frame-local declaration can be scope-qualified without
+    # touching the public `scope_token` (Gate A1B, additive).
+    function_name: str = ""
     names: dict[str, list[Declaration]] = field(default_factory=dict)
 
 
@@ -235,10 +239,19 @@ class DeclarationIndex:
 
     def _open(self, node: Any, kind: str) -> None:
         class_name = ""
+        function_name = ""
         if kind in _CLASS_NODES:
             class_name = self._text(node.child_by_field_name("name"))
+        elif kind in _FUNCTION_NODES:
+            # A function frame needs its name for a frame-local declaration's
+            # scoped identity (Gate A1B). The declarator carries it; the same
+            # walk `_declare` uses for the names it binds.
+            function_name = self._declarator_name(node.child_by_field_name("declarator"))
         self._scopes.append(
-            _Scope(node.start_byte, node.end_byte, self._stack[-1], kind, class_name)
+            _Scope(
+                node.start_byte, node.end_byte, self._stack[-1], kind,
+                class_name, function_name,
+            )
         )
         self._stack.append(len(self._scopes) - 1)
 
@@ -360,6 +373,23 @@ class DeclarationIndex:
                 return frame_index
         return -1
 
+    def _enclosing_function_name(self, use_byte: int) -> str:
+        """The innermost enclosing function's name at ``use_byte``, or "".
+
+        Answers the declaration-side counterpart to a use: for a frame-local
+        declaration the enclosing function frame is its scope, and the frame's
+        name is what distinguishes two same-named locals in different functions
+        (Gate A1B). The byte offset is the declaration's own start, so the frame
+        it lands in is the one the declaration was made in, not the use's.
+        """
+        frame_index = self._innermost_frame(use_byte)
+        while frame_index >= 0:
+            frame = self._scopes[frame_index]
+            if frame.kind in _FUNCTION_NODES:
+                return frame.function_name
+            frame_index = frame.parent
+        return ""
+
     def _has_static(self, node: Any) -> bool:
         return any(
             child.type == "storage_class_specifier" and self._text(child) == "static"
@@ -456,6 +486,40 @@ class DeclarationIndex:
             if found is not None and found.storage == STORAGE_FIELD:
                 return found
         return None
+
+    def scoped_identity(self, declaration: Declaration) -> str:
+        """A scope-qualified identity token for one declaration (Gate A1B).
+
+        The public ``scope_token`` answers class (field) and file (file_static)
+        only, and is deliberately empty for a global (external linkage) and for
+        a frame-local name. That is the right answer for the stage 4 queries,
+        but it cannot tell two ``int fd`` locals apart across functions or under
+        shadowing. This is a *separate, additive* token that does, by reusing
+        facts the index already holds -- storage, declaring file, the enclosing
+        function frame and the declaration's own byte offset -- and adding
+        nothing to ``scope_token`` or to any storage-object identity rule.
+
+        For the storage classes whose ``scope_token`` is already unambiguous the
+        token matches ``_facts_for``'s spelling exactly, so the new annotation
+        is byte-identical to ``thread_argument_decl`` there and only widens the
+        frame-local cases.
+        """
+        storage = declaration.storage
+        if storage == STORAGE_FIELD:
+            return f"field:{declaration.scope_token}:{declaration.name}"
+        if storage == STORAGE_FILE_STATIC:
+            return f"file_static:{declaration.scope_token}:{declaration.name}"
+        if storage == STORAGE_GLOBAL:
+            return f"global:{declaration.name}"
+        # local / parameter / function_static: the identity is the declaring
+        # file, the enclosing function and the declaration's byte offset. The
+        # byte offset is what breaks shadowing inside one function, where the
+        # function name and the variable name are both shared.
+        function_name = self._enclosing_function_name(declaration.start_byte)
+        return (
+            f"{storage}:{self.relative_path}:{function_name}:"
+            f"{declaration.name}:{declaration.start_byte}"
+        )
 
     @staticmethod
     def _last_before(entries: list[Declaration] | None, use_byte: int) -> Declaration | None:

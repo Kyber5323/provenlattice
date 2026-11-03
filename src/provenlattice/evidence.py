@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 EVIDENCE_KINDS = {
@@ -310,3 +310,194 @@ class DefectEvidenceBundle:
             "confidence": self.confidence,
             "generation": self.generation,
         }
+
+
+# ---------------------------------------------------------------------------
+# Evidence Schema V2 (SUB-03 / R0): the five-block additive adapter.
+#
+# This assembles the already-produced facts of SUB-01 (trace_evidence),
+# SUB-02 (access_kind / is_write), SUB-04 (per-access held-locksets + lock
+# relations) and SUB-05 (access-level competing-access pairs) under one
+# ``candidate.evidence_v2`` container, with the confidence/limitation block
+# derived only from the candidate's own already-computed state. It adds no
+# analysis, no points-to, no alias and no control-flow reasoning: a fact that
+# a producer has not emitted is written out as ``[]`` / ``null`` / ``"unknown"``
+# with a stable limitation token, never guessed into existence.
+#
+# Frozen contract: cwe1123_v2_query_contract.md §5.
+
+# Stable limitation tokens (contract §5.2 / §5.3 / §5.5 / §5.6). They name the
+# reason a block or field has no fact source, and never carry resolved values.
+ACCESS_EVENT_LINKAGE_UNAVAILABLE = "access_event_linkage_unavailable"
+ACCESS_KIND_UNAVAILABLE = "access_kind_unavailable"
+IS_WRITE_UNAVAILABLE = "is_write_unavailable"
+LOCK_FACTS_UNAVAILABLE = "lock_facts_unavailable"
+TRACE_EVIDENCE_UNAVAILABLE = "trace_evidence_unavailable"
+CONFIDENCE_UNAVAILABLE = "confidence_unavailable"
+
+_V2_ACCESS_KINDS = frozenset({"READ", "WRITE", "READ_MODIFY_WRITE", "unknown"})
+_PROTECTS_RELATIONS = frozenset({"PROTECTS", "UNLOCK_OMITTED_ON_PATH"})
+_PAIR_RELATIONS = frozenset({"SAME_LOCK", "DIFFERENT_LOCK"})
+
+
+def _normalize_is_write(value: Any) -> bool | None:
+    """Normalize SUB-02's string ``is_write`` annotation to a boolean.
+
+    Only the exact strings ``"true"`` / ``"false"`` are a definite answer
+    (contract §5.2); anything else -- including a missing value -- is unknown
+    and becomes ``null`` rather than being guessed to ``false``.
+    """
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def assemble_evidence_v2(
+    candidate: Mapping[str, Any],
+    *,
+    access_locksets: Iterable[Mapping[str, Any]] | None = None,
+    lock_relations: Iterable[Mapping[str, Any]] | None = None,
+    competing_access: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Assemble the five-block Evidence Schema V2 payload for one candidate.
+
+    The candidate is the already-serialized record (``candidate.to_dict()`` for
+    defect candidates, or a concurrency scenario candidate) plus its
+    ``evidence_id`` and, for concurrency candidates, its assembled
+    ``trace_evidence``. ``access_locksets`` / ``lock_relations`` are SUB-04's
+    ``build_access_lockset()`` output (``None`` when no lockset input exists);
+    ``competing_access`` is SUB-05's ``build_race_scenarios()`` output (``None``
+    when the producer was not wired).
+
+    Every sub-fact joins by exact ``access_event_id`` only -- never subject
+    names, line numbers or approximate strings (contract §5.1). A block whose
+    producer is absent stays present but empty, with a stable limitation token.
+    The five blocks are always returned, in a byte-stable order.
+    """
+    limitations: set[str] = set()
+    for name in candidate.get("missing_evidence") or ():
+        if name:
+            limitations.add(str(name))
+
+    # access block (SUB-02 related_accesses, exact access_event_id matrix).
+    access_records: list[dict[str, Any]] = []
+    access_ids: set[str] = set()
+    for item in candidate.get("related_accesses") or ():
+        if not isinstance(item, Mapping):
+            continue
+        event_id = item.get("event_id")
+        if not event_id:
+            limitations.add(ACCESS_EVENT_LINKAGE_UNAVAILABLE)
+            continue
+        access_ids.add(str(event_id))
+        access_kind = item.get("access_kind")
+        if not access_kind or access_kind not in _V2_ACCESS_KINDS:
+            access_kind = "unknown"
+            limitations.add(ACCESS_KIND_UNAVAILABLE)
+        is_write = _normalize_is_write(item.get("is_write"))
+        if is_write is None:
+            limitations.add(IS_WRITE_UNAVAILABLE)
+        access_records.append({
+            "access_event_id": str(event_id),
+            "event_type": item.get("event_type"),
+            "access_kind": access_kind,
+            "is_write": is_write,
+            "owner": item.get("owner"),
+            "source_span": [
+                int(item.get("start_line") or 0),
+                int(item.get("end_line") or 0),
+            ],
+        })
+    access_records.sort(key=lambda record: (
+        record["source_span"][0], record["source_span"][1],
+        record["access_event_id"],
+    ))
+
+    # lock block (SUB-04 access_locksets + relations, filtered to this
+    # candidate's access ids; SUB-04's stable order is preserved).
+    lock_access_locksets: list[dict[str, Any]] = []
+    lock_block_relations: list[dict[str, Any]] = []
+    if access_locksets is None:
+        limitations.add(LOCK_FACTS_UNAVAILABLE)
+    else:
+        for record in access_locksets:
+            if not isinstance(record, Mapping):
+                continue
+            if str(record.get("access_event_id") or "") not in access_ids:
+                continue
+            lock_access_locksets.append(dict(record))
+            for limitation in record.get("limitation") or ():
+                if limitation:
+                    limitations.add(str(limitation))
+    for relation in lock_relations or ():
+        if not isinstance(relation, Mapping):
+            continue
+        relation_kind = relation.get("relation")
+        if relation_kind in _PROTECTS_RELATIONS:
+            if str(relation.get("access_event_id") or "") in access_ids:
+                lock_block_relations.append(dict(relation))
+        elif relation_kind in _PAIR_RELATIONS:
+            endpoints = relation.get("access_event_ids") or []
+            if len(endpoints) == 2 and all(
+                str(endpoint) in access_ids for endpoint in endpoints
+            ):
+                lock_block_relations.append(dict(relation))
+
+    # competing_access block (SUB-05 pairs, both endpoints inside this
+    # candidate; producer order and set are preserved, never re-ranked).
+    competing_records: list[dict[str, Any]] = []
+    for pair in competing_access or ():
+        if not isinstance(pair, Mapping):
+            continue
+        sides = pair.get("accesses") or []
+        endpoints = [
+            side.get("access_event_id") for side in sides if isinstance(side, Mapping)
+        ]
+        if len(endpoints) == 2 and all(
+            str(endpoint) in access_ids for endpoint in endpoints
+        ):
+            competing_records.append(dict(pair))
+
+    # trace_evidence block (SUB-01 output, consumed as-is).
+    trace_records: list[dict[str, Any]] = [
+        dict(step) for step in (candidate.get("trace_evidence") or ())
+        if isinstance(step, Mapping)
+    ]
+    if not trace_records:
+        limitations.add(TRACE_EVIDENCE_UNAVAILABLE)
+
+    # confidence_limitation block (derived only from the candidate's own state,
+    # never from the pair count or missing-evidence count).
+    analysis_kind = "unknown"
+    if candidate.get("analysis_kind") == "definite":
+        analysis_kind = "definite"
+    elif "candidate_state" in candidate:
+        analysis_kind = (
+            "may" if candidate.get("candidate_state") == "ambiguous" else "unknown")
+    elif "resolution_status" in candidate:
+        analysis_kind = (
+            "may" if candidate.get("resolution_status") in ("resolved", "ambiguous")
+            else "unknown")
+
+    confidence = candidate.get("confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        confidence = None
+        limitations.add(CONFIDENCE_UNAVAILABLE)
+
+    return {
+        "access": access_records,
+        "lock": {
+            "access_locksets": lock_access_locksets,
+            "relations": lock_block_relations,
+        },
+        "competing_access": competing_records,
+        "trace_evidence": trace_records,
+        "confidence_limitation": {
+            "analysis_kind": analysis_kind,
+            "confidence": confidence,
+            "may_be_false_positive": analysis_kind != "definite",
+            "limitations": sorted(limitations),
+        },
+    }

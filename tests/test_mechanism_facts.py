@@ -124,11 +124,14 @@ class MechanismFactsRegressionTests(MechanismFactsBase):
         candidate = env["candidates"][0]
         self.assertEqual(candidate["query"], "resource_lifetime")
         # The mechanism block carries the same candidate (facts/paths included),
-        # minus the evidence_id the flattened list appends.
+        # minus the evidence_id and the SUB-03/R0 additive evidence_v2 the
+        # flattened list appends (contract §5.8: mechanism_facts stays an
+        # independent block and its per-mechanism content is unchanged).
         block_entry = self.block(env, "resource_lifetime")[0]
         self.assertEqual(
             block_entry,
-            {key: value for key, value in candidate.items() if key != "evidence_id"},
+            {key: value for key, value in candidate.items()
+             if key not in ("evidence_id", "evidence_v2")},
         )
 
     def test_mechanism_entry_has_full_serialization(self) -> None:

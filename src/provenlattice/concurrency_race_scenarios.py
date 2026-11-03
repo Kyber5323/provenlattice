@@ -51,17 +51,19 @@ def _identity_key(decl: str, subject: str) -> str:
 
 
 def _rmw_spans(accesses: Iterable[Mapping[str, Any]]) -> list[list[int]]:
-    """Source lines that are both read and written.
+    """Source lines of first-class read-modify-write accesses.
 
-    S1's RMW read-half gives an update/compound access the same span on its READ
-    and its WRITE (`x++` reads and writes the same `x`); a plain `x = x + 1`
-    reads the right-hand `x` elsewhere. Access events carry only line spans, so
-    this is a by-line approximation -- deliberately over-approximating, never
-    under-approximating, because a candidate is not a finding.
+    S1 publishes ``access_kind == READ_MODIFY_WRITE`` on the write half of an
+    update/compound assignment (`x++`, `x += y`, `--x`), so a read-modify-write
+    is a fact read off the access record rather than an approximation from a
+    read/write line overlap. A plain `x = x + 1` writes (WRITE) and reads
+    (READ) but never publishes a READ_MODIFY_WRITE kind, so it is not an RMW.
     """
-    read = {_span(access) for access in accesses if access["event_type"] == _READ}
-    write = {_span(access) for access in accesses if access["event_type"] == _WRITE}
-    return sorted([start, end] for start, end in (read & write))
+    return sorted(
+        [*_span(access)]
+        for access in accesses
+        if access.get("access_kind") == "READ_MODIFY_WRITE"
+    )
 
 
 def build_race_scenarios(
@@ -94,6 +96,8 @@ def build_race_scenarios(
         access_by_identity.setdefault(_identity_key(decl, subject), []).append({
             "event_id": event.get("event_id"),
             "event_type": event.get("event_type"),
+            "access_kind": annotations.get("access_kind", ""),
+            "is_write": annotations.get("is_write", "false"),
             "owner": _owner(event),
             "start_line": int(event.get("start_line") or 0),
             "end_line": int(event.get("end_line") or 0),

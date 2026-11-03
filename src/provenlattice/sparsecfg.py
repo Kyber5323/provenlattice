@@ -1551,6 +1551,21 @@ class SparseCfgBuilder:
         annotations = {"expression": text}
         annotations["subject"] = subject
         annotations.update(facts)
+        # R1: first-class access kind, additive to the READ/WRITE event. The
+        # write half of a read-modify-write (`x += y`, `x++`, `--x`) is the one
+        # access that is both; a plain `x = x + 1` writes (WRITE) and reads
+        # (READ) but never publishes a READ_MODIFY_WRITE kind. `event_type` is
+        # left unchanged so existing event identity and packing are preserved.
+        if event_type == "WRITE":
+            annotations["is_write"] = "true"
+            annotations["access_kind"] = (
+                "READ_MODIFY_WRITE"
+                if origin is not None and _is_read_modify_write(origin)
+                else "WRITE"
+            )
+        else:
+            annotations["is_write"] = "false"
+            annotations["access_kind"] = "READ"
         if event_type == "WRITE" and origin is not None:
             # The escape half of 5C-2's 2.11: what the write *read*, and
             # whether the statement carrying it runs on every path of the

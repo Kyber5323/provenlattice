@@ -98,6 +98,61 @@ class RmwAccessTests(AccessSemanticsTestBase):
         self.assertEqual(self.accesses("local_rmw", subject="local"), [])
 
 
+class AccessKindTests(AccessSemanticsTestBase):
+    FIXTURE = (
+        "int g_count;\n"
+        "void inc(void) { g_count++; }\n"
+        "void add(int n) { g_count += n; }\n"
+        "void dec(void) { --g_count; }\n"
+        "void assign(int v) { g_count = v; }\n"
+        "void read(void) { int x = g_count; (void)x; }\n"
+        "void self_read(void) { g_count = g_count + 1; }\n"
+    )
+
+    def kinds(self, owner: str, subject: str) -> dict:
+        result = {}
+        for event in self.accesses(owner, subject=subject):
+            result.setdefault(event["event_type"], []).append(
+                event["annotations"].get("access_kind"))
+        return result
+
+    def test_update_is_first_class_rmw(self):
+        for owner in ("inc", "add", "dec"):
+            kinds = self.kinds(owner, "g_count")
+            self.assertIn("READ_MODIFY_WRITE", kinds["WRITE"])
+            self.assertEqual(kinds["READ"], ["READ"])
+
+    def test_plain_assignment_is_write_kind(self):
+        kinds = self.kinds("assign", "g_count")
+        self.assertEqual(kinds["WRITE"], ["WRITE"])
+        self.assertNotIn("READ", kinds)
+
+    def test_pure_read_is_read_kind(self):
+        kinds = self.kinds("read", "g_count")
+        self.assertEqual(kinds["READ"], ["READ"])
+        self.assertNotIn("WRITE", kinds)
+
+    def test_is_write_semantics(self):
+        self.assertEqual(
+            self.accesses("assign", "WRITE", "g_count")[0]["annotations"]["is_write"], "true")
+        self.assertEqual(
+            self.accesses("read", "READ", "g_count")[0]["annotations"]["is_write"], "false")
+        self.assertEqual(
+            self.accesses("inc", "WRITE", "g_count")[0]["annotations"]["is_write"], "true")
+
+    def test_self_read_rhs_is_not_rmw(self):
+        # `g_count = g_count + 1` reads the right-hand g_count, but the write is
+        # a plain assignment, not a read-modify-write.
+        kinds = self.kinds("self_read", "g_count")
+        self.assertEqual(kinds["WRITE"], ["WRITE"])
+        self.assertEqual(kinds["READ"], ["READ"])
+        self.assertNotIn(
+            "READ_MODIFY_WRITE",
+            [event["annotations"].get("access_kind")
+             for event in self.accesses("self_read", subject="g_count")],
+        )
+
+
 class AtomicAccessTests(AccessSemanticsTestBase):
     FIXTURE = (
         "#include <stdatomic.h>\n"

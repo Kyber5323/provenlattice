@@ -371,6 +371,54 @@ class ScenarioAnnotationGoldenTests(unittest.TestCase):
         kinds = {node["kind"] for node in result["nodes"]}
         self.assertIn(SCENARIO_ANNOTATION_KIND, kinds)
 
+    def test_annotation_id_stable_across_reindex(self) -> None:
+        # Owner Decision V1 req: id is stable across repeated full indexes of
+        # the same repository (deterministic repo_id + content-derived seed).
+        first_ids = [ann["annotation_id"] for ann in self.annotations("src/p1.c")]
+        db2 = Path(self.temp.name) / "graph2.db"
+        full_index(self.root, db2)
+        repo_id2 = analyze_c_ast_scope(self.root, "src", db2)["repo_id"]
+        self.assertEqual(repo_id2, self.repo_id)
+        with closing(sqlite3.connect(db2)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = [dict(row) for row in connection.execute(
+                "SELECT n.* FROM analysis_nodes n JOIN files f ON f.file_id=n.file_id "
+                "WHERE f.path='src/p1.c' AND n.feature='ast:c' ORDER BY n.analysis_node_id")]
+        second = sorted(
+            (json.loads(row["payload"]) for row in rows
+             if row["kind"] == SCENARIO_ANNOTATION_KIND),
+            key=lambda ann: (ann["start_byte"], ann["end_byte"], ann["scenario_id"]),
+        )
+        self.assertTrue(first_ids)
+        self.assertEqual(first_ids, [ann["annotation_id"] for ann in second])
+
+    def test_annotation_id_differs_across_repo_identity(self) -> None:
+        # Owner Decision V1 req: same source content under a different repo
+        # identity (root path -> distinct store.repo_id) yields a distinct id.
+        other_root = Path(self.temp.name) / "repo2"
+        other_src = other_root / "src"
+        other_src.mkdir(parents=True)
+        (other_src / "p1.c").write_bytes((self.root / "src" / "p1.c").read_bytes())
+        db2 = Path(self.temp.name) / "graph3.db"
+        full_index(other_root, db2)
+        repo_id2 = analyze_c_ast_scope(other_root, "src", db2)["repo_id"]
+        self.assertNotEqual(repo_id2, self.repo_id)
+        with closing(sqlite3.connect(db2)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = [dict(row) for row in connection.execute(
+                "SELECT n.* FROM analysis_nodes n JOIN files f ON f.file_id=n.file_id "
+                "WHERE f.path='src/p1.c' AND n.feature='ast:c' ORDER BY n.analysis_node_id")]
+        other = sorted(
+            (json.loads(row["payload"]) for row in rows
+             if row["kind"] == SCENARIO_ANNOTATION_KIND),
+            key=lambda ann: (ann["start_byte"], ann["end_byte"], ann["scenario_id"]),
+        )
+        self.assertEqual(len(other), 1)
+        self.assertNotEqual(
+            self.annotations("src/p1.c")[0]["annotation_id"],
+            other[0]["annotation_id"],
+        )
+
 
 class ScenarioWalkerByteSpanTests(unittest.TestCase):
     """Walker point additive ``start_byte``/``end_byte`` publication (§7)."""
@@ -417,6 +465,23 @@ class ScenarioWalkerByteSpanTests(unittest.TestCase):
         self.assertEqual(C_AST_CONTRACT, "c-ast-v4")
         self.assertEqual(ANALYZER_VERSIONS["ast:c"], 4)
         self.assertEqual(ANALYZER_VERSIONS["sparse_cfg:cpp"], 2)
+
+    def test_sparse_cfg_version_bump_restalifies_cache(self) -> None:
+        # Owner Decision V1 (sparse_cfg:cpp 1->2): the version genuinely
+        # participates in cache invalidation, not a dead constant. A cached
+        # result recorded under the old version is stale and rematerialized.
+        analyze_scope(self.root, "src", "sparse_cfg", self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE analysis_state SET feature_version = 1 "
+                "WHERE feature='sparse_cfg:cpp'")
+            connection.commit()
+        result = analyze_scope(self.root, "src", "sparse_cfg", self.database)
+        self.assertEqual(
+            result["features"]["sparse_cfg"]["materialized"], ["src/p.c"])
+        env = query_analysis(self.root, "sparse_cfg", file_path="src/p.c",
+                             database=self.database)
+        self.assertEqual(env["status"], "available")
 
 
 if __name__ == "__main__":

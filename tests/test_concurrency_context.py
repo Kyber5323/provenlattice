@@ -3,8 +3,11 @@
 Freezes the fail-closed fact contract for S4/S5:
 
 1. a spawn→join pair is emitted only when the thread-handle identity is
-   provably the same object; the events layer does not stamp a handle on
-   THREAD_JOIN, so pairing is refused and `thread_handle_identity` is reported;
+   provably the same object -- the same ``subject_decl`` in the same owner with
+   the spawn preceding the join. FE-5 stamps a handle on THREAD_JOIN, so a
+   provable pair is asserted; a join with no recoverable handle (e.g.
+   ``WaitForMultipleObjects``) stays unknown and ``thread_handle_identity`` is
+   reported rather than pairing by owner + source order;
 2. MAY_PARALLEL is a candidate (status ambiguous), keyed by S1's stable
    `subject_decl` identity, carrying its access events, spans and exactness;
 3. an unresolved identity (unknown storage, no subject_decl) is marked
@@ -35,11 +38,12 @@ def write(root: Path, relative: str, value: str) -> None:
 
 class ConcurrencyContextTestBase(unittest.TestCase):
     FIXTURE = ""
+    FILE = "src/a.c"
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "repo"
-        write(self.root, "src/a.c", self.FIXTURE)
+        write(self.root, self.FILE, self.FIXTURE)
         self.database = Path(self.temp.name) / "graph.db"
         full_index(self.root, self.database)
         analyze_scope(self.root, "src", ("sparse_cfg",), database=self.database)
@@ -49,7 +53,7 @@ class ConcurrencyContextTestBase(unittest.TestCase):
 
     def events(self) -> list[dict]:
         env = query_analysis(
-            self.root, "sparse_cfg", file_path="src/a.c", database=self.database)
+            self.root, "sparse_cfg", file_path=self.FILE, database=self.database)
         self.assertEqual(env["status"], "available", env.get("reason"))
         return env["events"]
 
@@ -78,15 +82,29 @@ class SpawnJoinIdentityTests(ConcurrencyContextTestBase):
         handles = sorted(s["handle"] for s in ctx["spawns"])
         self.assertEqual(handles, ["a", "b"])
 
-    def test_no_pairing_without_join_handle_identity(self):
-        # Two threads are spawned and joined in the same method, but THREAD_JOIN
-        # carries no handle, so pairing by owner+order would merge two different
-        # threads. The honest answer is: no pair, `thread_handle_identity`
-        # missing evidence, and the capability gap is reported.
+    def test_join_handle_identity_pairs_spawn_with_join(self):
+        # Two threads are spawned and joined in the same method. FE-5 stamps a
+        # handle on each THREAD_JOIN, so each join shares its spawn's
+        # `handle_decl` and the pair is asserted -- never fabricated by
+        # owner + source order alone.
         ctx = self.context()
-        self.assertEqual(ctx["spawn_join_pairs"], [])
-        self.assertIn("thread_handle_identity", ctx["missing_evidence"])
-        self.assertTrue(ctx["capability_gaps"])
+        pairs = ctx["spawn_join_pairs"]
+        self.assertEqual(len(pairs), 2)
+        handles = sorted(p["handle_decl"] for p in pairs)
+        self.assertEqual(handles, ["local:a", "local:b"])
+        self.assertTrue(all(p["thread_function"] == "worker" for p in pairs))
+        self.assertTrue(all(p["owner"] == "two_threads" for p in pairs))
+        # the join now carries the handle, so no missing evidence / gap remains
+        self.assertNotIn("thread_handle_identity", ctx["missing_evidence"])
+        self.assertFalse(ctx["capability_gaps"])
+
+    def test_join_carries_handle_and_identity(self):
+        # Each join recovers the same handle as its spawn: first-argument
+        # `pthread_join(a, NULL)` names `a`, and the declaration index turns it
+        # into the same `subject_decl` token the spawn recorded.
+        ctx = self.context()
+        joins = sorted((j["handle"], j["handle_decl"]) for j in ctx["joins"])
+        self.assertEqual(joins, [("a", "local:a"), ("b", "local:b")])
 
     def test_may_parallel_is_a_candidate_keyed_by_identity(self):
         ctx = self.context()
@@ -114,6 +132,53 @@ class SpawnJoinIdentityTests(ConcurrencyContextTestBase):
             json.dumps(first, sort_keys=True),
             json.dumps(second, sort_keys=True),
         )
+
+
+class WaitForMultipleObjectsTests(ConcurrencyContextTestBase):
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "void *worker(void *arg) { return 0; }\n"
+        "void wait_all(unsigned n) {\n"
+        "    unsigned hs[2];\n"
+        "    WaitForMultipleObjects(n, hs, 1, 0);\n"
+        "}\n"
+    )
+
+    def test_multi_handle_wait_is_unknown(self):
+        # The first argument of WaitForMultipleObjects is the handle *count*,
+        # not a handle, so no subject is recovered. Pairing a join against a
+        # specific thread cannot be proved -- it stays unknown rather than
+        # naming `n` as a handle.
+        ctx = self.context()
+        self.assertEqual(len(ctx["joins"]), 1)
+        self.assertEqual(ctx["joins"][0]["handle"], "")
+        self.assertEqual(ctx["joins"][0]["handle_decl"], "")
+        self.assertEqual(ctx["spawn_join_pairs"], [])
+        self.assertIn("thread_handle_identity", ctx["missing_evidence"])
+        self.assertTrue(ctx["capability_gaps"])
+
+
+class CppJoinReceiverTests(ConcurrencyContextTestBase):
+    FILE = "src/a.cc"
+    FIXTURE = (
+        "#include <thread>\n"
+        "void body01(void) {}\n"
+        "void spawner01(void) {\n"
+        "    std::thread t(body01);\n"
+        "    t.join();\n"
+        "}\n"
+    )
+
+    def test_member_join_recovers_receiver_handle(self):
+        # `t.join()` has no argument; the handle is the member-call receiver,
+        # recovered by the same rule that names a mutex for `m.lock()`. It
+        # shares the spawn's `subject_decl`, so the pair is asserted.
+        ctx = self.context()
+        joins = [(j["handle"], j["handle_decl"]) for j in ctx["joins"]]
+        self.assertEqual(joins, [("t", "local:t")])
+        self.assertEqual(len(ctx["spawn_join_pairs"]), 1)
+        self.assertEqual(ctx["spawn_join_pairs"][0]["handle_decl"], "local:t")
+        self.assertNotIn("thread_handle_identity", ctx["missing_evidence"])
 
 
 class UnrelatedAccessTests(ConcurrencyContextTestBase):

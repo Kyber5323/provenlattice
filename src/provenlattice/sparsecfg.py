@@ -79,7 +79,7 @@ SUBJECT_FROM_OUT_ARGUMENT = "out_argument"
 # resource to its caller, which is the one ownership transfer a sparse CFG can
 # see at all.
 _ANNOTATED_EVENT_TYPES = frozenset(
-    {"ALLOC", "RELEASE", "CALL", "LOCK", "UNLOCK", "ATOMIC", "THREAD_SPAWN", "RETURN"}
+    {"ALLOC", "RELEASE", "CALL", "LOCK", "UNLOCK", "ATOMIC", "THREAD_SPAWN", "THREAD_JOIN", "RETURN"}
 )
 
 # The two node types that bind a name to a value. `_plain_generic` carries the
@@ -1181,6 +1181,12 @@ class SparseCfgBuilder:
             # A declaration binds a name to the handle, so the target is always
             # the whole designation.
             return self._declaration_target(node), SUBJECT_FROM_ASSIGNMENT, True
+        if event_type == "THREAD_JOIN" and matched_name == "WaitForMultipleObjects":
+            # The first argument is the handle *count*, not a handle; the handles
+            # themselves are an array passed second, and a join against one
+            # specific thread cannot be proved from it. Refuse to name a subject
+            # rather than pairing the join against the count expression.
+            return "", "", False
         argument = self._out_argument_node(event_type, matched_name, node)
         if argument is not None:
             return (

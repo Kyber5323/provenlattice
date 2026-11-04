@@ -919,6 +919,7 @@ class SparseCfgBuilder:
         thread_function = self._thread_function(event_type, event.matched_name, node)
         if thread_function:
             annotations["thread_function"] = thread_function
+        annotations.update(self._thread_argument_facts(event_type, event.matched_name, node))
         return annotations
 
     def _subject_node(self, event_type: str, matched_name: str, node: Any) -> Any:
@@ -1334,6 +1335,80 @@ class SparseCfgBuilder:
         if index >= len(named):
             return ""
         return self._root_identifier(named[index])
+
+    def _thread_argument_facts(self, event_type: str, matched_name: str, node: Any) -> dict[str, str]:
+        """Candidate-level address-passed facts for `pthread_create`'s 4th arg.
+
+        Gate A1 (throwaway integration spike, NOT a shipped feature): verifies
+        that the real THREAD_SPAWN path can extract a deterministic,
+        scope-qualified address-passed fact for the object handed to the new
+        thread.
+
+        Contracts enforced here:
+
+        * `thread_argument_form` records the *syntax* only: `address_of` is
+          must-eligible for a query-time consumer, `pointer_var`/`deref` are
+          may-only (never must), `opaque`/`empty` prove nothing.
+        * `thread_argument_decl` reuses the existing scope-qualified identity
+          (`_subject_facts` -> `subject_decl`, storage class + scope + name); an
+          unresolvable declaration stays empty (= unknown), never a guessed token.
+        * purely additive next to the existing THREAD_SPAWN annotations; no
+          POINTS_TO/ALIASES relation, no StorageObject redesign, no confidence
+          change.
+        """
+        if event_type != "THREAD_SPAWN" or matched_name != "pthread_create":
+            return {}
+        arguments = node.child_by_field_name("arguments")
+        named = list(arguments.named_children) if arguments is not None else []
+        if len(named) < 4:
+            return {}
+        arg = named[3]
+        form = _thread_argument_form(arg, self.source)
+        root = self._root_identifier(arg)
+        if not root:
+            return {
+                "thread_argument": "",
+                "thread_argument_decl": "",
+                "thread_argument_decl_scoped": "",
+                "thread_argument_form": form,
+            }
+        facts = self._subject_facts(arg, root)
+        decl = facts.get("subject_decl", "")
+        member = facts.get("subject_member", "")
+        if decl and member:
+            decl = f"{decl}.{member}"
+        scoped = self._scoped_decl_token(arg, root)
+        return {
+            "thread_argument": root,
+            "thread_argument_decl": decl,
+            "thread_argument_decl_scoped": scoped,
+            "thread_argument_form": form,
+        }
+
+    def _scoped_decl_token(self, node: Any, root: str) -> str:
+        """The A1B scope-qualified declaration token for a spawn argument.
+
+        Mirrors ``_subject_facts``' resolution (bare root, then the out-of-line
+        member fallback) but asks the declaration index for the *scoped* token
+        instead of the public frame-blind ``subject_decl``. Empty (= unknown)
+        whenever the file does not resolve the name, never a guessed token. The
+        member path is appended the same way ``thread_argument_decl`` appends
+        it, so ``&s.a`` stays distinguished from ``&s.b``.
+        """
+        if self.declarations is None or not root:
+            return ""
+        declaration = self._resolve(node, root)
+        if declaration is None:
+            declaration = self._resolve_member(node, root)
+        if declaration is None:
+            return ""
+        token = self.declarations.scoped_identity(declaration)
+        if not token:
+            return ""
+        _, member, _, _ = self._member_chain(node)
+        if member:
+            token = f"{token}.{member}"
+        return token
 
     def _structural_point(self, node: Any) -> _Point | None:
         kind = node.type
@@ -2133,6 +2208,33 @@ def _call_arguments(node: Any, source: bytes) -> str:
     names = [_root_identifier(source, item) for item in arguments.named_children]
     names = [name for name in names if name]
     return ARGUMENT_SEPARATOR.join(names)
+
+
+def _thread_argument_form(node: Any, source: bytes) -> str:
+    """The syntactic form of a `pthread_create` 4th argument (Gate A1 spike).
+
+    ``address_of`` means the address of a storage object is passed (must-eligible
+    for a query-time consumer). ``pointer_var`` means a pointer-typed *value* is
+    passed (may only, never must). ``deref`` is the value a pointer points at.
+    ``opaque`` is any expression whose address/identity cannot be proved.
+    ``empty`` means no 4th argument is present. No form is ever upgraded.
+    """
+    if node is None:
+        return "empty"
+    kind = node.type
+    if kind == "pointer_expression":
+        op = _operator_of(node, source)
+        if op == "&":
+            return "address_of"
+        if op == "*":
+            return "deref"
+        return "opaque"
+    if kind == "cast_expression":
+        inner = _thread_argument_form(node.child_by_field_name("value"), source)
+        return "address_of" if inner == "address_of" else "opaque"
+    if kind == "identifier":
+        return "pointer_var"
+    return "opaque"
 
 
 def _first_call_argument(node: Any) -> Any:

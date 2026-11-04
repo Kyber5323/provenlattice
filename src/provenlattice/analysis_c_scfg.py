@@ -192,6 +192,7 @@ def analyze_c_scfg_scope(
                     "owner_qualified_name": point.owner_qualified_name,
                     "owner_signature": point.owner_signature,
                     "ordinal": point.ordinal,
+                    "start_byte": point.start_byte, "end_byte": point.end_byte,
                     "start_line": point.start_line, "end_line": point.end_line,
                     "matched_name": point.matched_name,
                     "matched_via": point.matched_via,

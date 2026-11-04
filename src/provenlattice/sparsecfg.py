@@ -226,6 +226,13 @@ def _field_of(edge_or_event: Any, name: str) -> Any:
     return getattr(edge_or_event, name)
 
 
+def _optional_field_of(edge_or_event: Any, name: str) -> Any:
+    """Like `_field_of`, but None when absent (FE-8 byte span may be missing)."""
+    if isinstance(edge_or_event, dict):
+        return edge_or_event.get(name)
+    return getattr(edge_or_event, name, None)
+
+
 def _flags_of(edge: Any) -> frozenset:
     flags = _field_of(edge, "flags")
     if isinstance(flags, str):
@@ -416,6 +423,8 @@ class SparseCfgBuilder:
                     matched_name=point.matched_name,
                     matched_via="access" if point.event_type in ACCESS_EVENTS else "structural",
                     flags=tuple(sorted(point.flags)),
+                    start_byte=point.start_byte,
+                    end_byte=point.end_byte,
                 )
                 for point in sorted(self._points, key=lambda point: point.key())
             ],
@@ -2604,6 +2613,8 @@ def materialize_points(events: Iterable[Any], edges: Iterable[Any]) -> dict[str,
             "file_id": _field_of(event, "file_id"),
             "start_line": _field_of(event, "start_line"),
             "end_line": _field_of(event, "end_line"),
+            "start_byte": _optional_field_of(event, "start_byte"),
+            "end_byte": _optional_field_of(event, "end_byte"),
             "relative_path": metadata.get("relative_path", ""),
         }
     for edge in edges:
@@ -2646,6 +2657,8 @@ def materialize_points(events: Iterable[Any], edges: Iterable[Any]) -> dict[str,
                 "file_id": "",
                 "start_line": 0,
                 "end_line": 0,
+                "start_byte": None,
+                "end_byte": None,
                 "relative_path": "",
             }
     return points

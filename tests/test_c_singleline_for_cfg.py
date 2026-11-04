@@ -22,6 +22,7 @@ from pathlib import Path
 
 import sqlite3
 
+from provenlattice.analysis_c_ast import C_AST_CONTRACT
 from provenlattice.analysis_query import query_analysis
 from provenlattice.graph import full_index
 from provenlattice.orchestrator import analyze_scope
@@ -308,7 +309,7 @@ class AnalyzerVersionInvalidationTests(unittest.TestCase):
                 "SELECT s.metadata FROM analysis_state s JOIN files f "
                 "ON f.file_id=s.file_id WHERE f.path='src/t.c' AND s.feature='cfg:c'"
             ).fetchone()
-        self.assertEqual(json.loads(row["metadata"])["ast_contract"], "c-ast-v3")
+        self.assertEqual(json.loads(row["metadata"])["ast_contract"], C_AST_CONTRACT)
 
 
 if __name__ == "__main__":

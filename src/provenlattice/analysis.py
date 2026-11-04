@@ -51,8 +51,8 @@ ANALYSIS_TABLES = frozenset({"analysis_state", "analysis_nodes", "analysis_edges
 KNOWN_FEATURES = frozenset({"ast", "cfg", "events", "sparse_cfg", "sparse_dfg"})
 LANGUAGE_PATTERN = re.compile(r"[a-z0-9_\-]+")
 ANALYZER_VERSIONS = {
-    "ast:python": 1, "cfg:python": 2, "ast:c": 3, "cfg:c": 3, "events:cpp": 1,
-    "sparse_cfg:cpp": 1, "sparse_dfg:cpp": 2,
+    "ast:python": 1, "cfg:python": 2, "ast:c": 4, "cfg:c": 3, "events:cpp": 1,
+    "sparse_cfg:cpp": 2, "sparse_dfg:cpp": 2,
     "ast:java": 1, "cfg:java": 2,
     "sparse_cfg:java": 1, "sparse_dfg:java": 1,
 }

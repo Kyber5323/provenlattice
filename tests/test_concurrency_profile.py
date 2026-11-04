@@ -111,6 +111,43 @@ class RaceProfileTests(unittest.TestCase):
             self.assertEqual(item["source_path"], "src/a.c")
             self.assertIn("src/a.c", item["metadata"]["related_files"])
 
+    def candidate(self, scenario_id: str, subject: str) -> dict:
+        return next(
+            c for c in self.result()["scenarios"][scenario_id]["candidates"]
+            if c.get("subject") == subject
+        )
+
+    def test_candidate_span_is_min_max_over_source_spans(self):
+        # g_count is written from worker (line 4) and updater (line 5): the
+        # single anchor span must be the min start / max end over source_spans.
+        span = self.candidate("non_atomic_incdec", "g_count")["span"]
+        self.assertEqual(span["relative_path"], "src/a.c")
+        self.assertEqual(span["start_line"], 4)
+        self.assertEqual(span["end_line"], 5)
+        flag_span = self.candidate("bool_flag_race", "g_flag")["span"]
+        self.assertEqual((flag_span["start_line"], flag_span["end_line"]), (6, 7))
+
+    def test_candidate_carries_supporting_locations(self):
+        locations = self.candidate(
+            "non_atomic_incdec", "g_count")["supporting_locations"]
+        self.assertTrue(locations)
+        self.assertEqual({loc["start_line"] for loc in locations}, {4, 5})
+        for loc in locations:
+            self.assertEqual(loc["relative_path"], "src/a.c")
+            self.assertTrue(loc["event_id"])
+            self.assertIn(loc["function"], {"worker", "updater"})
+
+    def test_candidate_carries_function_access_groups(self):
+        groups = self.candidate(
+            "non_atomic_incdec", "g_count")["function_access_groups"]
+        self.assertEqual({g["function"] for g in groups}, {"worker", "updater"})
+        for group in groups:
+            # Every group site is one of the supported locations, same function.
+            for loc in group["locations"]:
+                self.assertEqual(loc["function"], group["function"])
+                self.assertGreaterEqual(loc["start_line"], group["start_line"])
+                self.assertLessEqual(loc["end_line"], group["end_line"])
+
 
 class LockProfileTests(unittest.TestCase):
     FIXTURE = (
@@ -140,6 +177,43 @@ class LockProfileTests(unittest.TestCase):
         pairing = [i for i in evidence if i["metadata"]["scenario_id"] == "lock_pairing"]
         self.assertTrue(pairing)
         self.assertEqual(pairing[0]["source_path"], "src/a.c")
+
+
+class LockOrderInversionLocationFactsTests(unittest.TestCase):
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "pthread_mutex_t a, b;\n"
+        "void f(void) { pthread_mutex_lock(&a); pthread_mutex_lock(&b);"
+        " pthread_mutex_unlock(&b); pthread_mutex_unlock(&a); }\n"
+        "void g(void) { pthread_mutex_lock(&b); pthread_mutex_lock(&a);"
+        " pthread_mutex_unlock(&a); pthread_mutex_unlock(&b); }\n"
+    )
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "repo"
+        write(self.root, "src/a.c", self.FIXTURE)
+        self.database = Path(self.temp.name) / "graph.db"
+        full_index(self.root, self.database)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_order_inversion_candidate_degrades_gracefully(self):
+        # The cross-method order-inversion candidate cites lock identities as
+        # plain strings and no source lines; the location facts must degrade to
+        # None/empty rather than fabricate a span, owner or file.
+        scenario = run_concurrency_profile(
+            self.root, database=self.database, scope="src")["scenarios"]["lock_discipline"]
+        candidate = next(
+            c for c in scenario["candidates"]
+            if c.get("rule") == "lock_order_inversion"
+        )
+        self.assertEqual(candidate["related_locks"], ["a", "b"])
+        self.assertEqual(candidate["source_spans"], [])
+        self.assertIsNone(candidate["span"])
+        self.assertEqual(candidate["supporting_locations"], [])
+        self.assertEqual(candidate["function_access_groups"], [])
 
 
 class UnsupportedLanguageTests(unittest.TestCase):

@@ -209,6 +209,107 @@ def _candidate_to_evidence(
     )
 
 
+def _candidate_location_facts(
+    candidate: Mapping[str, Any], event_paths: Mapping[str, str],
+) -> dict[str, Any]:
+    """Additive R8 location facts for one concurrency candidate (SUB-10, Decision A).
+
+    Three fields, each derived only from facts the scenario builders already
+    emit -- never from a new parse, a storage change, or any marker/scenario
+    text:
+
+    * ``span`` -- the candidate's single anchor: the min start / max end over
+      ``source_spans``, with the source file recovered from the first cited
+      event. ``None`` when the candidate cites no source line.
+    * ``supporting_locations`` -- every access/lock site the candidate cites, in
+      deterministic order, each with its owning function and source file.
+    * ``function_access_groups`` -- the same sites grouped by owning function,
+      the function->access containment R8's scenario mapping would consume. The
+      marker/scenario linkage itself is an explicit gap (Decision A).
+
+    Unresolvable inputs degrade to ``None``/empty, never a fabricated line,
+    owner or file.
+    """
+    records = [
+        record for record in (
+            candidate.get("related_accesses") or candidate.get("related_locks") or ()
+        )
+        if isinstance(record, Mapping)
+    ]
+    spans = candidate.get("source_spans") or []
+    default_owner = candidate.get("owner") or ""
+    locations = [
+        _location(record, event_paths, default_owner) for record in records
+    ]
+    return {
+        "span": _candidate_span(_candidate_file(records, event_paths), spans),
+        "supporting_locations": locations,
+        "function_access_groups": _function_access_groups(locations),
+    }
+
+
+def _candidate_file(records: list[Mapping[str, Any]], event_paths: Mapping[str, str]) -> str:
+    """The source file a candidate cites, first in sorted repo-relative order."""
+    files = sorted({
+        event_paths[record["event_id"]]
+        for record in records
+        if record.get("event_id") in event_paths
+    })
+    return files[0] if files else ""
+
+
+def _candidate_span(relative_path: str, spans: list[list[int]]) -> dict[str, Any] | None:
+    """``{relative_path, start_line, end_line}`` or ``None`` when no line is cited."""
+    starts = [int(span[0] or 0) for span in spans if span and span[0]]
+    ends = [int(span[1] or 0) for span in spans if span and span[1]]
+    if not starts and not ends:
+        return None
+    return {
+        "relative_path": relative_path or "",
+        "start_line": min(starts) if starts else min(ends),
+        "end_line": max(ends) if ends else max(starts),
+    }
+
+
+def _location(
+    record: Mapping[str, Any], event_paths: Mapping[str, str], default_owner: str,
+) -> dict[str, Any]:
+    """One cited site: event id, source file, line span and owning function."""
+    event_id = record.get("event_id", "")
+    return {
+        "event_id": event_id,
+        "relative_path": event_paths.get(event_id, ""),
+        "start_line": int(record.get("start_line") or 0),
+        "end_line": int(record.get("end_line") or 0),
+        "function": record.get("owner") or default_owner,
+    }
+
+
+def _function_access_groups(locations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The cited sites grouped by owning function, in first-seen order.
+
+    The function->access containment R8 names ``FunctionScenarioGroup``; the
+    scenario (marker) layer above it is not delivered here (Decision A gap).
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for location in locations:
+        function = location["function"]
+        if function not in groups:
+            groups[function] = {"function": function, "locations": []}
+            order.append(function)
+        groups[function]["locations"].append(location)
+    return [
+        {
+            "function": function,
+            "start_line": min(loc["start_line"] for loc in groups[function]["locations"]),
+            "end_line": max(loc["end_line"] for loc in groups[function]["locations"]),
+            "locations": groups[function]["locations"],
+        }
+        for function in order
+    ]
+
+
 def run_concurrency_profile(
     repo, profile_id: str = CONCURRENCY_PROFILE_ID, *,
     database=None, scope: str | None = None,
@@ -303,6 +404,8 @@ def run_concurrency_profile(
                 lock_relations=lockset["relations"],
                 competing_access=race["competing_access"],
             )
+            candidate.update(
+                _candidate_location_facts(candidate, event_paths_for_scenario))
             evidence.append(item)
 
     return {

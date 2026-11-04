@@ -17,6 +17,12 @@ Fail-closed contract:
 * an unresolved identity (no ``subject_decl``) is marked ``unresolved`` and
   reported as missing evidence, never merged with a different object by display
   name alone.
+* a local object whose address is handed to a worker (``address_of`` spawn) and
+  which has no paired join before its scope exits is reported as a
+  ``resource_lifetime`` violation with ``join_count == 0`` and
+  ``is_alive_at_access == false``; the pairing still rides the handle identity,
+  so a join on a *different* thread never clears the violation. Detach, escape
+  through a non-local storage, and complex containers stay unknown and unmarked.
 
 It does not promise a complete happens-before, a memory model, points-to, or a
 thread-pool analysis.
@@ -140,6 +146,51 @@ def build_concurrency_context(events: Iterable[Mapping[str, Any]]) -> dict:
                     "join": join["event_id"],
                 })
 
+    # R7 (SUB-08): a local object whose address is handed to a worker thread
+    # dies when its scope exits. A join on the receiving thread -- proved only
+    # by the handle identity, never by owner + source order -- sits inside the
+    # same method and therefore before that destroy; without one the worker may
+    # still be running when the object dies. A spawn that passes a *local* by
+    # address (``thread_argument_form == "address_of"``) and has no paired join
+    # is a lifetime violation: ``join_count == 0`` and the object is not alive
+    # at the worker's access (``is_alive_at_access == false``). Every other
+    # shape -- detach, an already-pointer argument, a non-local storage, a
+    # complex container -- stays unknown and is never flagged.
+    join_ids_by_handle: dict[str, list[str]] = {}
+    for pair in spawn_join_pairs:
+        join_ids_by_handle.setdefault(pair["handle_decl"], []).append(pair["join"])
+
+    resource_lifetime: list[dict[str, Any]] = []
+    for event in spawns:
+        annotations = _annotations(event)
+        scoped = annotations.get("thread_argument_decl_scoped", "")
+        form = annotations.get("thread_argument_form", "")
+        if form != "address_of" or not scoped.startswith("local:"):
+            continue
+        handle_decl = annotations.get("subject_decl", "")
+        if join_ids_by_handle.get(handle_decl):
+            continue
+        resource_lifetime.append({
+            "object": scoped,
+            "object_decl": annotations.get("thread_argument_decl", ""),
+            "object_name": annotations.get("thread_argument", ""),
+            "thread_function": annotations.get("thread_function", ""),
+            "handle": annotations.get("subject", ""),
+            "handle_decl": handle_decl,
+            "spawn_event_id": event.get("event_id"),
+            "spawn_start_byte": _byte(event.get("start_byte")),
+            "join_count": 0,
+            "is_alive_at_access": False,
+            "lifecycle_sequence": ["SPAWN", "DESTROY"],
+        })
+
+    resource_lifetime.sort(
+        key=lambda record: (
+            record["object"], record["spawn_start_byte"],
+            record["spawn_event_id"] or "",
+        ),
+    )
+
     # Shared-object identity uses S1's stable subject_decl. An access whose
     # identity is unresolved (no subject_decl, unknown storage) is kept apart as
     # `unresolved` and never merged with another object by display name alone.
@@ -204,6 +255,7 @@ def build_concurrency_context(events: Iterable[Mapping[str, Any]]) -> dict:
         "spawns": spawn_facts,
         "joins": join_facts,
         "spawn_join_pairs": spawn_join_pairs,
+        "resource_lifetime": resource_lifetime,
         "may_parallel": may_parallel,
         "missing_evidence": sorted(missing_evidence),
         "capability_gaps": capability_gaps,

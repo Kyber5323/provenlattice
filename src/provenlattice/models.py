@@ -215,6 +215,11 @@ class ParsedPoint:
     matched_name: str
     matched_via: str = "structural"
     flags: tuple[str, ...] = ()
+    # FE-8: additive byte span so a query-time consumer can join an access to a
+    # scenario region by exact byte containment. None when the walker has no
+    # byte span (fail-closed per fe8_formal_feature_contract.md §4/§5).
+    start_byte: int | None = None
+    end_byte: int | None = None
 
     def key(self) -> PointKey:
         return PointKey(

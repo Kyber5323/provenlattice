@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ from .analysis import (
     analyzer_id,
 )
 from .analysis_ast import ast_node_id, normalize_scope, scoped_sources
-from .analysis_c_frontend import CFrontend, NormalizedCNode
+from .analysis_c_frontend import CFrontend, NormalizedCNode, ScenarioPragma
 from .identity import path_id
 from .storage import SQLiteStorage
 
@@ -30,6 +31,38 @@ ALIGNABLE = {
     ("TYPE_DECL", "struct_specifier"): frozenset({"Struct", "Class"}),
     ("TYPE_DECL", "type_definition"): frozenset({"Type"}),
 }
+
+# FE-8 (frozen, fe8_formal_feature_contract.md): scenario annotation facts are
+# materialised additively inside `ast:c` as synthetic leaf nodes under the FILE
+# root. `SCENARIO_ANNOTATION_KIND` is their node kind; the frozen syntax kind
+# (only one exists in v1) and the frozen deterministic-id seed/template (§3).
+SCENARIO_ANNOTATION_KIND = "SCENARIO_ANNOTATION"
+SCENARIO_SYNTAX_KIND = "pragma_region"
+
+
+def scenario_annotation_id(
+    repo: str,
+    relative_path: str,
+    syntax_kind: str,
+    scenario_id: str,
+    start_byte: int,
+    end_byte: int,
+) -> str:
+    """Deterministic annotation id (FE-8 §3).
+
+    Seed fields (frozen, template order): ``(repo, relative_path, syntax_kind,
+    scenario_id, start_byte, end_byte)``. ``analyzer_version`` is deliberately
+    excluded -- identity is content-derived and must not churn when the
+    analyzer improves. The fields are joined with ``\\x1f`` and SHA-256 hashed
+    (matching ``identity._stable``) so a bare ``:`` in a Linux filename cannot
+    make the id ambiguous; the ``scenario:`` prefix isolates this namespace
+    from candidate-layer built-in ``scenario_id`` (FE-8 §2.4).
+    """
+    canonical = "\x1f".join((
+        str(repo), relative_path, syntax_kind, scenario_id,
+        str(start_byte), str(end_byte),
+    ))
+    return "scenario:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def is_c_ast_source(source) -> bool:
@@ -82,7 +115,10 @@ def analyze_c_ast_scope(
                 continue
             source_bytes = source.path.read_bytes()
             frontend = CFrontend().parse(source_bytes, source.relative_path)
-            nodes = _materialize(store, file_id, frontend.root)
+            nodes = _materialize(
+                store, file_id, repo_id, source.relative_path, source_bytes,
+                frontend.root, frontend.scenario_pragmas,
+            )
             diagnostics = frontend.diagnostics
             try:
                 store.replace_analysis_for_file(
@@ -184,14 +220,19 @@ def _resolve_alignment(candidates: list[dict], expected: frozenset, node: Normal
 
 
 def _materialize(
-    store: AnalysisStore, file_id: str, root: NormalizedCNode
+    store: AnalysisStore, file_id: str, repo_id: str, relative_path: str,
+    source: bytes, root: NormalizedCNode, scenario_pragmas: tuple[ScenarioPragma, ...],
 ) -> list[AnalysisNode]:
     spans = _symbol_spans(store, file_id)
     nodes: list[AnalysisNode] = []
+    file_root_id: str | None = None
+    function_spans: list[tuple[int, int, str | None]] = []
     stack = [(root, None, root.kind)]
     while stack:
         node, parent_id, path = stack.pop()
         node_id = ast_node_id(file_id, path)
+        if parent_id is None:
+            file_root_id = node_id
         owner_symbol_id, alignment = None, "unmatched"
         expected = ALIGNABLE.get((node.kind, node.parser_kind))
         if expected is not None:
@@ -199,6 +240,8 @@ def _materialize(
             chosen = _resolve_alignment(spans.get(key, []), expected, node)
             if chosen is not None:
                 owner_symbol_id, alignment = chosen["id"], "resolved"
+        if node.kind == "FUNCTION" and node.parser_kind == "function_definition":
+            function_spans.append((node.start_byte, node.end_byte, owner_symbol_id))
         nodes.append(AnalysisNode(node_id, node.kind, {
             "parent_id": parent_id,
             "structural_path": path,
@@ -220,4 +263,148 @@ def _materialize(
         for child in reversed(node.children):
             child_path = f"{path}/{child.kind}[{child.child_order}]"
             stack.append((child, node_id, child_path))
+
+    if file_root_id is not None:
+        for annotation in _pair_scenario_annotations(
+            scenario_pragmas, source, repo_id, relative_path,
+            function_spans, file_root_id, root.kind,
+        ):
+            nodes.append(AnalysisNode(
+                annotation["annotation_id"], SCENARIO_ANNOTATION_KIND, annotation,
+            ))
     return nodes
+
+
+def _line_of(source: bytes, offset: int) -> int:
+    """1-based line number of the byte at ``offset`` (FE-8 §2.1 human-readable)."""
+    return source.count(b"\n", 0, offset) + 1
+
+
+def _enclosing_function(
+    start_byte: int, end_byte: int, function_spans: list[tuple[int, int, str | None]]
+) -> tuple[int, str | None] | None:
+    """The innermost function span containing ``[start_byte, end_byte]``.
+
+    Returns ``(span_size, owner_symbol_id)`` or None when no function contains
+    the range (a file-scope region). ``owner_symbol_id`` is None when the
+    function aligned to no base symbol.
+    """
+    best: tuple[int, str | None] | None = None
+    for fn_start, fn_end, owner in function_spans:
+        if fn_start <= start_byte and end_byte <= fn_end:
+            size = fn_end - fn_start
+            if best is None or size < best[0]:
+                best = (size, owner)
+    return best
+
+
+def _pair_scenario_annotations(
+    markers: tuple[ScenarioPragma, ...], source: bytes, repo_id: str,
+    relative_path: str, function_spans: list[tuple[int, int, str | None]],
+    file_root_id: str, root_kind: str,
+) -> list[dict]:
+    """Pair begin/end markers into annotations (FE-8 §4/§5), deterministic.
+
+    A ``begin``/``end`` pair with equal ``scenario_id`` that is properly nested
+    on the LIFO stack resolves; every other shape fails closed:
+
+    * a begin with no matching end -> ``unknown`` + ``unclosed_scenario_region``;
+    * a marker covered by ERROR/missing -> ``unknown`` + ``annotation_parse_partial``;
+    * a mismatched nesting (crossing overlap) -> the crossed regions are
+      ``invalid`` + ``crossing_scenario_regions``; a dangling end (orphan) has
+      no region and produces no annotation (F2's relation layer reports it).
+    """
+    rel = relative_path.replace("\\", "/")
+    source_size = len(source)
+    annotations: list[dict] = []
+    stack: list[ScenarioPragma] = []
+
+    def emit(begin: ScenarioPragma, end_marker: ScenarioPragma | None,
+             parse_status: str, limitations: list[str]) -> dict:
+        start_byte = begin.end_byte
+        end_byte = end_marker.start_byte if end_marker is not None else source_size
+        if end_byte < start_byte:
+            end_byte = start_byte
+        # Enclosing function is anchored by where the begin marker sits (its
+        # own span), not by the full region span: an unclosed region's end
+        # extends to EOF, past the enclosing function's closing brace, and a
+        # crossing region has no single enclosing function. The begin pragma
+        # itself always sits inside exactly one function (or none, at file
+        # scope).
+        enclosing = _enclosing_function(begin.start_byte, begin.end_byte, function_spans)
+        if enclosing is None:
+            function_symbol_id: str | None = None
+        elif enclosing[1] is not None:
+            function_symbol_id = enclosing[1]
+        else:
+            function_symbol_id = None
+            limitations = limitations + ["function_owner_unresolved"]
+        start_line = _line_of(source, start_byte)
+        end_line = _line_of(source, end_byte - 1) if end_byte > start_byte else start_line
+        annotation_id = scenario_annotation_id(
+            repo_id, rel, SCENARIO_SYNTAX_KIND, begin.scenario_id,
+            start_byte, end_byte,
+        )
+        return {
+            "annotation_id": annotation_id,
+            "scenario_id": begin.scenario_id,
+            "syntax_kind": SCENARIO_SYNTAX_KIND,
+            "relative_path": rel,
+            "start_byte": start_byte,
+            "end_byte": end_byte,
+            "start_line": start_line,
+            "end_line": end_line,
+            "function_symbol_id": function_symbol_id,
+            "parse_status": parse_status,
+            "limitations": limitations,
+            "parent_id": file_root_id,
+            "language": "c",
+        }
+
+    for marker in markers:
+        if marker.is_error or marker.is_missing:
+            if marker.action == "begin":
+                annotations.append(emit(
+                    marker, None, "unknown", ["annotation_parse_partial"]))
+            # a partial `end` marker has no region of its own; it only prevents
+            # the matching begin from resolving (handled by the crossing branch
+            # below when the stack does not match cleanly).
+            continue
+        if marker.action == "begin":
+            stack.append(marker)
+            continue
+        # end marker
+        if not stack:
+            continue  # orphan end: no region, no annotation
+        top = stack[-1]
+        if top.scenario_id == marker.scenario_id:
+            stack.pop()
+            annotations.append(emit(top, marker, "resolved", []))
+        else:
+            # crossing: pop until a begin matches this end; every begin popped
+            # is a crossed (invalid) region.
+            index = None
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i].scenario_id == marker.scenario_id:
+                    index = i
+                    break
+            if index is None:
+                continue  # orphan end with no matching begin
+            crossed = stack[index:]
+            del stack[index:]
+            for begin in crossed:
+                annotations.append(emit(
+                    begin, None, "invalid", ["crossing_scenario_regions"]))
+
+    for begin in stack:
+        annotations.append(emit(begin, None, "unknown", ["unclosed_scenario_region"]))
+
+    # Deterministic order (FE-8 §6.2): relative_path -> start_byte -> end_byte
+    # -> scenario_id; relative_path is constant per file.
+    annotations.sort(key=lambda ann: (
+        ann["start_byte"], ann["end_byte"], ann["scenario_id"],
+    ))
+    for index, annotation in enumerate(annotations):
+        annotation["structural_path"] = (
+            f"{root_kind}/{SCENARIO_ANNOTATION_KIND}[{index}]")
+    return annotations

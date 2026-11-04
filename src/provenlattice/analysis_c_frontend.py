@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,25 @@ class NormalizedCNode:
 class CFrontendResult:
     root: NormalizedCNode
     diagnostics: CParseDiagnostics
+    scenario_pragmas: tuple["ScenarioPragma", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioPragma:
+    """One decoded whitelist pragma marker (FE-8 §1, frozen grammar).
+
+    ``start_byte``/``end_byte`` cover the whole ``preproc_call`` node (including
+    any trailing newline); ``action`` is ``begin`` or ``end``. ``is_error`` is
+    True when the marker's span is covered by an ``ERROR``/missing node --
+    the ``annotation_parse_partial`` signal of the frozen contract (§5).
+    """
+
+    scenario_id: str
+    action: str
+    start_byte: int
+    end_byte: int
+    is_error: bool = False
+    is_missing: bool = False
 
 
 CONTROL_KINDS = frozenset({
@@ -104,6 +124,13 @@ FIELD_ROLES = {
     "case_statement": {"value": "value"},
 }
 
+# FE-8 (frozen, fe8_formal_feature_contract.md §1): the only accepted pragma
+# shape is the exact whitelist `#pragma provenlattice scenario <id> begin|end`.
+# No fuzzy match, no case folding, no comment/TODO/attribute/_Pragma/manifest.
+SCENARIO_NAMESPACE = ("provenlattice", "scenario")
+SCENARIO_ACTIONS = frozenset({"begin", "end"})
+SCENARIO_ID_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
+
 
 class CFrontend:
     """Convert Tree-sitter C nodes into a small language-neutral vocabulary."""
@@ -114,7 +141,8 @@ class CFrontend:
         diagnostics = self._diagnostics(raw_root, len(source))
         root = self._normalize(
             raw_root, source, child_order=0, in_function=False, part_role=None)
-        return CFrontendResult(root, diagnostics)
+        scenario_pragmas = tuple(self.decode_scenario_pragmas(raw_root, source))
+        return CFrontendResult(root, diagnostics, scenario_pragmas)
 
     def _normalize(
         self, node: Any, source: bytes, *, child_order: int, in_function: bool,
@@ -247,6 +275,76 @@ class CFrontend:
     def _compact(value: str | None) -> str | None:
         compact = " ".join((value or "").split())
         return compact or None
+
+    @staticmethod
+    def _child_by_type(node: Any, parser_kind: str) -> Any | None:
+        for child in node.children:
+            if child.type == parser_kind:
+                return child
+        return None
+
+    @staticmethod
+    def _span_overlaps(start_byte: int, end_byte: int, spans: list[tuple[int, int]]) -> bool:
+        return any(s < end_byte and start_byte < e for s, e in spans)
+
+    @staticmethod
+    def decode_scenario_pragmas(root_node: Any, source: bytes) -> list["ScenarioPragma"]:
+        """Decode the frozen whitelist pragma grammar (FE-8 §1), exact match.
+
+        Only ``#pragma provenlattice scenario <scenario_id> begin|end`` is
+        recognised, with ``<scenario_id>`` matching the frozen ASCII-identifier
+        charset. Every other shape -- plain comment, ``// TODO``, benchmark
+        marker, GCC/Clang attribute, ``_Pragma``, external manifest, or any
+        near-miss namespace -- decodes to zero markers (0 annotations).
+
+        A marker whose span is covered by an ``ERROR``/missing node is flagged
+        ``is_error`` -- the ``annotation_parse_partial`` signal (§5).
+        """
+        preproc_calls: list[Any] = []
+        error_spans: list[tuple[int, int]] = []
+        stack = [root_node]
+        while stack:
+            node = stack.pop()
+            if node.is_error or node.is_missing:
+                error_spans.append((node.start_byte, node.end_byte))
+            elif node.type == "preproc_call":
+                preproc_calls.append(node)
+            stack.extend(node.children)
+
+        # The walk above pops in reverse child order; markers must be emitted in
+        # source order so the pairing stack in the materializer sees begin/end
+        # in the order they appear in the file.
+        preproc_calls.sort(key=lambda node: node.start_byte)
+
+        markers: list["ScenarioPragma"] = []
+        for node in preproc_calls:
+            directive = CFrontend._child_by_type(node, "preproc_directive")
+            argument = CFrontend._child_by_type(node, "preproc_arg")
+            if directive is None or argument is None:
+                continue
+            directive_text = CFrontend._text(directive, source)
+            if directive_text is None or directive_text.strip() != "#pragma":
+                continue
+            arg_text = CFrontend._text(argument, source) or ""
+            tokens = arg_text.strip().split()
+            if not (
+                len(tokens) == 4
+                and tokens[0] == SCENARIO_NAMESPACE[0]
+                and tokens[1] == SCENARIO_NAMESPACE[1]
+                and tokens[3] in SCENARIO_ACTIONS
+                and SCENARIO_ID_PATTERN.fullmatch(tokens[2])
+            ):
+                continue
+            markers.append(ScenarioPragma(
+                scenario_id=tokens[2],
+                action=tokens[3],
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
+                is_error=CFrontend._span_overlaps(
+                    node.start_byte, node.end_byte, error_spans),
+                is_missing=bool(node.is_missing),
+            ))
+        return markers
 
     @staticmethod
     def _diagnostics(root: Any, source_size: int) -> CParseDiagnostics:

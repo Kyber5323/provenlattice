@@ -27,7 +27,7 @@ import test_mcp_defect_e2e as mcp_e2e
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 PYPROJECT = REPO / "pyproject.toml"
-EXPECTED_VERSION = "1.6.0"
+EXPECTED_VERSION = "1.7.0"
 
 CORE_COMMANDS = (
     "index", "update", "knowledge", "analyze", "defect", "status",

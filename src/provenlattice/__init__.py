@@ -10,4 +10,4 @@ from .query import GraphQuery
 __all__ = ["CrossLayerResolver", "Evidence", "EvidenceBundle", "QueryBudget",
            "GraphQuery", "GraphView", "OverlayStore", "full_index",
            "incremental_update", "index_knowledge", "materialize_view"]
-__version__ = "1.6.0"
+__version__ = "1.7.0"

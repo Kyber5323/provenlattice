@@ -33,7 +33,7 @@ jobs:
 
       - name: Verify version
         run: |
-          python -c "import importlib.metadata; v = importlib.metadata.version('provenlattice'); print(f'version: {v}'); assert v == '1.6.0', f'unexpected version: {v}'"
+          python -c "import importlib.metadata; v = importlib.metadata.version('provenlattice'); print(f'version: {v}'); assert v == '1.7.0', f'unexpected version: {v}'"
 
       - name: Verify package-data (TOML vocabularies + Java driver source)
         shell: python
@@ -160,7 +160,7 @@ jobs:
 
       - name: Verify version
         run: |
-          python -c "import importlib.metadata; v = importlib.metadata.version('provenlattice'); print(f'version: {v}'); assert v == '1.6.0', f'unexpected version: {v}'"
+          python -c "import importlib.metadata; v = importlib.metadata.version('provenlattice'); print(f'version: {v}'); assert v == '1.7.0', f'unexpected version: {v}'"
 
       - name: Verify package-data (TOML vocabularies + Java driver source)
         shell: python

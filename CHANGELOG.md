@@ -3,6 +3,65 @@
 所有已发布里程碑按时间倒序记录。tag 命名遵循 `provenlattice-*` 前缀约定；
 各阶段的"已完成 / 明确未包含"以对应发布文档为准（`docs/releases/`）。
 
+## ProvenLattice 1.7.0 — 并发图谱事实与缺陷精度（2026-11-05）
+
+> 状态：待发布（tag 待 Owner 确定；基线 commit `2cb54466`）。PyPI 发布独立决策。
+
+**1.7.0 面向并发类漏洞检测，补齐图谱的并发语义事实、关联能力与精度护栏**。在 1.6.0
+的语法/控制流结构之上，让 race、lock_order、resource_lifetime、间接调用四类并发缺陷
+从「能看结构」变为「能证事实」——每个候选可溯源、可排序、可克制（fail-closed）。
+
+### 并发语义事实（事实层）
+
+- 一等访问类型（R1）：`access_kind`（READ / WRITE / READ_MODIFY_WRITE），
+  并发冲突判定的基础事实。
+- 锁集合与锁身份（R4）：per-access `held_locks` + 锁身份关系
+  （SAME_LOCK / DIFFERENT_LOCK / PROTECTS）。
+- 对象身份与受限地址流（R2/R3）：canonical storage identity +
+  query-time `DEREF_RESOLVES_TO` + must-only `same_storage`，消除指针别名下
+  「同一对象」的歧义（不做完整 points-to / StorageObject 重构）。
+- 锁/资源生命周期（R7）：生命周期序 + `is_alive_at_access`（spawn→join 顺序；
+  前置 FE-5 THREAD_JOIN handle 身份）。
+- 间接调用目标（R6）：间接 field-callee 的 `is_indirect` READ 事实 +
+  查询期 `MAY_CALL` 派生。
+- Scenario 归属（R8 + FE-8）：`candidate.span` + `supporting_locations[]`；
+  结构化 `#pragma provenlattice scenario` → `scenario_annotations[]`。
+
+### 关联与查询能力（能力层）
+
+- 竞争访问配对（R5）：访问级 `competing_access[]` 配对 + confidence 排序 + top-K。
+- 证据链（R9）：候选级 `trace_evidence[]` + E-DEFECT 关联，告警可溯源。
+- 统一证据口径（R0）：Evidence Schema V2 五块（access / lock / competing /
+  trace / confidence-limitation）。
+- 非竞态机制暴露（R10）：additive `mechanism_facts` 块。
+- 场景关联（FE-8 F2）：query-time `scenario_access_relations[]`
+  （`CONTAINS_ACCESS`）+ `function_scenario_groups[]`。
+
+### 精度护栏（可信层）
+
+- confidence gate（R11）：`DEFAULT_CONFIDENCE_THRESHOLD = 0.3` 默认抑制低
+  confidence 候选；被抑制项回填 `suppressed`，可审计、可 `confidence_gate=None`
+  还原；冻结 FP 回归控制集（read/read、同锁、不同对象、unknown alias）。
+
+### 兼容性
+
+- additive、无 SQL schema / 物理 edge 变更；旧 `candidates` / `evidence` /
+  `evidence_bundles` 字段零回退（集成红线回归核验）。
+- analyzer 版本 bump：`ast:c` 3→4、`sparse_cfg:cpp` 1→4（缓存自动失效）。
+
+### 明确限制（fail-closed 边界）
+
+- 直接调用解析语义不变；间接调用**永不**升级为 definite `CALLS`。
+- `MAY_CALL` 仅同文件 method-local 简单赋值；跨 TU / 多目标 / unresolved 一律 `{}`。
+- scenario 仅支持显式白名单 pragma；普通注释 / TODO / 文本相似度不映射。
+- FE-8 scenario relations 与 `MAY_CALL` 为查询期、默认 OFF、不注册 CAPABILITY。
+- 候选仍为 Candidate（resolved ≠ Verified Finding）。
+
+### 升级说明
+
+由 1.6.x 升级：执行一次完整 `provenlattice index`（`ast:c` 3→4、`sparse_cfg:cpp`
+1→4 会使既有缓存失效并自动重物化）。
+
 ## ProvenLattice 1.6.0 — Java Sparse CFG/DFG（2026-10-23）
 
 > 已发布：GitHub Release [provenlattice-v1.6.0](https://github.com/sunSUNQ/provenlattice/releases/tag/provenlattice-v1.6.0)（tag 指向 main commit 5d51f1f；wheel/sdist SHA256 见 REPRODUCIBILITY.md 与 Release assets）。PyPI 发布独立决策。

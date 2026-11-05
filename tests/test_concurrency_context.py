@@ -219,6 +219,124 @@ class UnresolvedIdentityTests(ConcurrencyContextTestBase):
         self.assertIn("unresolved_identity", ctx["missing_evidence"])
 
 
+class ResourceLifetimeOrderingTests(ConcurrencyContextTestBase):
+    # R7 (SUB-08): a local mutex whose address is handed to a worker thread.
+    # `m` dies when `f` returns; a join inside `f` proves the worker finished
+    # before that destroy. Without one the worker may still be running against
+    # a dead object: join_count == 0 and is_alive_at_access == false.
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "void *worker(void *arg) {\n"
+        "    pthread_mutex_t *pm = (pthread_mutex_t *)arg;\n"
+        "    pthread_mutex_lock(pm);\n"
+        "    pthread_mutex_unlock(pm);\n"
+        "    return 0;\n"
+        "}\n"
+        "void f(void) {\n"
+        "    pthread_mutex_t m;\n"
+        "    pthread_mutex_init(&m, 0);\n"
+        "    pthread_t t;\n"
+        "    pthread_create(&t, 0, worker, &m);\n"
+        "}\n"
+    )
+
+    def test_unjoined_worker_is_a_lifetime_violation(self):
+        ctx = self.context()
+        records = ctx["resource_lifetime"]
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertTrue(record["object"].startswith("local:src/a.c:f:m:"))
+        self.assertEqual(record["object_decl"], "local:m")
+        self.assertEqual(record["object_name"], "m")
+        self.assertEqual(record["thread_function"], "worker")
+        self.assertEqual(record["handle"], "t")
+        self.assertEqual(record["handle_decl"], "local:t")
+        self.assertIsNotNone(record["spawn_event_id"])
+        self.assertEqual(record["join_count"], 0)
+        self.assertFalse(record["is_alive_at_access"])
+        self.assertEqual(record["lifecycle_sequence"], ["SPAWN", "DESTROY"])
+
+    def test_deterministic_lifetime_output(self):
+        events = self.events()
+        first = build_concurrency_context(events)
+        second = build_concurrency_context(list(events))
+        self.assertEqual(first["resource_lifetime"], second["resource_lifetime"])
+
+
+class JoinedLocalLifetimeTests(ConcurrencyContextTestBase):
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "void *worker(void *arg) {\n"
+        "    pthread_mutex_t *pm = (pthread_mutex_t *)arg;\n"
+        "    pthread_mutex_lock(pm);\n"
+        "    pthread_mutex_unlock(pm);\n"
+        "    return 0;\n"
+        "}\n"
+        "void f(void) {\n"
+        "    pthread_mutex_t m;\n"
+        "    pthread_mutex_init(&m, 0);\n"
+        "    pthread_t t;\n"
+        "    pthread_create(&t, 0, worker, &m);\n"
+        "    pthread_join(t, 0);\n"
+        "}\n"
+    )
+
+    def test_joined_worker_is_not_a_lifetime_violation(self):
+        # The good control example joins before scope exit, so no lifetime
+        # violation is reported, and the spawn/join pair is still asserted by
+        # handle identity.
+        ctx = self.context()
+        self.assertEqual(ctx["resource_lifetime"], [])
+        self.assertEqual(len(ctx["spawn_join_pairs"]), 1)
+        self.assertEqual(ctx["spawn_join_pairs"][0]["handle_decl"], "local:t")
+
+
+class NonLocalEscapeLifetimeTests(ConcurrencyContextTestBase):
+    # A global passed by address is not a frame-local object, so its lifetime is
+    # not owned by `f` and no violation is claimed -- the STOP condition keeps a
+    # non-local storage unknown rather than guessing.
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "pthread_mutex_t g;\n"
+        "void *worker(void *arg) {\n"
+        "    pthread_mutex_t *pm = (pthread_mutex_t *)arg;\n"
+        "    pthread_mutex_lock(pm);\n"
+        "    pthread_mutex_unlock(pm);\n"
+        "    return 0;\n"
+        "}\n"
+        "void f(void) {\n"
+        "    pthread_t t;\n"
+        "    pthread_create(&t, 0, worker, &g);\n"
+        "}\n"
+    )
+
+    def test_non_local_escape_is_not_a_lifetime_violation(self):
+        ctx = self.context()
+        self.assertEqual(ctx["resource_lifetime"], [])
+
+
+class DetachedLocalLifetimeTests(ConcurrencyContextTestBase):
+    # pthread_detach is classified as a THREAD_JOIN by the vocabulary, so the
+    # handle-identity pairing treats it as a synchronisation point and the STOP
+    # condition keeps detach out of the lifetime-violation set.
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "void *worker(void *arg) { return 0; }\n"
+        "void f(void) {\n"
+        "    pthread_mutex_t m;\n"
+        "    pthread_mutex_init(&m, 0);\n"
+        "    pthread_t t;\n"
+        "    pthread_create(&t, 0, worker, &m);\n"
+        "    pthread_detach(t);\n"
+        "}\n"
+    )
+
+    def test_detached_worker_is_not_a_lifetime_violation(self):
+        ctx = self.context()
+        self.assertEqual(ctx["resource_lifetime"], [])
+        self.assertEqual(len(ctx["spawn_join_pairs"]), 1)
+
+
 class CapabilityRegistrationTests(unittest.TestCase):
     def test_concurrency_context_is_c_cpp_query_time(self):
         record = CAPABILITY_CONTRACT["concurrency_context"]

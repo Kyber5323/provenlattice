@@ -145,6 +145,17 @@ TAINT_CONFIDENCE = {RESOLVED: 0.3, AMBIGUOUS: 0.2}
 # result examined" is answered by "did control branch afterwards".
 ERROR_HANDLING_CONFIDENCE = {RESOLVED: 0.4, AMBIGUOUS: 0.2}
 
+# SUB-11 / R11 precision guardrail. Confidence above is a *band*, not a
+# measurement, so the gate is a band cut, not a probability threshold: a
+# candidate whose band is below this value is suppressed by default at the
+# query-output layer (see ``defect_query.query_defect_candidates``). The default
+# is the lowest RESOLVED band in the file (``TAINT_CONFIDENCE[RESOLVED]`` = 0.3),
+# which makes the invariant exact -- no *resolved* finding is ever silently
+# dropped by the default gate, while every UNRESOLVED band (0.1-0.2) and the
+# two lowest AMBIGUOUS bands (``TAINT_CONFIDENCE`` / ``ERROR_HANDLING_CONFIDENCE``
+# at 0.2) fall below it and are the ones the gate removes.
+DEFAULT_CONFIDENCE_THRESHOLD = 0.3
+
 # The flow classes stage 5B mints. Spelled as constants because three of the
 # four queries select on them and a typo would silently return nothing.
 NULL_TO_DEREF = "null_to_deref"

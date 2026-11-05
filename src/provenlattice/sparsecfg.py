@@ -1511,6 +1511,20 @@ class SparseCfgBuilder:
                     read_point = self._access_point(written, "READ", origin=node)
                     if read_point is not None:
                         points.append(read_point)
+        # F1 (SUB-09/R6): bounded indirect field-callee READ. In C, a call
+        # whose callee is a field_expression (`g_timePara.procFunc()`) reads a
+        # function-pointer field -- there are no member functions in C, so the
+        # call site is a read of that shared slot. `ACCESS_SKIP_FIELDS` removes
+        # the callee from the generic child-read loop below; this is the one
+        # place that re-admits it, and only as an additive READ stamped
+        # `is_indirect=true`. Every other callee shape (`foo()`, `(*fp)()`,
+        # `table[i]()`, nested calls) and the whole C++ path are left as-is.
+        if node.type == "call_expression" and self.profile.name == "c":
+            callee = node.child_by_field_name("function")
+            if callee is not None and callee.type == "field_expression":
+                point = self._access_point(callee, "READ", indirect_callee=True)
+                if point is not None:
+                    points.append(point)
         skip_fields = (DECLARED_FIELDS.get(node.type), ACCESS_SKIP_FIELDS.get(node.type))
         skip = {
             _span(node.child_by_field_name(field))
@@ -1588,7 +1602,9 @@ class SparseCfgBuilder:
         rhs = origin.child_by_field_name(rhs_field) if rhs_field else None
         return self._is_null_literal(rhs)
 
-    def _access_point(self, expr: Any, event_type: str, origin: Any = None) -> _Point | None:
+    def _access_point(
+        self, expr: Any, event_type: str, origin: Any = None, indirect_callee: bool = False
+    ) -> _Point | None:
         root, member, this_root, _exact = self._member_chain(expr)
         # `this->m_` names the field directly. Taking only `_root_identifier`
         # here would stop at `this` -- a keyword, not an identifier -- and the
@@ -1656,6 +1672,15 @@ class SparseCfgBuilder:
         else:
             annotations["is_write"] = "false"
             annotations["access_kind"] = "READ"
+        if indirect_callee:
+            # F1 (SUB-09/R6): the bounded indirect field-callee READ. `is_indirect`
+            # marks the READ as a call-site function-pointer field dereference;
+            # `field_path` is an additive, informative designation of the slot.
+            # Neither is a join key -- the canonical slot stays (subject_decl,
+            # subject_member), which is what the matching WRITE publishes too.
+            annotations["is_indirect"] = "true"
+            if root and member:
+                annotations["field_path"] = f"{root}.{member}"
         if event_type == "WRITE" and origin is not None:
             # The escape half of 5C-2's 2.11: what the write *read*, and
             # whether the statement carrying it runs on every path of the

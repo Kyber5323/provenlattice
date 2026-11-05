@@ -100,6 +100,54 @@ def json_loads(text: str) -> dict:
     return json.loads(text or "{}")
 
 
+def _apply_confidence_gate(
+    candidates: list,
+    *,
+    gate: float | None,
+    suppress_below: bool,
+) -> tuple[list, list]:
+    """Partition ``candidates`` into (kept, suppressed) at the band cut.
+
+    SUB-11 / R11 precision guardrail. ``Candidate.confidence`` is a *band* (see
+    ``defect.py``), not a probability, so the gate is a band cut applied
+    *after* ``defect.run`` has produced and top-K'd its candidates: it never
+    re-sorts, never re-runs top-K, never mutates a candidate, and never changes
+    the surviving order. The decision of whether a candidate *is* a candidate
+    is made upstream and is left untouched -- this only drops the ones whose
+    band the caller asked to suppress.
+
+    When the gate is disabled (``suppress_below`` false, or ``gate`` is None)
+    nothing is suppressed and ``kept`` preserves the input order.
+    """
+    if not suppress_below or gate is None:
+        return list(candidates), []
+    kept: list = []
+    suppressed: list = []
+    for candidate in candidates:
+        (kept if candidate.confidence >= gate else suppressed).append(candidate)
+    return kept, suppressed
+
+
+def _gate_mechanism_facts(
+    mechanism_facts: dict,
+    *,
+    gate: float | None,
+    suppress_below: bool,
+) -> dict:
+    """Apply the same band cut to the ``mechanism_facts`` block.
+
+    The mechanism block re-groups already-serialized candidates, so the gate
+    must trim it with the same predicate the flattened ``candidates`` list
+    uses, or the two outputs would disagree about what survived.
+    """
+    if not suppress_below or gate is None:
+        return mechanism_facts
+    return {
+        name: [candidate for candidate in facts if candidate["confidence"] >= gate]
+        for name, facts in mechanism_facts.items()
+    }
+
+
 def query_defect_candidates(
     repo: str | Path,
     *,
@@ -109,6 +157,8 @@ def query_defect_candidates(
     max_paths: int = 8,
     max_candidates: int = 20,
     database: str | Path | None = None,
+    confidence_gate: float | None = defect.DEFAULT_CONFIDENCE_THRESHOLD,
+    suppress_below: bool = True,
 ) -> dict:
     """Run the ported defect queries over the cached derived graph.
 
@@ -117,6 +167,14 @@ def query_defect_candidates(
     and fresh -- ``analyze --features sparse_dfg`` does that; a stale or
     missing upstream fails the whole query closed rather than yielding
     candidates over partial facts.
+
+    ``confidence_gate`` / ``suppress_below`` are the SUB-11 / R11 precision
+    guardrail: by default candidates whose confidence *band* falls below
+    ``DEFAULT_CONFIDENCE_THRESHOLD`` are suppressed from both ``candidates``
+    and ``mechanism_facts``, and reported in ``suppressed``. This is a
+    post-filter over the already top-K'd output of ``defect.run`` -- pass
+    ``confidence_gate=None`` (or ``suppress_below=False``) to see the
+    unfiltered set.
     """
     root = Path(repo).resolve()
     database = Path(database).resolve() if database else root / ".provenlattice" / "codegraph.db"
@@ -265,6 +323,15 @@ def query_defect_candidates(
                 else {}
             )
 
+        # SUB-11 / R11: post-filter at the band cut. Determinism and order are
+        # preserved -- ``_apply_confidence_gate`` only partitions. Applied once,
+        # to the flattened candidates and to the mechanism block, so the two
+        # outputs never disagree about what survived.
+        candidates, suppressed = _apply_confidence_gate(
+            candidates, gate=confidence_gate, suppress_below=suppress_below)
+        mechanism_facts = _gate_mechanism_facts(
+            mechanism_facts, gate=confidence_gate, suppress_below=suppress_below)
+
     with SQLiteStorage(database) as storage:
         generation = storage.current_generation(repo_id)
 
@@ -292,6 +359,9 @@ def query_defect_candidates(
         "candidates": [pair[0] for pair in evidence_pairs],
         "evidence_bundles": [pair[1] for pair in evidence_pairs],
         "mechanism_facts": mechanism_facts,
+        "confidence_gate": confidence_gate,
+        "suppressed": [candidate.to_dict() for candidate in suppressed],
+        "suppressed_count": len(suppressed),
         "coverage": coverage,
         "truncated": truncated,
         "grade": CAPABILITY_GRADE,

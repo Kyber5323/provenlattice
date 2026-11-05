@@ -480,5 +480,158 @@ class CrossQueryTests(QualificationBase):
         self.assertEqual(before_edges, after_edges)
 
 
+class PrecisionGuardrailTests(QualificationBase):
+    """SUB-11 / R11: confidence-gate post-filter + frozen FP control set.
+
+    The guardrail is a band cut applied *after* ``defect.run`` has produced and
+    top-K'd its candidates. It must suppress below-threshold candidates by
+    default, never drop a resolved finding, never re-sort, never re-run top-K,
+    and leave the frozen safe control set (read/read, same lock, different
+    objects, unknown alias) exactly as it was. ``confidence`` is a band (see
+    ``defect.py``), not a probability, so the tests speak in band values, not
+    calibrated likelihoods.
+    """
+
+    # error_handling AMBIGUOUS (band 0.2): the result is stored into a member
+    # path, so the model cannot prove which object the check would concern.
+    # 0.2 < DEFAULT_CONFIDENCE_THRESHOLD (0.3) -> suppressed by default.
+    ERROR_HANDLING_AMBIGUOUS = """#include <stdlib.h>
+struct S { char *buf; };
+void eh_store(struct S *s) { s->buf = malloc(64); }
+"""
+
+    def test_default_threshold_is_lowest_resolved_band(self) -> None:
+        # The guardrail's one correctness guarantee: no RESOLVED band may sit
+        # below the gate, or a real finding would be silently dropped by
+        # default. 0.3 is exactly TAINT_CONFIDENCE[RESOLVED], the lowest
+        # resolved band in the file.
+        from provenlattice import defect
+        self.assertEqual(defect.DEFAULT_CONFIDENCE_THRESHOLD, 0.3)
+        for table in (defect.RESOURCE_CONFIDENCE, defect.LOCK_ORDER_CONFIDENCE,
+                      defect.SELF_DEADLOCK_CONFIDENCE, defect.NULL_FLOW_CONFIDENCE,
+                      defect.USE_AFTER_FREE_CONFIDENCE, defect.DOUBLE_FREE_CONFIDENCE,
+                      defect.TAINT_CONFIDENCE, defect.ERROR_HANDLING_CONFIDENCE):
+            self.assertGreaterEqual(
+                table[defect.RESOLVED], defect.DEFAULT_CONFIDENCE_THRESHOLD)
+
+    def test_default_gate_keeps_resolved_findings(self) -> None:
+        # a resolved double-free (band 0.5) must survive the default gate
+        self.build({"src/t.c": (
+            "#include <stdlib.h>\n"
+            "int f01(int n) { char *p = malloc(8); if (!p) return -1; "
+            "free(p); free(p); return n; }\n"
+        )})
+        env = self.query("double_free")
+        self.assertGreaterEqual(len(env["candidates"]), 1)
+        self.assertEqual(env["confidence_gate"], 0.3)
+        self.assertEqual(env["suppressed_count"], 0)
+        self.assertEqual(env["suppressed"], [])
+
+    def test_below_threshold_candidate_suppressed_by_default(self) -> None:
+        self.build({"src/t.c": self.ERROR_HANDLING_AMBIGUOUS})
+        env = self.query("error_handling")
+        self.assertEqual(env["candidates"], [])
+        self.assertGreaterEqual(env["suppressed_count"], 1)
+        self.assertTrue(all(c["confidence"] < 0.3 for c in env["suppressed"]))
+
+    def test_gate_none_reveals_suppressed(self) -> None:
+        self.build({"src/t.c": self.ERROR_HANDLING_AMBIGUOUS})
+        env = self.query("error_handling", confidence_gate=None)
+        self.assertGreaterEqual(len(env["candidates"]), 1)
+        self.assertEqual(env["suppressed_count"], 0)
+
+    def test_suppress_below_false_disables_gate(self) -> None:
+        self.build({"src/t.c": self.ERROR_HANDLING_AMBIGUOUS})
+        env = self.query("error_handling", suppress_below=False)
+        self.assertGreaterEqual(len(env["candidates"]), 1)
+        self.assertEqual(env["suppressed_count"], 0)
+
+    def test_gate_does_not_rerank_or_drop_at_or_above_threshold(self) -> None:
+        # three resolved double-frees (each 0.5). The gate drops nothing, keeps
+        # the frozen order, and top-K still caps the result.
+        self.build({"src/t.c": (
+            "#include <stdlib.h>\n"
+            "int f01(int n) { char *p = malloc(8); if (!p) return -1; "
+            "free(p); free(p); return n; }\n"
+            "int f02(int n) { char *p = malloc(8); if (!p) return -1; "
+            "free(p); free(p); return n; }\n"
+            "int f03(int n) { char *p = malloc(8); if (!p) return -1; "
+            "free(p); free(p); return n; }\n"
+        )})
+        gated = self.query("double_free", max_candidates=2)
+        ungated = self.query("double_free", max_candidates=2, confidence_gate=None)
+        self.assertEqual(
+            [c["anchor"] for c in gated["candidates"]],
+            [c["anchor"] for c in ungated["candidates"]])
+        self.assertLessEqual(len(gated["candidates"]), 2)
+        self.assertEqual(gated["suppressed_count"], 0)
+
+    def test_all_path_suppresses_below_threshold(self) -> None:
+        # the flattened "all" list and the mechanism block share one cut: the
+        # error_handling ambiguous (0.2) is suppressed, the resource_lifetime
+        # ambiguous (0.4) survives.
+        self.build({"src/t.c": self.ERROR_HANDLING_AMBIGUOUS})
+        env = self.query("all")
+        self.assertGreaterEqual(env["suppressed_count"], 1)
+        self.assertTrue(all(c["confidence"] < 0.3 for c in env["suppressed"]))
+        self.assertTrue(all(c["confidence"] >= 0.3 for c in env["candidates"]))
+
+    # --- frozen FP control set: the guardrail must not change these ---
+
+    def test_control_read_read_no_race(self) -> None:
+        self.build({"src/t.c": (
+            "#include <pthread.h>\n"
+            "int shared = 0;\n"
+            "void *r1(void *a) { return (void *)(long)shared; }\n"
+            "void *r2(void *a) { return (void *)(long)shared; }\n"
+        )})
+        cands = self.candidates("race_condition")
+        self.assertEqual(cands, [])
+
+    def test_control_same_lock_no_inversion(self) -> None:
+        self.build({"src/t.c": (
+            "#include <pthread.h>\n"
+            "pthread_mutex_t mA;\n"
+            "void t1(void) { pthread_mutex_lock(&mA); pthread_mutex_unlock(&mA); }\n"
+            "void t2(void) { pthread_mutex_lock(&mA); pthread_mutex_unlock(&mA); }\n"
+        )})
+        cands = self.candidates("lock_order")
+        self.assertEqual(cands, [])
+
+    def test_control_different_objects_no_uaf(self) -> None:
+        self.build({"src/t.c": (
+            "#include <stdlib.h>\n"
+            "int f09(int n) {\n"
+            "    int *a = malloc(sizeof(int));\n"
+            "    int *b = malloc(sizeof(int));\n"
+            "    if (!a || !b) return -1;\n"
+            "    free(a);\n"
+            "    *b = n;\n"
+            "    free(b);\n"
+            "    return n;\n"
+            "}\n"
+        )})
+        cands = self.candidates("use_after_free")
+        self.assertEqual(cands, [])
+
+    def test_control_unknown_alias_kept(self) -> None:
+        # alias copy q = p before free; use q after free. The candidate is at
+        # or above the threshold, so the default gate must not drop it.
+        self.build({"src/t.c": (
+            "#include <stdlib.h>\n"
+            "int f08(int n) {\n"
+            "    int *p = malloc(sizeof(int));\n"
+            "    int *q = p;\n"
+            "    if (!p) return -1;\n"
+            "    free(p);\n"
+            "    *q = n;\n"
+            "    return n;\n"
+            "}\n"
+        )})
+        env = self.query("use_after_free")
+        self.assertGreaterEqual(len(env["candidates"]), 1)
+        self.assertEqual(env["suppressed_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

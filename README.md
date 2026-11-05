@@ -1,19 +1,26 @@
-﻿# ProvenLattice 1.6.0
+﻿# ProvenLattice
 
-**A Provenance-aware Code Knowledge and Analysis Platform for AI Agents**
+**A Software Intelligence Graph for Code Generation, Repair, and Quality Inspection**
 
-ProvenLattice 是一个面向 AI Agent 的统一代码知识和语义分析平台。以轻量、确定性、可增量的代码知识图谱为基础，支持三大语言（Python / C/C++ / Java）与两大能力域：
+> **版本状态**
+>
+> - 当前 tagged 版本：**v1.7.0**（`main` = `9feae792`，`pyproject.toml` = 1.7.0）
+> - 上一版稳定发布：v1.6.0（Java Sparse CFG/DFG）
+> - GitHub Release 页面与 PyPI 发布由 owner 决定；当前 GitHub "Latest Release" 仍为 v1.6.0，v1.7.0 的 Release 页尚未创建。
 
-* **Agent Development（日常开发辅助，默认核心）**：代码理解、调用关系与影响分析、Agent 编码/修复辅助、需求-代码关联、任务上下文生成；
-* **Code Inspection（深度代码检测，可选高级）**：Semantic Events、Sparse CFG/DFG、八类缺陷候选查询、Evidence Bundle。
+## 项目定位
 
-两大能力域共享底层事实、分析引擎和证据体系。长期规划见 [docs/roadmap.md](docs/roadmap.md) Gold Target V2 节。
+ProvenLattice 是一个面向三类研发任务的软件智能图谱（Software Intelligence Graph）。它以轻量、确定性、可增量的代码知识图谱为底座，把代码仓库的结构、语义与缺陷信息组织成可查询、可追溯、可增量的分层证据结构，为 AI Agent 和开发者提供任务相关的最小必要上下文与按需深度分析：
+
+1. **代码生成（Code Generation）**：调用关系、影响分析、需求-代码关联、任务上下文，为生成式编码提供结构化事实。
+2. **代码修复（Code Repair）**：缺陷候选 + 证据链（`E-DEFECT-*`），让修复建议可溯源、可验证。
+3. **质量检测（Quality Inspection）**：Semantic Events、Sparse CFG/DFG、并发图谱事实、八类缺陷查询、Evidence Bundle。
+
+三条任务线共享同一底层事实（L1 Foundation Graph）、同一分析引擎与同一证据体系。长期规划见 [docs/roadmap.md](docs/roadmap.md) Gold Target V2 节。
 
 ## Motivation
 
-当前 Code Agent 主要通过文件读取、代码搜索和工具调用理解大型代码仓库。
-
-随着代码规模和工程复杂度增加，这种方式容易带来：
+当前 Code Agent 主要通过文件读取、代码搜索和工具调用理解大型代码仓库。随着代码规模和工程复杂度增加，这种方式容易带来：
 
 * 大量重复搜索与文件读取
 * 跨文件、跨模块关系定位成本较高
@@ -33,22 +40,42 @@ L1 Foundation Graph（默认启用，零检测开销）
 │   Python + C/C++ + Java 确定性解析，resolved/ambiguous/unresolved 三态引用
 │
 L2 Unified Optional Analysis（按 Capability × Scope 按需物化）
+│   ├─ Agent Analysis：AST/CFG · 调用语义 · 短路
+│   └─ Inspection Analysis：Semantic Events · Sparse CFG/DFG · 并发 Profile
+│                          · 8 类 Typed Defect Query
 │
-│   ┌─ Agent Analysis ─────────────────────────────────────────┐
-│   │ Python AST/CFG · C normalized AST/CFG · 短路 · 调用语义   │
-│   └──────────────────────────────────────────────────────────┘
-│   ┌─ Inspection Analysis ────────────────────────────────────┐
-│   │ Semantic Events (15 类) · Sparse CFG/DFG                 │
-│   │   (C/C++ + Java：def→use / field / interprocedural)      │
-│   │ 8 类 Typed Defect Query · Evidence Bundle                 │
-│   └──────────────────────────────────────────────────────────┘
+L3 Task Services（Agent task-context · Defect query · Concurrency profile）
 │
-L3 Task Services（Agent task-context · Defect query）
-L4 Evidence & Results（统一证据契约，Candidate ≠ Verified）
 L5 Exposure（CLI baseline · MCP passthrough）
+
+L4 Evidence & Trust Governance（横向治理面，贯穿 L2–L5）
+   证据契约 · Candidate ≠ Verified · 三态可达性 · confidence gate · freshness
 ```
 
 > Full CFG 和 Sparse CFG 当前为两种独立实现；Canonical Control-Flow Model 属于长期演进目标。
+
+## Capability × Scope
+
+按需物化的能力统一以 **Capability × Scope** 控制：请求某个能力时只对指定 scope 物化，上游变化经 `dependency_staleness()` 自动失效下游缓存。
+
+| 能力 | scope 粒度 | 语言 | 来源 |
+|---|---|---|---|
+| AST | file/symbol | Python / C / C++ / Java | L2 Agent |
+| CFG | function | Python / C | L2 Agent |
+| Semantic Events | function | C / C++ | L2 Inspection |
+| Sparse CFG | function | C / C++ / Java | L2 Inspection |
+| Sparse DFG | function | C / C++ / Java | L2 Inspection |
+| Concurrency Profile | repo/scope | C / C++ | v1.7 |
+
+**不同缺陷所需的证据组合**（示例）：
+
+| 缺陷 | 依赖的图谱能力 |
+|---|---|
+| double_free / use_after_free | Semantic Events + resource lifetime + `DEREF_RESOLVES_TO` |
+| resource_lifetime | Events + `THREAD_SPAWN`/`THREAD_JOIN` + `is_alive_at_access` |
+| lock_order | per-access `held_locks` + 锁身份关系 |
+| race_condition | `access_kind` + `held_locks` + `competing_access[]` |
+| null_flow | DEREF 事件 + Sparse CFG |
 
 ## Quick Start
 
@@ -71,124 +98,75 @@ provenlattice task-context <symbol> --database /path/to/repo/.provenlattice/code
 
 # 5. Code Inspection（按需，触发上游链 + 缺陷查询）
 provenlattice analyze /path/to/repo --scope src --features defect --json
-provenlattice defect /path/to/repo --type double_free --database /path/to/repo/.provenlattice/codegraph.db --json
-provenlattice defect /path/to/repo --type use_after_free --json
-provenlattice defect /path/to/repo --type null_flow --json
+provenlattice defect /path/to/repo --type race_condition --json
+provenlattice defect /path/to/repo --type lock_order --json
 provenlattice defect /path/to/repo --type all --json
 
-# 6. MCP（透明桥接，需 MCP 客户端配置后使用；见 Limitations）
-#    mcp__provenlattice__query 为 MCP 协议内工具名，
-#    不是 CLI 子命令。MCP stdio 客户端端到端验证已完成（4/4 PASS，
-#    见 docs/v1.4-mcp-e2e-report.md）。
+# 6. 并发图谱 Profile（v1.7，按 scope 物化并发语义事实）
+provenlattice concurrency-profile /path/to/repo \
+  --profile concurrency-v1 \
+  --scope src \
+  --json
+
+# 7. MCP（透明桥接，需 MCP 客户端配置后使用；见 Limitations）
+#    mcp__provenlattice__query 为 MCP 协议内工具名，不是 CLI 子命令。
 ```
 
-## 核心能力（Inspection Analysis）
+## 三语言统一能力基线（v1.6）
 
-| 能力 | 来源 | 说明 |
-|---|---|---|
-| Semantic Events (15 类) | PR #1 | 词汇表驱动的操作事件（CALL/ALLOC/RELEASE/LOCK/…），按需物化 |
-| Sparse CFG | PR #1 | 事件点级控制可达（CONTROL_REACHES），含 CHECK/BRANCH/DEREF 结构事件 |
-| Sparse DFG | PR #1 | 方法内 def→use（DATA_FLOW_TO）+ 别名链 + via 中间体 |
-| 8 类 Defect Query | PR #1 | double_free/use_after_free/null_flow/resource_lifetime/lock_order/race_condition/taint_path/error_handling |
-| Evidence Bundle | PR #1 | E-DEFECT-* id、facts、uncertain_facts、source_evidence、missing_evidence |
-| Ownership Contracts | PR #1 | ContractTable + inferred ownership rules；declared TOML 数据未迁入 |
-| Capability Contract | V1.4 | 统一能力注册（8 查询 + 3 analyzer），按 Capability × Scope 控制 |
-| Dependency Freshness | V1.4 | `dependency_staleness()` 统一规则，上游变化自动失效下游缓存 |
-| Composite PK (id, feature) | V1.4 | 跨 analyzer 同 ID 共存，旧库自动迁移 |
-| Three-state Reachability | V1C-R1 | true / false / unknown — unknown 不当作不可达 |
+v1.6.0 把 Python / C/C++ / Java 三语言收敛到同一套 L1 事实 + L2 能力契约上：
 
-## Java Support (P0, Foundation Graph)
+* **L1 Foundation Graph**：Python / C/C++ / Java 三语言确定性解析（Java 以 tree-sitter 语法事实接入，含 Class/Interface/Method 节点、DEFINES/CONTAINS/IMPORTS/CALLS/REFERENCES/IMPLEMENTS 边、三态引用边界）。
+* **Sparse CFG/DFG 统一**：C/C++ 与 Java 复用同一套稀疏控制流 / 数据流（`sparse_cfg:java` / `sparse_dfg:java` / Field Data Flow / 同文件 interprocedural param-return），无第二套算法。
+* **可选 Java 精确解析**：`java-semantic`（Eclipse JDT，独立 JVM 进程，按需启动；默认 index 永不启动 JVM）提供查询时精确绑定，fail-closed 报告 unavailable。
+* **8 类 Typed Defect Query + Evidence Bundle**：`double_free` / `use_after_free` / `null_flow` / `resource_lifetime` / `lock_order` / `race_condition` / `taint_path` / `error_handling`。
 
-Java 以 **tree-sitter 语法事实**接入默认 Foundation Graph（T1–T3，2026-10-15）：
+> Java 能力等级为 `local-only, diagnostic`（Public Beta，未取得 RQ1 formal 资格）。
 
-```bash
-provenlattice index /path/to/java-repo --json   # .java 文件自动识别
-provenlattice symbol Helper --database /path/to/java-repo/.provenlattice/codegraph.db --json
-provenlattice callers com.example.core.Helper.build --database ... --json
-```
+## 并发图谱事实与缺陷精度（v1.7）
 
-* **节点**：`Class`（class/enum/record）、`Interface`（interface/annotation）、`Method`（method/constructor/field/enum_constant）——全部复用既有冻结 kind，metadata 判别（`java_kind` / `java_member`）；包不建节点。
-* **边**：`DEFINES` / `CONTAINS` / `IMPORTS` / `CALLS` / `REFERENCES` / `IMPLEMENTS`（extends/implements/throws 以 `java_relation` 区分）。
-* **三态边界**：import/限定名/同文件/全局唯一 → `resolved`（0.75–1.0）；重载调用、跨包同名、通配 import 同名 → `ambiguous`（候选完整保留）；间接形状（`super.x()`、复杂 receiver、`Type::method`）、JDK/第三方类型、隐式默认构造 → `unresolved`。**不做重载判定与继承层级绑定**。
-* **已记录提取 gap**：record 组件、注解元素、匿名类体、隐式默认构造不产出符号；局部变量/参数/lambda/模式变量不产出引用。
-* **边界**：L1 为 tree-sitter 语法事实层；方法重载判定、继承层级绑定与完整类型流由**可选的 JDT 精确解析**提供（见下节）；record 组件、注解元素、匿名类体、隐式默认构造不提取（已记录 gap）；分/局部/lambda/模式变量不产出引用。
+v1.7.0 面向并发类漏洞检测，补齐图谱的并发语义事实、关联能力与精度护栏，让 race / lock_order / resource_lifetime / 间接调用四类并发缺陷从「能看结构」变为「能证事实」。
 
-### 可选精确解析：`java-semantic`（Eclipse JDT Analyzer，已交付）
+### 并发语义事实（事实层）
 
-在 L1 之上提供一个**可选的**查询时精确解析增强（Eclipse JDT，独立 JVM 进程，按需启动，用完即退；**默认 index 永不启动 JVM**）。已经 P2-A/P2-D 集成与 P2-E 工程资格验证（G1–G6，`docs/java-phase2-p2e-final-qualification-report.md`）。
+| 能力 | 事实 |
+|---|---|
+| 一等访问类型 | `access_kind`（READ / WRITE / READ_MODIFY_WRITE） |
+| 锁集合与锁身份 | per-access `held_locks` + 锁身份关系（SAME / DIFFERENT / PROTECTS） |
+| 对象身份 | canonical storage identity + query-time `DEREF_RESOLVES_TO` + must-only `same_storage` |
+| 生命周期 | 生命周期序 + `is_alive_at_access`（spawn→join） |
+| 间接调用 | 间接 field-callee `is_indirect` READ + query-time `MAY_CALL` |
+| Scenario 归属 | `candidate.span` + `supporting_locations[]` + `scenario_annotations[]` |
 
-```bat
-# 1. 环境要求（可选能力，未配置时 L1 完全不受影响）
-set PL_JAVA_JDK=C:\path\to\jdk-21            # 需要 JDK（javac + java）
-set PL_JAVA_JDT_CLASSPATH=C:\jars\org.eclipse.jdt.core.jar;C:\jars\...  # JDT 及其依赖 jar
+### 关联与查询能力（能力层）
 
-# 2. 查看能力状态（fail-closed：缺 JDK/JDT 时明确报告 unavailable 及原因）
-provenlattice java-semantic <repo> --status-only --json
+* 竞争访问配对：访问级 `competing_access[]` + confidence 排序 + top-K。
+* 证据链：候选级 `trace_evidence[]` + `E-DEFECT` 关联，告警可溯源。
+* 统一证据口径：Evidence Schema V2 五块（access / lock / competing / trace / confidence-limitation）。
+* 非竞态机制暴露：additive `mechanism_facts` 块。
+* 场景关联：query-time `scenario_access_relations[]`（`CONTAINS_ACCESS`）+ `function_scenario_groups[]`。
 
-# 3. 手工 Classpath 清单（P2-C 契约；一行一条，project:/dep: 角色，# 注释）
-#    classpath.txt:
-#    project: C:\repos\my-app\src\main\java
-#    dep: C:\libs\slf4j-api.jar
-provenlattice java-semantic <repo> --classpath-manifest classpath.txt --json
+### 精度护栏（可信层）
 
-# 4. 查询结果：每个调用站点给出 L1 状态与 JDT 精确绑定对照
-#    provenance=semantic:jdt-v1 + classpath 指纹可追溯；
-#    recovered（依赖缺失伪造）绑定被过滤，歧义不会被升级为确定。
-```
+* confidence gate：默认 `confidence_gate=0.3` 抑制低 confidence 候选；被抑制项回填 `suppressed`，可审计、可 `confidence_gate=None` 还原；冻结 FP 回归控制集（read/read、同锁、不同对象、unknown alias）。
 
-* **资源**：JVM `-Xmx1g`（默认）；实测 1.9k 文件仓库批处理 ~8s / 进程 RSS ~1.2GB
-  （预算：RSS ≤1.6GB、批处理 ≤15s——已验证，正式预算批准待人工）。
-* **限制**：外部依赖 jar 未入 classpath 的类型绑定被过滤（不伪造）；跨文件类型流
-  样本中 147/225 无法建立独立真值（诚实边界）；query-time 结果**不持久化到 L1 图谱**；
-  Maven/Gradle 不会被执行（classpath 手工提供）。
-* **已验证**：479 项测试（Windows/Linux CI 双绿）、三真实仓库端到端、8/8 历史错误绑定修正、168 冲突抽样 0 JDT 错误。**未取得** RQ1 formal qualification。
+### 明确限制（fail-closed 边界）
 
-## Java Sparse CFG / DFG（1.6.0）
-
-1.6.0 在 1.5.0 Java Public Beta 基础上新增 Java 稀疏控制流 / 数据流分析线：
-
-- **Java Sparse CFG**（`sparse_cfg:java`）：方法级稀疏控制流（CHECK/BRANCH/RETURN
-  + READ/WRITE 访问点 + lexical scoping/shadowing），复用 C/C++ Sparse CFG 能力。
-- **Java Sparse DFG**（`sparse_dfg:java`）：方法内 def→use（DATA_FLOW_TO），复用
-  `mint_dataflow_edges`，无第二套 DFG 算法。
-- **Java Field Data Flow V1**：`this.field` / `obj.field` 读写 def-use（receiver 可
-  绑定；identity=(receiver-root, member-path)，不同对象字段不合并）。
-- **Java Interprocedural Parameter/Return Data Flow V1**：同文件短名唯一匹配下，
-  `caller argument → callee parameter` 与 `callee return → caller call` 跨方法边。
-
-```bash
-provenlattice analyze /path/to/java-repo --scope src --features sparse_dfg --json
-provenlattice analysis /path/to/java-repo --feature sparse_dfg --file-path src/Foo.java --json
-```
-
-明确边界：跨函数数据流仅同文件短名唯一匹配；不支持 points-to / alias / 完整
-heap flow / 完整跨文件 interprocedural / 签名级重载消歧。能力等级 `local-only,
-diagnostic`。
+* 间接调用**永不**升级为 definite `CALLS`；`MAY_CALL` 仅同文件 method-local 简单赋值，跨 TU / 多目标 / unresolved 一律 `{}`。
+* scenario 仅支持显式白名单 pragma（`#pragma provenlattice scenario`），普通注释 / TODO / 文本相似度不映射。
+* FE-8 scenario relations 与 `MAY_CALL` 为查询期、默认 OFF、不注册 CAPABILITY。
+* 候选仍为 Candidate（`resolved` ≠ Verified Finding）。
 
 ## Validation
 
-以下结果基于 aria2 语料（1,393 文件 / 165k LOC）在 5 轮交错配对运行中测量（1.4.0 基线）：
-
 | 检查项 | 结果 |
 |---|---|
-| 全量测试 | **408/408 PASS** |
-| L1 parity | **PASS**（node/edge id 逐 ID 相等） |
-| 八类 defect CLI | **8/8 available** |
-| 旧库 PK 迁移 | **8/8 PASS** |
-| 默认 index 零检测产物 | **CONFIRMED** |
-| 默认 index 耗时 | **6.77s**（5 轮配对中位，aria2，冻结 main 基线 = 6.77s） |
-| 默认 RSS | **218.0MB**（中位数；合并后单次验证 = 6.94s / 218.1MB） |
+| 全量测试（v1.7 基线，`pytest tests`） | **853 passed, 3 subtests passed** |
+| CI | test-linux / test-windows / linux-jdt-verify 三 job 全绿 |
+| 集成红线回归 | 默认 index / race / lock_order / CLI-MCP envelope / 旧字段 全绿，零回退 |
+| 冻结 FP 控制集 | read/read、同锁、不同对象、unknown alias 强断言 |
 
-> 性能数据基于特定测试语料和环境，不代表所有仓库的通用表现。
->
-> **1.5.0 新增验证**（Java Public Beta，见 `docs/releases/v1.5.0.md` 与 postmerge
-> 报告）：479 项测试 OK（Windows/Linux CI 双绿）；Java 真实仓库 HikariCP/gson/
-> jgit 索引零失败；JGit L1 索引 25.1s；JDT 批处理 8.1s / RSS ~1.2GB；wheel/
-> sdist 干净安装验证通过。
->
-> **1.6.0 新增验证**（Java Sparse CFG/DFG，见 CHANGELOG 与 docs/capability-matrix.md）：
-> 全量回归 571 passed + 3 subtests；CI 三项全绿（test-windows / test-linux /
-> linux-jdt-verify）；CLI smoke、MCP smoke、wheel+sdist build+install smoke 通过。
+> 历史性能数据（1.4.0 基线，aria2 语料 1,393 文件 / 165k LOC）：默认 index 6.77s / RSS 218MB。性能数据基于特定测试语料和环境，不代表所有仓库的通用表现。
 
 ## Limitations
 
@@ -196,24 +174,22 @@ diagnostic`。
 - `error_handling` 和 `taint_path` 仅 SMOKE + DIAGNOSTIC 级
 - CONSUMES 仅覆盖直接传递形状（`f(malloc(n))`）
 - goto 目标不建模；短路坍缩为单 BRANCH
-- 无 SSA / points-to / 跨函数数据流边
+- 无 SSA / 完整 points-to / 跨函数数据流边
 - Python 缺陷检测链未验证
-- Cold Store / declarations 重构未纳入 V1.4（归档于 `archive/pr1-full-merge`）
-- Streaming Incremental 可在 legacy 单库布局下独立移植（不依赖 Cold Store），待独立 A/B 验证
-- MCP defect 查询已完成端到端客户端验证（stdio JSON-RPC 真实 server 子进程，initialize/tools/list/8 类 defect query/stale fail-closed 全链路 4/4 PASS，测试 `tests/test_mcp_defect_e2e.py`，见 `docs/v1.4-mcp-e2e-report.md`；`mcp__provenlattice__query` 为 MCP 协议内工具名，非 CLI 子命令）
-- `semantics/contracts.toml`（declared 所有权规则数据）和 `semantics/vocabularies/python.toml`（Python 事件词汇表）未迁入
-- Java：L1 已交付（Public Beta）；可选 JDT 精确解析已交付（Windows/JDK21 已验证；Linux JDT VERIFIED——CI ubuntu-latest / Temurin 21 / Maven 钉扎套件，PR #14 CI，fixture 级跨平台对比，见 docs/linux-jdt-verification-report.md）；record 组件、注解元素、匿名类体、隐式默认构造不提取；SCIP INFRA_BLOCKED；Java 不具备 Stable 资格，RQ1 formal 未取得
-- Java Sparse CFG/DFG（1.6.0）：跨函数数据流仅同文件短名唯一匹配；重载 / 跨文件 / 非 identifier 实参不绑定；无 points-to / alias / 完整 heap flow / 完整跨文件 interprocedural；能力等级 `local-only, diagnostic`
+- Java：L1 已交付（Public Beta）；可选 JDT 精确解析已交付；record 组件、注解元素、匿名类体、隐式默认构造不提取；Java 不具备 Stable 资格，RQ1 formal 未取得
+- Java Sparse CFG/DFG：跨函数数据流仅同文件短名唯一匹配；能力等级 `local-only, diagnostic`
+- **v1.7 产品化边界**：GitHub Release 页 / PyPI 尚未发布（owner 决策）；完整 happens-before / 内存模型 / 完整 points-to 尚未实现；v1.7 尚未进行正式 Release Qualification
+- MCP defect 查询已完成端到端客户端验证（stdio JSON-RPC 真实 server 子进程，全链路 4/4 PASS，见 `docs/v1.4-mcp-e2e-report.md`）
 
 ## Documentation
 
 | 文档 | 说明 |
 |---|---|
-| [docs/capability-matrix.md](docs/capability-matrix.md) | 当前能力状态统一入口（1.6.0） |
+| [docs/capability-matrix.md](docs/capability-matrix.md) | 当前能力状态统一入口 |
 | [docs/defect-query-guide.md](docs/defect-query-guide.md) | 缺陷查询使用指南 |
 | [docs/roadmap.md](docs/roadmap.md) | Gold Target V2 长期路线 |
 | [REPRODUCIBILITY.md](REPRODUCIBILITY.md) | 资格验证证据链 |
-| [CHANGELOG.md](CHANGELOG.md) | 变更日志（含 1.5.0 / 1.6.0 及历史 release 说明） |
+| [CHANGELOG.md](CHANGELOG.md) | 变更日志 |
 | [docs/](docs/) | 其余设计、证据、发布与整合报告归档 |
 
 ## Research Direction
@@ -229,52 +205,41 @@ diagnostic`。
 ## Standalone Roadmap
 
 ```text
-Core V0.3–V1.0 / RQ1 / RQ2 / SQI-V1–V1.2                    ✅ 正式资格
-Analysis Layer D0–D8 (Python AST/CFG)                        ✅ QUALIFIED
-Context Bundle / task-context-v0 / MCP / normalization-v2     ✅
-C Analysis Chain A1–A3.6                                     ✅ diagnostic
-Gold Target V2 双能力域架构                                    ✅ 规划冻结
-─── V1.4 ───
-Semantic Events / Sparse CFG / Sparse DFG                     ✅ 按需已交付
-8 类 Typed Defect Query + Evidence Bundle                     ✅ 按需已交付
-Capability Contract + 统一 freshness                          ✅ 已交付
-Composite PK (id, feature) + 旧库迁移                          ✅ 已交付
-三态可达性证据 (true/false/unknown)                            ✅ 已交付
-Java Foundation Graph (P0, T1–T3)                              ✅ L1 已交付（21 用例 + 金样回归；无 L2）
-─── 1.5.0（Java Public Beta）───
-Java L1 完整工程资格（P2-A/P2-C/P2-D/P2-E）                      ✅ Engineering PASS
-Optional JDT Semantic Analyzer（java-semantic）                 ✅ 已交付（diagnostic；Windows/JDK21 已验证）
-Classpath manifest + Driver fingerprint 缓存                     ✅ 已交付
-Linux JDT 验证 / JDK 矩阵                                       ✅ VERIFIED (ubuntu CI, PR #14, fixture 级) / 其他 JDK 组合未测
-Java RQ1 formal / Stable 资格                                   ⬜ 未取得（独立立项）
-─── 1.6.0（Java Sparse CFG/DFG）───
-Java Sparse CFG / DFG（sparse_cfg:java / sparse_dfg:java）        ✅ 已交付
-Java Field Data Flow V1                                            ✅ 已交付
-Java Interprocedural Parameter/Return Data Flow V1                 ✅ 已交付（同文件短名唯一）
-─── 未来 ───
-Canonical CFG / Full-Sparse 双视图收敛                          规划（Gold Target V2 Phase 3）
-精确 alias / points-to / 跨函数数据流                           future candidate
-完整 Taint Analysis / sanitizer                                future candidate
-Python 缺陷检测链                                              future candidate
-Cold Store / Streaming Incremental                             deferred (opt-in candidate)
-CI / Plugin / SDK / REST                                      future candidate
+─── v1.6 Stable Baseline ───
+Python / C/C++ / Java 三语言 L1 + Sparse CFG/DFG 统一基线          ✅ 已交付
+8 类 Typed Defect Query + Evidence Bundle                          ✅ 已交付
+可选 Java JDT 精确解析（diagnostic）                               ✅ 已交付
+
+─── v1.7 Delivered（并发图谱事实 + 缺陷精度）───
+access_kind / held_locks / storage identity / alias / thread ctx   ✅ 已交付
+per-access lockset / race / lock scenarios                          ✅ 已交付
+lifetime / DEREF / MAY_CALL                                         ✅ 已交付
+Evidence Schema V2 + trace_evidence 链                              ✅ 已交付
+confidence gate / top-K / suppression                               ✅ 已交付
+
+─── Future ───
+Canonical CFG / Full-Sparse 双视图收敛                             规划（Gold Target V2 Phase 3）
+精确 alias / 完整 points-to / 跨函数数据流                          future candidate
+完整 happens-before / 内存模型                                      future candidate
+完整 Taint Analysis / sanitizer                                     future candidate
+Python 缺陷检测链                                                   future candidate
+Cold Store / Streaming Incremental                                  deferred (opt-in candidate)
+CI / Plugin / SDK / REST                                            future candidate
 ```
 
 ## Status
 
-✅ **1.6.0 = Java Sparse CFG/DFG（Java Public Beta 增强：+ 稀疏控制流/数据流）**
+✅ **v1.7.0 = 并发图谱事实 + 缺陷精度**（当前 tagged 版本，`main` = `9feae792`）
 
-- 571 项测试通过（+3 subtests），Windows/Linux CI 双绿 + Linux JDT VERIFIED
-- L1 parity PASS（Python/C/C++ 基础图谱零变化）
-- Java：L1 + 可选 JDT 已交付；新增 Sparse CFG/DFG + Field Data Flow + Interprocedural param/return（local-only, diagnostic；Public Beta 限制见上）
-- 八类缺陷查询按需可用（local-only, diagnostic 级）
-- GitHub Release：[provenlattice-v1.6.0](https://github.com/sunSUNQ/provenlattice/releases/tag/provenlattice-v1.6.0)（wheel/sdist SHA256 已验证）
-- **当前安装渠道为 GitHub Release**（PyPI 尚未发布）
+- 全量回归 853 passed + 3 subtests；CI 三项全绿
+- 七文件图谱改进程序 R0–R11 + FE-5 / FE-8 已合入
+- 上一版 v1.6.0：三语言统一能力基线（Java Sparse CFG/DFG），[provenlattice-v1.6.0](https://github.com/sunSUNQ/provenlattice/releases/tag/provenlattice-v1.6.0)
+- **v1.7.0 的 GitHub Release 页与 PyPI 发布由 owner 决定，尚未发布**
 
 详细能力矩阵见 [docs/capability-matrix.md](docs/capability-matrix.md)。
 
 ---
 
-**ProvenLattice 1.6.0**
+**ProvenLattice**
 
-*A Provenance-aware Code Knowledge and Analysis Platform for AI Agents*
+*A Software Intelligence Graph for Code Generation, Repair, and Quality Inspection*

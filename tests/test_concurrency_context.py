@@ -8,8 +8,10 @@ Freezes the fail-closed fact contract for S4/S5:
    provable pair is asserted; a join with no recoverable handle (e.g.
    ``WaitForMultipleObjects``) stays unknown and ``thread_handle_identity`` is
    reported rather than pairing by owner + source order;
-2. MAY_PARALLEL is a candidate (status ambiguous), keyed by S1's stable
-   `subject_decl` identity, carrying its access events, spans and exactness;
+2. MAY_PARALLEL is a candidate-level relation (`candidate_state` ambiguous),
+   keyed by S1's stable `subject_decl` identity, carrying its access events,
+   spans, exactness, `evidence_references` and `missing_evidence`; it is never
+   resolved into a HAPPENS_BEFORE / definite-parallelism fact;
 3. an unresolved identity (unknown storage, no subject_decl) is marked
    `unresolved` and never merged with a different object by display name;
 4. the capability is C/C++ only and preserves the sparse_cfg statuses.
@@ -113,8 +115,9 @@ class SpawnJoinIdentityTests(ConcurrencyContextTestBase):
             if subject["subject"] == "g_shared"
         )
         self.assertEqual(shared["identity"], "global:g_shared")
-        self.assertEqual(shared["status"], "ambiguous")
+        self.assertEqual(shared["candidate_state"], "ambiguous")
         self.assertFalse(shared["unresolved"])
+        self.assertEqual(shared["missing_evidence"], [])
         self.assertEqual(shared["owners"], ["touch", "worker"])
         self.assertEqual(shared["thread_entry_owners"], ["worker"])
         # accesses carry event ids, spans and exactness
@@ -337,6 +340,75 @@ class DetachedLocalLifetimeTests(ConcurrencyContextTestBase):
         self.assertEqual(len(ctx["spawn_join_pairs"]), 1)
 
 
+class CandidateLevelMayParallelTests(ConcurrencyContextTestBase):
+    """S2 correction: MAY_PARALLEL is a candidate-level relation only.
+
+    The context bundle never emits a resolved relation or a HAPPENS_BEFORE
+    edge: every shared-subject pair stays a ``may_parallel`` candidate carrying
+    ``candidate_state``, ``evidence_references`` and ``missing_evidence``, and
+    the bundle has no ``relations`` / ``coverage`` keys.
+    """
+
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "int g;\n"
+        "void *worker(void *arg) { g = 1; return 0; }\n"
+        "void f(void) {\n"
+        "    g = 0;\n"
+        "    pthread_t t;\n"
+        "    pthread_create(&t, 0, worker, 0);\n"
+        "    g = 2;\n"
+        "    pthread_join(t, 0);\n"
+        "    g = 3;\n"
+        "}\n"
+    )
+
+    def test_no_happens_before_or_resolved_relation_emitted(self):
+        ctx = self.context()
+        self.assertNotIn("relations", ctx)
+        self.assertNotIn("coverage", ctx)
+
+    def test_may_parallel_candidate_carries_state_evidence_and_missing(self):
+        ctx = self.context()
+        subject = next(
+            s for s in ctx["may_parallel"] if s["subject"] == "g")
+        self.assertEqual(subject["candidate_state"], "ambiguous")
+        self.assertFalse(subject["unresolved"])
+        self.assertEqual(subject["missing_evidence"], [])
+        self.assertEqual(subject["owners"], ["f", "worker"])
+        self.assertEqual(subject["thread_entry_owners"], ["worker"])
+        # evidence references are exactly the access event ids
+        self.assertTrue(subject["evidence_references"])
+        self.assertEqual(
+            subject["evidence_references"],
+            [access["event_id"] for access in subject["accesses"]],
+        )
+
+
+class UnresolvedCandidateStateTests(ConcurrencyContextTestBase):
+    FIXTURE = (
+        "void a(void) { g_undeclared++; }\n"
+        "void b(void) { g_undeclared = 2; }\n"
+    )
+
+    def test_unresolved_identity_is_candidate_state_unresolved(self):
+        ctx = self.context()
+        candidates = [
+            s for s in ctx["may_parallel"] if s["subject"] == "g_undeclared"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["candidate_state"], "unresolved")
+        self.assertTrue(candidates[0]["unresolved"])
+        self.assertEqual(
+            candidates[0]["missing_evidence"], ["identity_unresolved"])
+
+
+class MayParallelRegisteredTests(unittest.TestCase):
+    def test_may_parallel_is_an_available_relation(self):
+        from provenlattice.semantics.vocabulary import AVAILABLE_RELATIONS
+        self.assertIn("MAY_PARALLEL", AVAILABLE_RELATIONS)
+        self.assertNotIn("HAPPENS_BEFORE", AVAILABLE_RELATIONS)
+
+
 class CapabilityRegistrationTests(unittest.TestCase):
     def test_concurrency_context_is_c_cpp_query_time(self):
         record = CAPABILITY_CONTRACT["concurrency_context"]
@@ -344,6 +416,7 @@ class CapabilityRegistrationTests(unittest.TestCase):
         self.assertEqual(record["depends_on"], ("events", "sparse_cfg"))
         self.assertTrue(record.get("query_time"))
         self.assertEqual(record["status"], "partially_implemented")
+        self.assertEqual(record["level"], "level0+spawn-join")
 
 
 class UnsupportedLanguageTests(unittest.TestCase):

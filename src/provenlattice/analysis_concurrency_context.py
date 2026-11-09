@@ -11,12 +11,15 @@ Fail-closed contract:
   order. The events layer does not currently stamp a handle on THREAD_JOIN, so
   this capability reports ``thread_handle_identity`` missing evidence instead of
   pairing by owner + source order (which would merge different threads);
-* MAY_PARALLEL is always a **candidate** (``status: "ambiguous"``), never a
-  resolved claim, and is associated with the specific shared subject (S1's
-  stable ``subject_decl`` identity), its access events and thread entry points;
-* an unresolved identity (no ``subject_decl``) is marked ``unresolved`` and
-  reported as missing evidence, never merged with a different object by display
-  name alone.
+* MAY_PARALLEL is always a **candidate** relation -- never a resolved /
+  confirmed / definite parallelism fact. Each candidate is keyed by S1's stable
+  ``subject_decl`` identity and carries ``candidate_state`` (``"ambiguous"``
+  when the identity is proven, ``"unresolved"`` otherwise), its access events
+  and thread entry points, ``evidence_references`` (the access event ids) and
+  ``missing_evidence``;
+* an unresolved identity (no ``subject_decl``) is marked
+  ``candidate_state: "unresolved"`` and reported as missing evidence, never
+  merged with a different object by display name alone.
 * a local object whose address is handed to a worker (``address_of`` spawn) and
   which has no paired join before its scope exits is reported as a
   ``resource_lifetime`` violation with ``join_count == 0`` and
@@ -235,19 +238,25 @@ def build_concurrency_context(events: Iterable[Mapping[str, Any]]) -> dict:
             continue
         if record["identity"] is None:
             missing_evidence.add("unresolved_identity")
+        accesses = sorted(
+            record["accesses"],
+            key=lambda access: (access["start_byte"], access["end_byte"], access["event_id"] or ""),
+        )
+        unresolved = record["identity"] is None
         may_parallel.append({
             "identity": record["identity"],
             "subject": record["subject"],
             "storage": record["storage"],
             "exact": record["exact"],
-            "unresolved": record["identity"] is None,
+            "unresolved": unresolved,
             "owners": sorted(record["owners"]),
             "thread_entry_owners": sorted(record["owners"] & entry_owners),
-            "accesses": sorted(
-                record["accesses"],
-                key=lambda access: (access["start_byte"], access["end_byte"], access["event_id"] or ""),
-            ),
-            "status": "ambiguous",
+            "accesses": accesses,
+            "evidence_references": [
+                access["event_id"] for access in accesses if access["event_id"]
+            ],
+            "missing_evidence": ["identity_unresolved"] if unresolved else [],
+            "candidate_state": "unresolved" if unresolved else "ambiguous",
         })
 
     return {

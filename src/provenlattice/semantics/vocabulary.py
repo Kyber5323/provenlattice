@@ -97,7 +97,19 @@ KNOWN_RELATIONS = frozenset({
 # generate candidates while their `missing_relations()` stays non-empty, so
 # "the pipeline proposes candidates for 3.1" and "the pipeline can confirm 3.1"
 # remain two different sentences.
-AVAILABLE_RELATIONS = frozenset({"CONTROL_REACHES", "DATA_FLOW_TO", "CONSUMES"})
+#
+# S2 (the concurrency_context capability) materializes MAY_PARALLEL as a
+# *candidate-level* relation: each record carries ``candidate_state``
+# (``"ambiguous"`` when the subject identity is proven, ``"unresolved"``
+# otherwise), its ``evidence_references`` and its ``missing_evidence``. It is
+# never a resolved / confirmed / definite parallelism fact, so registering the
+# name here asserts only that the candidate relation is now consumable -- a
+# pattern whose *confirmation* reads a resolved parallel fact still names other
+# relations (EXECUTES_IN / READS / WRITES / PROTECTED_BY) in its ``relations``
+# and stays non-coverable.
+AVAILABLE_RELATIONS = frozenset({
+    "CONTROL_REACHES", "DATA_FLOW_TO", "CONSUMES", "MAY_PARALLEL",
+})
 
 
 class VocabularyError(ValueError):

@@ -40,6 +40,7 @@ use" by identity alone.
 """
 from __future__ import annotations
 
+import re
 from bisect import bisect_left, bisect_right
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -545,11 +546,59 @@ def _reachability(
     return reach
 
 
-# NOTE (I1-C): PR's stage-5B query-time parameter join (bind_parameters /
-# ParameterBindingTable) is deliberately not ported -- it consumes the
-# ownership-contract table (I2) and exists to serve defect candidates.
-# DATA_FLOW_TO / CONSUMES minting above is the complete I1-C surface.
+# The I2 query-time composition helpers. The mint above is the complete
+# method-local (I1-C) surface; cross-function flow is composed here, at query
+# time, from already-materialised points -- never minted as an edge. RETURNS
+# stays an identity fact throughout: these tables record what composes, and no
+# row of them becomes a graph relation.
 
+_QUALIFIERS = frozenset({"const", "noexcept", "override", "final", "volatile"})
+_IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+
+
+def _short_name(qualified_name: str) -> str:
+    """The last component of a qualified name -- the spelling a call uses."""
+    return (qualified_name or "").rsplit(".", 1)[-1]
+
+
+def _split_parameters(signature: str) -> tuple[str, ...]:
+    """Split a parameter list at top-level commas, depth-aware.
+
+    The local twin of the ownership-contract layer's splitter (which this
+    module must not import): `std::map<int, int> m` stays one parameter, and a
+    trailing qualifier (`void f(int n) const`) is not read as a second
+    parameter. An unnamed parameter yields its type token (`int`) rather than
+    a name, so the caller's ordinal maps to the Nth *named* parameter -- the
+    registered approximation the join inherits, and the same one the contract
+    layer's splitter commits to.
+    """
+    text = (signature or "").strip()
+    if text.startswith("(") and text.endswith(")"):
+        text = text[1:-1]
+    pieces: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for character in text:
+        if character in "<([":
+            depth += 1
+        elif character in ">)]":
+            depth -= 1
+        if character == "," and depth == 0:
+            pieces.append("".join(current))
+            current = []
+            continue
+        current.append(character)
+    pieces.append("".join(current))
+    stripped: list[str] = []
+    for piece in pieces:
+        tokens = _IDENTIFIER.findall(piece)
+        while tokens and tokens[-1] in _QUALIFIERS:
+            tokens.pop()
+        stripped.append(tokens[-1] if tokens else "")
+    return tuple(piece for piece in stripped if piece)
+
+
+@dataclass
 class ParameterBindingTable:
     """What a caller's argument root and a callee's parameter row share.
 
@@ -620,7 +669,7 @@ def bind_parameters(
         signature = signatures.get(symbol_id)
         if not signature:
             continue
-        short = short_name(qualified)
+        short = _short_name(qualified)
         ids_by_short.setdefault(short, []).append(symbol_id)
         param_lists.setdefault(short, set()).add(_split_parameters(signature))
     agreed = {
@@ -643,7 +692,7 @@ def bind_parameters(
         if not callee:
             note("calls_without_callee")
             continue
-        param_list = agreed.get(short_name(callee))
+        param_list = agreed.get(_short_name(callee))
         if param_list is None:
             note("callees_without_agreed_signature")
             continue
@@ -688,7 +737,7 @@ def bind_parameters(
                 "owner_symbol_id": root.get("owner_symbol_id", ""),
             }
             bound = 0
-            for callee_id in ids_by_short.get(short_name(callee), ()):
+            for callee_id in ids_by_short.get(_short_name(callee), ()):
                 for write_id in by_owner_subject.get((callee_id, parameter), ()):
                     row = points[write_id]
                     if row.get("subject_storage") != "parameter":
@@ -717,5 +766,128 @@ def bind_parameters(
     coverage.update(sorted(counted.items()))
     return ParameterBindingTable(
         bindings={key: tuple(records) for key, records in bindings.items()},
+        coverage=coverage,
+    )
+
+
+@dataclass
+class ReturnBindingTable:
+    """A callee's RETURN identity facts, composed to each caller receive point.
+
+    `returns` maps a caller CALL point id (a site that both calls a callee and
+    stores its result into an lvalue) to every callee RETURN identity the
+    composition can prove -- one record per `return` statement of the
+    uniquely-resolved callee. RETURNS is an identity fact: the record carries
+    the returned value's identity fields and the return point they came from,
+    and no row of this table ever becomes a graph edge.
+    """
+
+    returns: dict[str, tuple[dict[str, Any], ...]]
+    coverage: dict[str, int]
+
+
+def bind_returns(
+    points: Mapping[str, Mapping[str, Any]],
+    *,
+    callees: Any,
+    names: Mapping[str, str] | None = None,
+) -> ReturnBindingTable:
+    """Compose a callee's RETURN identity to each caller receive point.
+
+    A RETURN point in the callee's method carries the returned value's
+    identity (``subject`` / ``subject_decl`` / ... read off the `return`
+    expression); a CALL point whose result is stored into an lvalue carries
+    that lvalue as its ``subject`` with ``subject_from == "assignment"``. For
+    a uniquely-resolved callee, each such caller CALL point is joined to every
+    RETURN of the callee, recording the returned identity as a RETURNS
+    identity fact.
+
+    Resolution is name-level throughout, and only one answer composes: the
+    callee name comes from ``callees.callee(info)`` (the contract layer's
+    join, where an ambiguous / indirect / unresolved call yields ``""`` and is
+    never upgraded), and that name must then map to exactly one indexed symbol
+    in ``names`` -- a spelling several functions share, or none spell, stays
+    unbound.
+
+    A caller that discards the result (a bare `f();` statement, or a call whose
+    subject is its receiver/argument rather than an assignment target) is not
+    a receive point and is counted, not bound. RETURNS is never minted as an
+    edge: the record's identity fields are the whole fact.
+    """
+    names = names or {}
+
+    # Callee side: the RETURN points each method has, by owner symbol id. A
+    # RETURN with no subject names nothing (`return -1;`) and carries no
+    # identity to compose.
+    returns_by_owner: dict[str, list[str]] = {}
+    for point_id, info in sorted(points.items()):
+        if info["event_type"] != "RETURN" or not info.get("subject"):
+            continue
+        owner = str(info.get("owner_symbol_id", ""))
+        if owner:
+            returns_by_owner.setdefault(owner, []).append(point_id)
+
+    # The name -> symbol id index, from the caller's names table. Only symbols
+    # that spell a short name can ever be a callee.
+    ids_by_short: dict[str, list[str]] = {}
+    for symbol_id, qualified in names.items():
+        short = _short_name(qualified)
+        if short:
+            ids_by_short.setdefault(short, []).append(symbol_id)
+
+    returns: dict[str, list[dict[str, Any]]] = {}
+    coverage: dict[str, int] = {}
+    counted = Counter()
+
+    def note(name: str, amount: int = 1) -> None:
+        counted[name] += amount
+
+    for point_id, info in sorted(points.items()):
+        if info["event_type"] != "CALL":
+            continue
+        note("calls_seen")
+        callee = callees.callee(info)
+        if not callee:
+            note("calls_without_callee")
+            continue
+        callee_ids = sorted(ids_by_short.get(_short_name(callee), ()))
+        if not callee_ids:
+            note("callees_without_symbol")
+            continue
+        if len(callee_ids) > 1:
+            note("callees_ambiguous")
+            continue
+        callee_id = callee_ids[0]
+        return_points = returns_by_owner.get(callee_id, ())
+        if not return_points:
+            note("callees_without_return_identity")
+            continue
+        if info.get("subject_from") != "assignment" or not info.get("subject"):
+            note("results_discarded")
+            continue
+        caller_owner = str(info.get("owner_symbol_id", ""))
+        receive_subject = info.get("subject", "")
+        for return_id in return_points:
+            row = points[return_id]
+            returns.setdefault(point_id, []).append({
+                "callee": callee,
+                "callee_symbol_id": callee_id,
+                "receive_subject": receive_subject,
+                "caller_owner": caller_owner,
+                "call_site": point_id,
+                "return_point": return_id,
+                # The RETURNS identity fact, read off the RETURN point itself:
+                "owner_symbol_id": row.get("owner_symbol_id", callee_id),
+                "subject_decl": row.get("subject_decl", ""),
+                "subject_storage": row.get("subject_storage", ""),
+                "subject_member": row.get("subject_member", ""),
+                "subject": row.get("subject", ""),
+                "subject_site": row.get("subject_site", ""),
+            })
+        note("receive_points_bound")
+
+    coverage.update(sorted(counted.items()))
+    return ReturnBindingTable(
+        returns={key: tuple(records) for key, records in returns.items()},
         coverage=coverage,
     )

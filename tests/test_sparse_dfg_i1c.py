@@ -38,6 +38,7 @@ from provenlattice.analysis_query import query_analysis
 from provenlattice.graph import full_index
 from provenlattice.incremental import incremental_update
 from provenlattice.orchestrator import analyze_scope
+from provenlattice.sparsedfg import bind_parameters, bind_returns
 
 
 def write(root: Path, relative: str, value: str) -> None:
@@ -833,6 +834,261 @@ class ReachabilityEvidenceContractTests(DfgTestBase):
                 "AND s.feature='sparse_dfg:cpp'").fetchone()
         self.assertIsNotNone(row)
         return json.loads(row["metadata"])
+
+
+class _FakeCallees:
+    """A stand-in for the contract layer's ``ContractTable``.
+
+    ``callee(info)`` answers the name a call site resolves to, exactly the way
+    ``ContractTable.callee`` does: joined on ``(file_id, owner_symbol_id,
+    start_line)``, with ``""`` for every call the join cannot resolve -- which
+    is how ambiguous / indirect / unresolved calls stay out of the composition.
+    """
+
+    def __init__(self, names: dict[tuple[str, str, int], str]) -> None:
+        self._names = names
+
+    def callee(self, info) -> str:
+        return self._names.get(
+            (
+                str(info.get("file_id", "")),
+                str(info.get("owner_symbol_id", "")),
+                int(info.get("start_line", 0) or 0),
+            ),
+            "",
+        )
+
+
+def _make_point(point_id, event_type, owner, *, subject="", subject_from="",
+                subject_decl="", subject_storage="", subject_member="",
+                subject_type="", subject_site="", arguments="", file_id="",
+                start_line=0, matched_name="") -> dict:
+    """A materialised point carrying every fact the composition helpers read."""
+    return {
+        "event_type": event_type,
+        "subject": subject,
+        "subject_from": subject_from,
+        "subject_decl": subject_decl,
+        "subject_storage": subject_storage,
+        "subject_member": subject_member,
+        "subject_type": subject_type,
+        "subject_site": subject_site,
+        "arguments": arguments,
+        "matched_name": matched_name,
+        "owner_symbol_id": owner,
+        "file_id": file_id,
+        "start_line": start_line,
+    }
+
+
+class ParameterBindingCompositionTests(unittest.TestCase):
+    """The completed query-time parameter join (S4 interprocedural DFG)."""
+
+    CALLEE = "sym:callee"
+    CALLER = "sym:caller"
+
+    def test_bind_parameters_composes_direct_call_argument(self) -> None:
+        points = {
+            "param_write": _make_point(
+                "param_write", "WRITE", self.CALLEE, subject="p",
+                subject_decl="parameter:p", subject_storage="parameter",
+                subject_member="", matched_name="*p"),
+            "caller_g_write": _make_point(
+                "caller_g_write", "WRITE", self.CALLER, subject="g",
+                subject_decl="global:g", subject_storage="global",
+                subject_member=""),
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="g",
+                subject_from="argument", arguments="g", file_id="f1",
+                start_line=5),
+        }
+        callees = _FakeCallees({("f1", self.CALLER, 5): "callee"})
+        names = {self.CALLEE: "callee", self.CALLER: "caller"}
+        table = bind_parameters(points, callees=callees, names=names,
+                                signatures={self.CALLEE: "(int *p)"})
+        self.assertIn("param_write", table.bindings)
+        records = table.bindings["param_write"]
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["callee"], "callee")
+        self.assertEqual(record["ordinal"], 0)
+        self.assertEqual(record["parameter"], "p")
+        self.assertEqual(record["arg_root"], "g")
+        self.assertEqual(record["caller_owner"], self.CALLER)
+        self.assertEqual(record["call_site"], "caller_call")
+        self.assertEqual(record["join"], "declared")
+        self.assertEqual(record["caller_facts"]["subject_decl"], "global:g")
+
+    def test_bind_parameters_unresolved_callee_stays_unbound(self) -> None:
+        points = {
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="g", arguments="g",
+                file_id="f1", start_line=5),
+        }
+        callees = _FakeCallees({})  # the call resolves to nothing
+        table = bind_parameters(points, callees=callees, names={},
+                                signatures={})
+        self.assertEqual(table.bindings, {})
+        self.assertEqual(table.coverage["calls_without_callee"], 1)
+
+    def test_bind_parameters_disagreed_signature_stays_unbound(self) -> None:
+        # two symbols spell the same short name with different parameter lists:
+        # no agreed signature, so no argument is composed.
+        points = {
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="g", arguments="g",
+                file_id="f1", start_line=5),
+        }
+        callees = _FakeCallees({("f1", self.CALLER, 5): "callee"})
+        table = bind_parameters(
+            points, callees=callees,
+            names={"sym:a": "callee", "sym:b": "callee"},
+            signatures={"sym:a": "(int *p)", "sym:b": "(int *p, int *q)"},
+        )
+        self.assertEqual(table.bindings, {})
+        self.assertEqual(table.coverage["callees_without_agreed_signature"], 1)
+
+    def test_bind_parameters_bare_slot_write_never_composes(self) -> None:
+        # a bare parameter slot write (`p = v`) rebinds the callee's own name
+        # (by-value), so it never reaches the caller -- registered discipline.
+        points = {
+            "param_slot_write": _make_point(
+                "param_slot_write", "WRITE", self.CALLEE, subject="p",
+                subject_decl="parameter:p", subject_storage="parameter",
+                subject_member="", matched_name="p"),
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="g",
+                subject_from="argument", arguments="g", file_id="f1",
+                start_line=5),
+            "caller_g_write": _make_point(
+                "caller_g_write", "WRITE", self.CALLER, subject="g",
+                subject_decl="global:g", subject_storage="global",
+                subject_member=""),
+        }
+        callees = _FakeCallees({("f1", self.CALLER, 5): "callee"})
+        names = {self.CALLEE: "callee", self.CALLER: "caller"}
+        table = bind_parameters(points, callees=callees, names=names,
+                                signatures={self.CALLEE: "(int *p)"})
+        self.assertEqual(table.bindings, {})
+        self.assertEqual(table.coverage["parameter_slot_writes_skipped"], 1)
+
+
+class ReturnBindingCompositionTests(unittest.TestCase):
+    """The query-time RETURNS identity composition (S4 interprocedural DFG).
+
+    RETURNS is an identity fact, never a graph edge: these functions return a
+    composition table over materialised points, and no row of it becomes a
+    relation.
+    """
+
+    CALLEE = "sym:callee"
+    CALLER = "sym:caller"
+
+    def test_bind_returns_composes_direct_call_return(self) -> None:
+        points = {
+            "callee_return": _make_point(
+                "callee_return", "RETURN", self.CALLEE, subject="buf",
+                subject_from="return", subject_decl="global:buf",
+                subject_storage="global", subject_member=""),
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="q",
+                subject_from="assignment", file_id="f1", start_line=7),
+        }
+        callees = _FakeCallees({("f1", self.CALLER, 7): "callee"})
+        names = {self.CALLEE: "callee", self.CALLER: "caller"}
+        table = bind_returns(points, callees=callees, names=names)
+        self.assertIn("caller_call", table.returns)
+        records = table.returns["caller_call"]
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["callee"], "callee")
+        self.assertEqual(record["callee_symbol_id"], self.CALLEE)
+        self.assertEqual(record["receive_subject"], "q")
+        self.assertEqual(record["caller_owner"], self.CALLER)
+        self.assertEqual(record["return_point"], "callee_return")
+        self.assertEqual(record["subject_decl"], "global:buf")
+        self.assertEqual(record["subject"], "buf")
+
+    def test_bind_returns_unresolved_callee_stays_unbound(self) -> None:
+        points = {
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="q",
+                subject_from="assignment", file_id="f1", start_line=7),
+        }
+        callees = _FakeCallees({})  # unresolved/indirect/ambiguous -> ""
+        table = bind_returns(points, callees=callees,
+                             names={self.CALLEE: "callee"})
+        self.assertEqual(table.returns, {})
+        self.assertEqual(table.coverage["calls_without_callee"], 1)
+
+    def test_bind_returns_ambiguous_symbol_stays_unbound(self) -> None:
+        # the callee name maps to two indexed symbols: never pick a winner.
+        points = {
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="q",
+                subject_from="assignment", file_id="f1", start_line=7),
+        }
+        callees = _FakeCallees({("f1", self.CALLER, 7): "callee"})
+        names = {"sym:a": "callee", "sym:b": "callee"}
+        table = bind_returns(points, callees=callees, names=names)
+        self.assertEqual(table.returns, {})
+        self.assertEqual(table.coverage["callees_ambiguous"], 1)
+
+    def test_bind_returns_discarded_result_stays_unbound(self) -> None:
+        # a bare `f();` (subject not an assignment target) is not a receive
+        # point: the returned identity cannot be composed to anything.
+        points = {
+            "callee_return": _make_point(
+                "callee_return", "RETURN", self.CALLEE, subject="buf",
+                subject_from="return", subject_decl="global:buf",
+                subject_storage="global", subject_member=""),
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="buf",
+                subject_from="argument", arguments="buf", file_id="f1",
+                start_line=7),
+        }
+        callees = _FakeCallees({("f1", self.CALLER, 7): "callee"})
+        names = {self.CALLEE: "callee", self.CALLER: "caller"}
+        table = bind_returns(points, callees=callees, names=names)
+        self.assertEqual(table.returns, {})
+        self.assertEqual(table.coverage["results_discarded"], 1)
+
+    def test_bind_returns_no_return_identity_stays_unbound(self) -> None:
+        # a callee with no RETURN identity (`return -1;`, or a void function)
+        # publishes nothing to compose.
+        points = {
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="q",
+                subject_from="assignment", file_id="f1", start_line=7),
+        }
+        callees = _FakeCallees({("f1", self.CALLER, 7): "callee"})
+        names = {self.CALLEE: "callee", self.CALLER: "caller"}
+        table = bind_returns(points, callees=callees, names=names)
+        self.assertEqual(table.returns, {})
+        self.assertEqual(table.coverage["callees_without_return_identity"], 1)
+
+    def test_bind_returns_many_return_points_compose_all(self) -> None:
+        # two `return` statements are two RETURN identity facts, and one call
+        # site composes each.
+        points = {
+            "ret_a": _make_point(
+                "ret_a", "RETURN", self.CALLEE, subject="a",
+                subject_from="return", subject_decl="global:a",
+                subject_storage="global", subject_member=""),
+            "ret_b": _make_point(
+                "ret_b", "RETURN", self.CALLEE, subject="b",
+                subject_from="return", subject_decl="global:b",
+                subject_storage="global", subject_member=""),
+            "caller_call": _make_point(
+                "caller_call", "CALL", self.CALLER, subject="q",
+                subject_from="assignment", file_id="f1", start_line=7),
+        }
+        callees = _FakeCallees({("f1", self.CALLER, 7): "callee"})
+        names = {self.CALLEE: "callee", self.CALLER: "caller"}
+        table = bind_returns(points, callees=callees, names=names)
+        records = table.returns["caller_call"]
+        self.assertEqual({r["return_point"] for r in records}, {"ret_a", "ret_b"})
+        self.assertEqual({r["subject"] for r in records}, {"a", "b"})
 
 
 if __name__ == "__main__":

@@ -211,7 +211,7 @@ def _check_dfg_integrity(edges) -> str | None:
     if len(ids) != len(edges):
         return "duplicate_dfg_edge_ids"
     for edge in edges:
-        if edge["kind"] not in ("DATA_FLOW_TO", "CONSUMES"):
+        if edge["kind"] not in ("DATA_FLOW_TO", "CONSUMES", "MAY_ALIAS"):
             return "unknown_dfg_relation"
         if not edge["src_id"].startswith("event:"):
             return "dfg_endpoint_missing"

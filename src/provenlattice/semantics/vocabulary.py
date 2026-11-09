@@ -73,11 +73,11 @@ KNOWN_RELATIONS = frozenset({
     "PROTECTED_BY", "READS", "RELEASES", "RETURNS", "THROWS_TO", "WRITES",
 })
 # What the graph actually holds. Stage 3 built CONTROL_REACHES and nothing
-# else. Stage 5B adds DATA_FLOW_TO (the method-local def-use edges) and
-# CONSUMES (ALLOC -> same-line CALL, minted from the 5C `passed_to` fact).
-# The other names a stage-5 reading of the matrix could suggest stay absent
-# on purpose, and their implementation mapping is: MAY_ALIAS is candidate
-# metadata (the `alias` annotation), never a fact edge; DOMINATES_CHECK is
+# else. Stage 5B adds DATA_FLOW_TO (the method-local def-use edges), CONSUMES
+# (ALLOC -> same-line CALL, minted from the 5C `passed_to` fact), and the
+# candidate-grade MAY_ALIAS edge materialized from a same-method bare-copy
+# alias annotation. The other names a stage-5 reading of the matrix could
+# suggest stay absent on purpose: DOMINATES_CHECK is
 # the set of CHECK entries on a DATA_FLOW_TO edge's `via` chain, not a
 # relation; and PRODUCES/RELEASES/RETURNS/READS/WRITES/ACQUIRES/EXECUTES_IN
 # remain event-subject identity facts -- so 4.1's `missing_relations()` does
@@ -108,7 +108,7 @@ KNOWN_RELATIONS = frozenset({
 # relations (EXECUTES_IN / READS / WRITES / PROTECTED_BY) in its ``relations``
 # and stays non-coverable.
 AVAILABLE_RELATIONS = frozenset({
-    "CONTROL_REACHES", "DATA_FLOW_TO", "CONSUMES", "MAY_PARALLEL",
+    "CONTROL_REACHES", "DATA_FLOW_TO", "CONSUMES", "MAY_PARALLEL", "MAY_ALIAS",
 })
 
 

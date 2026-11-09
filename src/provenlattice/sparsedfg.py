@@ -18,9 +18,10 @@ constructively equivalent to what `_identity` builds from it, and keeping it
 local means this module never imports the defect layer.
 
 The relations land in the same `semantic_edges` table the control edges use
-(`DATA_FLOW_TO`, `CONSUMES`); the adjacency builder's relation filter is what
-keeps them out of every control-path walk. `MAY_ALIAS` never becomes an edge:
-it is the `alias` annotation the access layer stamps, a candidate-grade fact.
+(`DATA_FLOW_TO`, `CONSUMES`, `MAY_ALIAS`); the adjacency builder's relation
+filter is what keeps them out of every control-path walk. `MAY_ALIAS` remains
+candidate-grade: a materialized edge records an annotated same-method bare
+copy without promoting it to must-alias or a complete points-to result.
 
 Registered approximations (plan §九): no reaching-definition bitvectors and
 no SSA; same-line ordering is `(start_line, event_type, ordinal)`, so macro
@@ -52,6 +53,7 @@ from .semantics.events import SemanticEdge
 
 DATA_FLOW_TO = "DATA_FLOW_TO"
 CONSUMES = "CONSUMES"
+MAY_ALIAS = "MAY_ALIAS"
 
 # The flow identity: everything the annotation channel says about which
 # object an event touches. Two events share a chain exactly when this tuple
@@ -248,6 +250,32 @@ def _mint_method(
                     alias_root = info.get("alias_source", "")
                     if alias_root and alias_root != subject:
                         parent = live_root.get(alias_root)
+                    if parent is not None:
+                        alias_edge = SemanticEdge(
+                            edge_id=semantic_edge_id(
+                                parent.event_id, event_id, MAY_ALIAS, ""),
+                            src_event_id=parent.event_id,
+                            dst_event_id=event_id,
+                            relation=MAY_ALIAS,
+                            owner_symbol_id=owner_id,
+                            file_id=file_id,
+                            metadata={
+                                "relative_path": relative_path,
+                                "shard_path": shard_path,
+                                "flow_class": "may_alias",
+                                "confidence": "may",
+                                "candidate_state": "candidate",
+                                "source_subject": alias_root,
+                                "target_subject": subject,
+                                "evidence_references": [event_id],
+                                "control_reachable": "unknown",
+                                "control_reachable_note": (
+                                    "candidate alias relation; no control-path "
+                                    "claim"
+                                ),
+                            },
+                        )
+                        edges[alias_edge.edge_id] = alias_edge
                     live_value[flow] = _Def(
                         event=item, event_id=event_id, position=position,
                         null_source=info.get("null_source", "") == "true",

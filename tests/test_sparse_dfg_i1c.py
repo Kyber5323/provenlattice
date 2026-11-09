@@ -39,6 +39,7 @@ from provenlattice.graph import full_index
 from provenlattice.incremental import incremental_update
 from provenlattice.orchestrator import analyze_scope
 from provenlattice.sparsedfg import bind_parameters, bind_returns
+from provenlattice.semantics.vocabulary import load_defect_patterns
 
 
 def write(root: Path, relative: str, value: str) -> None:
@@ -388,6 +389,28 @@ class IdentityTests(DfgTestBase):
         # the copy happened before the release, not between def and use.
         self.assertEqual(paired[0]["payload"]["via"], [])
 
+        aliases = [e for e in env["edges"] if e["kind"] == "MAY_ALIAS"]
+        self.assertEqual(len(aliases), 1, env["edges"])
+        self.assertEqual(aliases[0]["payload"]["confidence"], "may")
+        self.assertEqual(aliases[0]["payload"]["candidate_state"], "candidate")
+        self.assertEqual(aliases[0]["payload"]["source_subject"], "p")
+        self.assertEqual(aliases[0]["payload"]["target_subject"], "q")
+        self.assertNotIn("SAME_OBJECT", json.dumps(env["edges"]))
+
+    def test_address_copy_materializes_candidate_alias(self) -> None:
+        env = self.build(
+            "#include <stdlib.h>\n"
+            "void f42(void) {\n"
+            "    int *p = malloc(sizeof(int));\n"
+            "    int **q = &p;\n"
+            "    (void)q;\n"
+            "}\n")
+        aliases = [e for e in env["edges"] if e["kind"] == "MAY_ALIAS"]
+        self.assertEqual(len(aliases), 1, env["edges"])
+        self.assertEqual(aliases[0]["payload"]["confidence"], "may")
+        self.assertEqual(aliases[0]["payload"]["source_subject"], "p")
+        self.assertEqual(aliases[0]["payload"]["target_subject"], "q")
+
     def test_copied_pointer_release_never_crosses_independent_names(self) -> None:
         # the negative: releases travel with the value's root identity only.
         # an independent allocation's use must not pair with another
@@ -422,6 +445,8 @@ class IdentityTests(DfgTestBase):
             "}\n")
         for edge in env["edges"]:
             self.assertNotIn("alias", edge["payload"].get("annotations", {}))
+        self.assertEqual(
+            [edge for edge in env["edges"] if edge["kind"] == "MAY_ALIAS"], [])
         # the writes exist (parameter through-writes) but never link
         writes = [e for e in self.events_for("src/t.c")
                   if e["event_type"] == "WRITE"]
@@ -804,8 +829,8 @@ class ReachabilityEvidenceContractTests(DfgTestBase):
                           ("true", "false", "unknown"))
 
     def test_version_migration_rebuilds_v1_caches(self) -> None:
-        # the v1 caches carried the binary field; the bump must invalidate
-        # them and the rebuild must carry the three-state contract
+        # Old caches must be invalidated; the rebuild carries the current
+        # relation-enriched sparse-DFG contract.
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute(
                 "UPDATE analysis_state SET feature_version=1 "
@@ -821,9 +846,18 @@ class ReachabilityEvidenceContractTests(DfgTestBase):
                 "SELECT feature_version, metadata FROM analysis_state s "
                 "JOIN files f ON f.file_id=s.file_id WHERE f.path='src/contract.c' "
                 "AND s.feature='sparse_dfg:cpp'").fetchone()
-        self.assertEqual(row["feature_version"], 2)
+        self.assertEqual(row["feature_version"], 3)
         metadata = json.loads(row["metadata"])
-        self.assertEqual(metadata["contract"], "cpp-sparse_dfg-v2")
+        self.assertEqual(metadata["contract"], "cpp-sparse_dfg-v3")
+
+    def test_may_alias_is_no_longer_a_missing_relation(self) -> None:
+        patterns = [
+            pattern for pattern in load_defect_patterns()
+            if "MAY_ALIAS" in pattern.relations
+        ]
+        self.assertTrue(patterns)
+        for pattern in patterns:
+            self.assertNotIn("MAY_ALIAS", pattern.missing_relations())
 
     def _dfg_metadata(self) -> dict:
         with closing(sqlite3.connect(self.database)) as connection:

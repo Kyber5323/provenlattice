@@ -337,6 +337,156 @@ class DetachedLocalLifetimeTests(ConcurrencyContextTestBase):
         self.assertEqual(len(ctx["spawn_join_pairs"]), 1)
 
 
+class OrderingRelationsTests(ConcurrencyContextTestBase):
+    """S2 convergence: resolved MAY_PARALLEL / HAPPENS_BEFORE relations.
+
+    A relation is emitted only when the spawn/join facts *prove* it; everything
+    without enough evidence stays out of ``relations`` (the ``may_parallel``
+    candidates keep their ``ambiguous`` state) and is tallied in
+    ``coverage["unresolved_pairs"]``. Key fail-closed rules under test:
+
+    * same-method accesses are sequenced by byte offset (program_order);
+    * a spawn orders the parent's pre-spawn accesses before the child's, and a
+      join orders the child's accesses before the parent's post-join accesses,
+      transitively (spawn_join);
+    * two thread-entry functions are two provably different threads -- their
+      shared-subject accesses are MAY_PARALLEL when no order links them;
+    * spawn-before-join alone is *not* an order of the whole window: the
+      parent's accesses between the spawn and its join stay concurrent with the
+      child;
+    * two plain methods with no spawn relationship are never upgraded.
+    """
+
+    FIXTURE = "int g; void f(void) { g = 1; g = 2; }\n"
+
+    def test_same_method_program_order(self):
+        ctx = self.context()
+        self.assertEqual(len(ctx["relations"]), 1)
+        relation = ctx["relations"][0]
+        self.assertEqual(relation["relation"], "HAPPENS_BEFORE")
+        self.assertEqual(relation["reason"], "program_order")
+        self.assertEqual(relation["owners"], ["f", "f"])
+        self.assertEqual(relation["subject"], "g")
+        self.assertEqual(relation["identity"], "global:g")
+        self.assertEqual(ctx["coverage"], {
+            "happens_before": 1, "may_parallel": 0, "unresolved_pairs": 0,
+        })
+
+
+class SpawnJoinWindowOrderingTests(ConcurrencyContextTestBase):
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "int g;\n"
+        "void *worker(void *arg) { g = 1; return 0; }\n"
+        "void f(void) {\n"
+        "    g = 0;\n"
+        "    pthread_t t;\n"
+        "    pthread_create(&t, 0, worker, 0);\n"
+        "    g = 2;\n"
+        "    pthread_join(t, 0);\n"
+        "    g = 3;\n"
+        "}\n"
+    )
+
+    def _by_id(self, ctx):
+        by_id = {}
+        for subject in ctx["may_parallel"]:
+            for access in subject["accesses"]:
+                by_id[access["event_id"]] = access
+        return by_id
+
+    def test_spawn_orders_parent_before_child_and_child_before_join(self):
+        ctx = self.context()
+        access = self._by_id(ctx)
+        relations = ctx["relations"]
+        self.assertEqual(ctx["coverage"], {
+            "happens_before": 5, "may_parallel": 1, "unresolved_pairs": 0,
+        })
+        # parent pre-spawn `g = 0` happens-before the child's `g = 1`
+        pre_spawn = next(
+            r for r in relations
+            if r["reason"] == "spawn_join" and r["owners"] == ["f", "worker"])
+        self.assertEqual(access[pre_spawn["before"]]["owner"], "f")
+        self.assertEqual(access[pre_spawn["after"]]["owner"], "worker")
+        self.assertEqual(access[pre_spawn["after"]]["start_byte"], 54)
+        # child's `g = 1` happens-before the parent post-join `g = 3`
+        post_join = next(
+            r for r in relations
+            if r["reason"] == "spawn_join" and r["owners"] == ["worker", "f"])
+        self.assertEqual(access[post_join["before"]]["owner"], "worker")
+        self.assertEqual(access[post_join["after"]]["owner"], "f")
+
+    def test_window_between_spawn_and_join_is_not_ordered(self):
+        # `g = 2` sits after the spawn but before the join: the child thread is
+        # concurrent with it, so it is MAY_PARALLEL -- never a spawn_join order.
+        ctx = self.context()
+        access = self._by_id(ctx)
+        parallel = [
+            r for r in ctx["relations"] if r["relation"] == "MAY_PARALLEL"]
+        self.assertEqual(len(parallel), 1)
+        pair = parallel[0]
+        self.assertEqual(pair["reason"], "distinct_threads")
+        self.assertEqual(pair["owners"], ["f", "worker"])
+        # the f half of the proven-parallel pair is the window access (g = 2),
+        # not the pre-spawn g = 0 nor the post-join g = 3.
+        left = access[pair["left"]]
+        right = access[pair["right"]]
+        f_access = left if left["owner"] == "f" else right
+        worker_access = right if left["owner"] == "f" else left
+        self.assertEqual(worker_access["owner"], "worker")
+        self.assertEqual(worker_access["start_byte"], 54)
+        self.assertNotIn(f_access["start_byte"], (92, 193))
+
+
+class DistinctThreadParalysisTests(ConcurrencyContextTestBase):
+    FIXTURE = (
+        "#include <pthread.h>\n"
+        "int g;\n"
+        "void *w1(void *arg) { g = 1; return 0; }\n"
+        "void *w2(void *arg) { g = 2; return 0; }\n"
+        "void f(void) {\n"
+        "    pthread_t t1, t2;\n"
+        "    pthread_create(&t1, 0, w1, 0);\n"
+        "    pthread_create(&t2, 0, w2, 0);\n"
+        "    pthread_join(t1, 0);\n"
+        "    pthread_join(t2, 0);\n"
+        "}\n"
+    )
+
+    def test_two_thread_entries_are_may_parallel(self):
+        # Two distinct thread-entry functions touch the same global with no
+        # proven order between them: they may run in parallel.
+        ctx = self.context()
+        parallel = [
+            r for r in ctx["relations"] if r["relation"] == "MAY_PARALLEL"]
+        self.assertEqual(len(parallel), 1)
+        self.assertEqual(parallel[0]["reason"], "distinct_threads")
+        self.assertEqual(parallel[0]["owners"], ["w1", "w2"])
+        self.assertEqual(ctx["coverage"]["may_parallel"], 1)
+        self.assertEqual(ctx["coverage"]["happens_before"], 0)
+
+
+class InsufficientEvidenceNotUpgradedTests(ConcurrencyContextTestBase):
+    FIXTURE = (
+        "int g;\n"
+        "void a(void) { g = 1; }\n"
+        "void b(void) { g = 2; }\n"
+    )
+
+    def test_plain_methods_never_upgraded_to_may_parallel(self):
+        # Two plain methods with no spawn relationship and no proven thread
+        # distinctness: no relation is emitted and the pair stays unresolved.
+        ctx = self.context()
+        self.assertEqual(ctx["relations"], [])
+        self.assertEqual(ctx["coverage"], {
+            "happens_before": 0, "may_parallel": 0, "unresolved_pairs": 1,
+        })
+        # the ambiguous candidate is preserved for S1's confirm stage
+        candidate = [s for s in ctx["may_parallel"] if s["subject"] == "g"]
+        self.assertEqual(len(candidate), 1)
+        self.assertEqual(candidate[0]["status"], "ambiguous")
+
+
 class CapabilityRegistrationTests(unittest.TestCase):
     def test_concurrency_context_is_c_cpp_query_time(self):
         record = CAPABILITY_CONTRACT["concurrency_context"]
@@ -344,6 +494,7 @@ class CapabilityRegistrationTests(unittest.TestCase):
         self.assertEqual(record["depends_on"], ("events", "sparse_cfg"))
         self.assertTrue(record.get("query_time"))
         self.assertEqual(record["status"], "partially_implemented")
+        self.assertEqual(record["level"], "level0+spawn-join+ordering")
 
 
 class UnsupportedLanguageTests(unittest.TestCase):

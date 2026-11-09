@@ -176,17 +176,22 @@ CAPABILITY_CONTRACT: dict[str, dict] = {
         # S2: a query-time reader over the events/sparse_cfg rows
         # (analysis_concurrency_context.py). It turns THREAD_SPAWN/THREAD_JOIN
         # vocabulary events and READ/WRITE access facts into a reusable, finite,
-        # provable synchronization-order bundle: same-method spawn-before-join
-        # and cross-method MAY_PARALLEL candidates over shared subjects.
-        # Partial by contract: no complete happens-before, no memory model, and
-        # an unproven MAY_PARALLEL is never upgraded to a resolved fact.
+        # provable synchronization-order bundle: same-method spawn-before-join,
+        # cross-method MAY_PARALLEL candidates over shared subjects, and the
+        # resolved ``relations`` list -- HAPPENS_BEFORE (single-threaded program
+        # order, or a proven spawn/join chain) and MAY_PARALLEL (two accesses in
+        # two provably different threads with no provable order between them),
+        # plus a ``coverage`` tally of resolved vs unresolved pairs. Partial by
+        # contract: no complete happens-before, no memory model, no points-to,
+        # and a pair without enough evidence is never upgraded to a resolved
+        # fact (spawn-before-join alone is not an order of the whole window).
         "status": "partially_implemented", "domain": "inspection",
         "languages": ("c", "cpp"),
         "depends_on": ("events", "sparse_cfg"),
         "cost_class": "medium", "analyzer_ids": (),
         "planned_integration": None,
         "query_time": True,
-        "level": "level0+spawn-join",
+        "level": "level0+spawn-join+ordering",
         "grade": "local-only, diagnostic",
     },
 }

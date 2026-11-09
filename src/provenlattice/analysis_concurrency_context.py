@@ -11,9 +11,16 @@ Fail-closed contract:
   order. The events layer does not currently stamp a handle on THREAD_JOIN, so
   this capability reports ``thread_handle_identity`` missing evidence instead of
   pairing by owner + source order (which would merge different threads);
-* MAY_PARALLEL is always a **candidate** (``status: "ambiguous"``), never a
-  resolved claim, and is associated with the specific shared subject (S1's
-  stable ``subject_decl`` identity), its access events and thread entry points;
+* MAY_PARALLEL stays a **candidate** (``status: "ambiguous"``) unless a
+  spawn/join fact resolves it; resolved relations -- ``HAPPENS_BEFORE`` (an
+  order proven by single-threaded program order or by a spawn/join chain) and
+  ``MAY_PARALLEL`` (two accesses in two provably different threads with no
+  provable order between them) -- are emitted in the ``relations`` list, each
+  keyed by S1's stable ``subject_decl`` identity and its access events. A pair
+  without enough evidence is left out of ``relations`` and never upgraded from
+  the candidate state; spawn-before-join alone is *not* an order of the whole
+  window (a child thread stays concurrent with everything between its spawn
+  and its join);
 * an unresolved identity (no ``subject_decl``) is marked ``unresolved`` and
   reported as missing evidence, never merged with a different object by display
   name alone.
@@ -63,6 +70,235 @@ def _owner(event: Mapping[str, Any]) -> str:
 
 def _byte(value: Any) -> int:
     return int(value or 0)
+
+
+_HAPPENS_BEFORE = "HAPPENS_BEFORE"
+_MAY_PARALLEL = "MAY_PARALLEL"
+
+
+def _provably_distinct_threads(
+    left_owner: str,
+    right_owner: str,
+    entry_points: frozenset[str],
+    spawned_by: Mapping[str, frozenset[str]],
+) -> bool:
+    """Whether two owners provably run in two different threads.
+
+    Sound in the local-only model and fail-closed everywhere else:
+
+    * two different thread-entry functions are two different threads;
+    * a thread-entry function and the method that spawns or joins it are
+      parent and child -- two different threads.
+
+    Two plain methods, or a thread function against a method that has no spawn
+    relationship with it, cannot prove distinctness and return False, so no
+    MAY_PARALLEL is ever asserted for them.
+    """
+    if left_owner == right_owner:
+        return False
+    if left_owner in entry_points and right_owner in entry_points:
+        return True
+    if left_owner in entry_points and right_owner in spawned_by.get(left_owner, frozenset()):
+        return True
+    if right_owner in entry_points and left_owner in spawned_by.get(right_owner, frozenset()):
+        return True
+    return False
+
+
+def _relation_record(
+    relation: str,
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+    subject: Mapping[str, Any],
+    reason: str,
+    *,
+    threads: Iterable[str] = (),
+) -> dict[str, Any]:
+    common = {
+        "relation": relation,
+        "reason": reason,
+        "subject": subject["subject"],
+        "identity": subject["identity"],
+    }
+    if relation == _HAPPENS_BEFORE:
+        return {
+            **common,
+            "before": first["event_id"],
+            "after": second["event_id"],
+            "owners": [first["owner"], second["owner"]],
+        }
+    return {
+        **common,
+        "left": first["event_id"],
+        "right": second["event_id"],
+        "owners": sorted({first["owner"], second["owner"]}),
+        "threads": sorted(threads),
+    }
+
+
+def _relation_sort_key(relation: Mapping[str, Any]) -> tuple:
+    return (
+        relation["relation"],
+        relation.get("subject") or "",
+        relation.get("identity") or "",
+        (relation.get("before") or relation.get("left")) or "",
+        (relation.get("after") or relation.get("right")) or "",
+    )
+
+
+def _ordering_relations(
+    spawn_facts: list[Mapping[str, Any]],
+    join_facts: list[Mapping[str, Any]],
+    spawn_join_pairs: list[Mapping[str, Any]],
+    entry_points: frozenset[str],
+    by_decl: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Resolved MAY_PARALLEL / HAPPENS_BEFORE relations over access pairs.
+
+    S2 convergence: where the spawn/join facts *prove* an order or a thread
+    distinction the pair is resolved into a relation; everywhere else it is
+    deliberately left absent (the ``may_parallel`` candidates carry the
+    ``ambiguous`` state). Three evidence rules, all fail-closed:
+
+    * ``program_order`` -- two accesses in one method are sequenced by byte
+      offset (single-threaded program order);
+    * ``spawn_join`` -- a spawn orders the parent's pre-spawn accesses before
+      the child thread's accesses, and a join orders the child's accesses
+      before the parent's post-join accesses, transitively through the shared
+      parent;
+    * ``distinct_threads`` -- two accesses in two provably different threads
+      with no provable order between them may run in parallel.
+
+    It never asserts parallelism for two plain methods with no spawn
+    relationship, and never treats ``spawn before join`` alone as an order of
+    the whole window (a child thread stays concurrent with everything between
+    the spawn and its join).
+    """
+    # node = event_id -> (owner, start_byte). Access nodes come from by_decl;
+    # spawn/join nodes anchor the ordering graph.
+    nodes: dict[str, tuple[str, int]] = {}
+    access_by_id: dict[str, Mapping[str, Any]] = {}
+    for spawn in spawn_facts:
+        if spawn.get("event_id"):
+            nodes[spawn["event_id"]] = (spawn["owner"], spawn["start_byte"])
+    for join in join_facts:
+        if join.get("event_id"):
+            nodes[join["event_id"]] = (join["owner"], join["start_byte"])
+    for record in by_decl.values():
+        for access in record["accesses"]:
+            if access.get("event_id"):
+                nodes[access["event_id"]] = (access["owner"], access["start_byte"])
+                access_by_id[access["event_id"]] = access
+
+    adjacency: dict[str, list[str]] = {nid: [] for nid in nodes}
+    # program order within one owner
+    by_owner: dict[str, list[tuple[int, str]]] = {}
+    for nid, (owner, byte) in nodes.items():
+        by_owner.setdefault(owner, []).append((byte, nid))
+    for items in by_owner.values():
+        items.sort()
+        for index in range(len(items) - 1):
+            adjacency[items[index][1]].append(items[index + 1][1])
+    # spawn -> the spawned function's accesses
+    for spawn in spawn_facts:
+        function = spawn.get("thread_function", "")
+        if not spawn.get("event_id") or not function:
+            continue
+        for access in access_by_id.values():
+            if access["owner"] == function:
+                adjacency[spawn["event_id"]].append(access["event_id"])
+    # the spawned function's accesses -> its join (pairing by handle already
+    # proves the join targets this thread function)
+    join_function: dict[str, str] = {
+        pair["join"]: pair["thread_function"]
+        for pair in spawn_join_pairs
+        if pair.get("join") and pair.get("thread_function")
+    }
+    for join_id, function in join_function.items():
+        for access in access_by_id.values():
+            if access["owner"] == function:
+                adjacency[access["event_id"]].append(join_id)
+
+    # reachability from each access node
+    reach_from: dict[str, frozenset[str]] = {}
+    for src in access_by_id:
+        seen: set[str] = set()
+        stack = [src]
+        while stack:
+            current = stack.pop()
+            for nxt in adjacency.get(current, ()):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        reach_from[src] = frozenset(seen)
+
+    # who spawns/joins each thread function, for provable distinctness
+    spawned_by: dict[str, set[str]] = {}
+    for spawn in spawn_facts:
+        if spawn.get("thread_function") and spawn.get("owner"):
+            spawned_by.setdefault(spawn["thread_function"], set()).add(spawn["owner"])
+    for pair in spawn_join_pairs:
+        if pair.get("thread_function") and pair.get("owner"):
+            spawned_by.setdefault(pair["thread_function"], set()).add(pair["owner"])
+
+    relations: list[dict[str, Any]] = []
+    unresolved_pairs = 0
+    for key in sorted(by_decl):
+        record = by_decl[key]
+        accesses = sorted(
+            record["accesses"],
+            key=lambda access: (access["start_byte"], access["event_id"] or ""),
+        )
+        if record["identity"] is None:
+            # Unresolved identity: the accesses are grouped by display name, not
+            # by a proven object. Asserting an order or parallelism over a
+            # possibly-merged subject would be unsound, so every pair here stays
+            # unresolved and no relation is emitted.
+            unresolved_pairs += len(accesses) * (len(accesses) - 1) // 2
+            continue
+        for index in range(len(accesses)):
+            for other in range(index + 1, len(accesses)):
+                left, right = accesses[index], accesses[other]
+                if left["owner"] == right["owner"]:
+                    if left["start_byte"] == right["start_byte"]:
+                        continue  # two halves of one RMW: no distinct order
+                    if left["start_byte"] < right["start_byte"]:
+                        relations.append(_relation_record(
+                            _HAPPENS_BEFORE, left, right, record, "program_order"))
+                    else:
+                        relations.append(_relation_record(
+                            _HAPPENS_BEFORE, right, left, record, "program_order"))
+                    continue
+                left_reaches = right["event_id"] in reach_from.get(left["event_id"], frozenset())
+                right_reaches = left["event_id"] in reach_from.get(right["event_id"], frozenset())
+                if left_reaches:
+                    relations.append(_relation_record(
+                        _HAPPENS_BEFORE, left, right, record, "spawn_join"))
+                elif right_reaches:
+                    relations.append(_relation_record(
+                        _HAPPENS_BEFORE, right, left, record, "spawn_join"))
+                elif _provably_distinct_threads(
+                    left["owner"], right["owner"], entry_points, spawned_by
+                ):
+                    threads = {
+                        owner for owner in (left["owner"], right["owner"])
+                        if owner in entry_points
+                    }
+                    relations.append(_relation_record(
+                        _MAY_PARALLEL, left, right, record, "distinct_threads",
+                        threads=threads))
+                else:
+                    unresolved_pairs += 1
+
+    relations.sort(key=_relation_sort_key)
+    coverage = {
+        "happens_before": sum(
+            1 for relation in relations if relation["relation"] == _HAPPENS_BEFORE),
+        "may_parallel": sum(
+            1 for relation in relations if relation["relation"] == _MAY_PARALLEL),
+        "unresolved_pairs": unresolved_pairs,
+    }
+    return relations, coverage
 
 
 def build_concurrency_context(events: Iterable[Mapping[str, Any]]) -> dict:
@@ -250,6 +486,10 @@ def build_concurrency_context(events: Iterable[Mapping[str, Any]]) -> dict:
             "status": "ambiguous",
         })
 
+    relations, coverage = _ordering_relations(
+        spawn_facts, join_facts, spawn_join_pairs, entry_points, by_decl,
+    )
+
     return {
         "thread_entry_points": sorted(entry_points),
         "spawns": spawn_facts,
@@ -257,6 +497,8 @@ def build_concurrency_context(events: Iterable[Mapping[str, Any]]) -> dict:
         "spawn_join_pairs": spawn_join_pairs,
         "resource_lifetime": resource_lifetime,
         "may_parallel": may_parallel,
+        "relations": relations,
+        "coverage": coverage,
         "missing_evidence": sorted(missing_evidence),
         "capability_gaps": capability_gaps,
     }

@@ -1,0 +1,545 @@
+# Declared ownership contracts: the knowledge about what a callee does with
+# what it is handed that cannot be read out of the graph at all.
+#
+# Three tables, each carrying the same discipline as the taint vocabulary:
+# every entry cites `evidence` that a reader can check against the source,
+# and an entry with no checkable evidence is folklore. Folklore that silently
+# *creates* or *deletes* findings is worse than no entry.
+#
+#   [[pair]]    an allocator acquire/release pairing (`malloc` <-> `free`).
+#               This is the data M11 (CWE-590/763 release mismatch) and M4
+#               (CWE-401 leak precision) read: a resource acquired by one
+#               half must be released by the paired half, and releasing it
+#               with any other spelling is a mismatch verdict -- never an
+#               assumed one.
+#   [[sink]]    a callee that takes ownership of its Nth argument, so a
+#               resource handed to that position is not this frame's leak.
+#   [[wrapper]] a type that owns the resource it holds and releases it on
+#               every exit path, including exception unwinding.
+#
+# `note` below records the scope statements, made openly because the
+# alternative is pretending.
+
+note = """
+Scope statements, stated because pretending otherwise would be dishonest.
+
+1. `acquire`/`release` are the callee spellings the events layer already
+   mints (see semantics/vocabularies/cpp.toml `events.ALLOC` /
+   `events.RELEASE`), NOT a fresh name inventory. The pairing claims only
+   "a resource produced by A is deallocated by B"; it says nothing about
+   *which* argument is the resource. `realloc` and `posix_memalign` are the
+   out-parameter caveat: `realloc` deallocates its *old* pointer (first
+   argument) and returns a fresh one, and `posix_memalign` writes the new
+   pointer through its first argument and returns an error code. Both still
+   pair their produced pointer with `free`; the argument-position nuance is
+   a graph-facts question (out_param in the vocabulary), not something this
+   data layer re-decides.
+
+2. C++ `new`/`delete` reach the graph as `new_expression` /
+   `delete_expression` syntax rather than as `CALL` events with a callee
+   name, so a name-keyed lookup cannot match them today. They are declared
+   anyway so the pairing is on record with its evidence; the matching is a
+   query-layer concern, exactly like the vocabulary already separates
+   `call_syntax` from `calls` for `new`/`delete`.
+
+3. GLib objects are refcounted: the memory allocation functions
+   (`g_malloc`, `g_module`, ...) pair with `g_free`, but `g_object_new`
+   pairs with `g_object_unref`, not `g_free`. Both are declared, and the
+   distinction is the point of declaring per-pair instead of assuming one
+   release family.
+
+Missing file means the empty table, not an error: the inferred sources carry
+the layer on their own, and a repository with no declared entries is a
+legitimate state.
+"""
+
+# ---------------------------------------------------------------------------
+# Allocator pairs (memory). Every C <stdlib.h> allocator below is declared by
+# ISO/IEC 9899:2018 7.22.3 and is deallocated by `free` (7.22.3.3); the POSIX
+# ones by POSIX.1-2017 and deallocated by `free` too.
+
+[[pair]]
+acquire = "malloc"
+release = "free"
+kind = "memory"
+evidence = """
+ISO/IEC 9899:2018 7.22.3.4 declares `void *malloc(size_t size)` in <stdlib.h>;
+7.22.3.3 declares `void free(void *ptr)` and specifies that `free` deallocates
+the space previously allocated by `malloc`, `calloc`, `realloc` or `aligned_alloc`.
+"""
+
+[[pair]]
+acquire = "calloc"
+release = "free"
+kind = "memory"
+evidence = """
+ISO/IEC 9899:2018 7.22.3.2 declares `void *calloc(size_t nmemb, size_t size)`
+in <stdlib.h>; the returned pointer names space deallocated by `free`
+(7.22.3.3).
+"""
+
+[[pair]]
+acquire = "realloc"
+release = "free"
+kind = "memory"
+evidence = """
+ISO/IEC 9899:2018 7.22.3.5 declares `void *realloc(void *ptr, size_t size)`.
+The *returned* pointer is the new allocation and is deallocated by `free`;
+the old object `ptr` is deallocated by `realloc` itself, which is why the
+vocabulary marks `realloc` an ALLOC whose first argument is consumed (see the
+`out_param` caveat in `note` for `posix_memalign`'s sibling case).
+"""
+
+[[pair]]
+acquire = "reallocarray"
+release = "free"
+kind = "memory"
+evidence = """
+`reallocarray(void *ptr, size_t nmemb, size_t size)` (OpenBSD, adopted widely;
+declared in <stdlib.h> on Linux/glibc) is the overflow-checked `realloc`: its
+returned pointer is deallocated by `free`, exactly as `realloc`'s is.
+"""
+
+[[pair]]
+acquire = "aligned_alloc"
+release = "free"
+kind = "memory"
+evidence = """
+ISO/IEC 9899:2018 7.22.3.1 declares `void *aligned_alloc(size_t alignment,
+size_t size)` in <stdlib.h>; the returned pointer is deallocated by `free`
+(7.22.3.3).
+"""
+
+[[pair]]
+acquire = "posix_memalign"
+release = "free"
+kind = "memory"
+evidence = """
+POSIX.1-2017 `posix_memalign(void **memptr, size_t alignment, size_t size)`
+(<stdlib.h>) writes the allocated pointer through its first argument and
+returns an error code. That produced pointer is deallocated by `free`; the
+vocabulary records the argument-position nuance with `out_param =
+["posix_memalign"]`.
+"""
+
+[[pair]]
+acquire = "memalign"
+release = "free"
+kind = "memory"
+evidence = """
+POSIX.1-2017 `void *memalign(size_t alignment, size_t size)` (<malloc.h>)
+returns a pointer to aligned storage that is deallocated by `free`.
+"""
+
+[[pair]]
+acquire = "valloc"
+release = "free"
+kind = "memory"
+evidence = """
+POSIX.1-2017 `void *valloc(size_t size)` (<malloc.h>) returns page-aligned
+storage deallocated by `free`.
+"""
+
+[[pair]]
+acquire = "pvalloc"
+release = "free"
+kind = "memory"
+evidence = """
+POSIX.1-2017 `void *pvalloc(size_t size)` (<malloc.h>) returns page-aligned
+storage sized to a page multiple, deallocated by `free`.
+"""
+
+[[pair]]
+acquire = "strdup"
+release = "free"
+kind = "memory"
+evidence = """
+POSIX.1-2017 `char *strdup(const char *s)` (<string.h>): "the returned pointer
+shall be passed to free()" -- the duplicate string is dynamically allocated
+and owned by the caller.
+"""
+
+[[pair]]
+acquire = "strndup"
+release = "free"
+kind = "memory"
+evidence = """
+POSIX.1-2017 `char *strndup(const char *s, size_t n)` (<string.h>) returns a
+dynamically allocated duplicate whose returned pointer "shall be passed to
+free()".
+"""
+
+[[pair]]
+acquire = "asprintf"
+release = "free"
+kind = "memory"
+evidence = """
+`int asprintf(char **strp, const char *fmt, ...)` (GNU, <stdio.h>) allocates a
+string via `malloc` and stores its pointer in `*strp`; the caller frees it
+with `free`.
+"""
+
+[[pair]]
+acquire = "vasprintf"
+release = "free"
+kind = "memory"
+evidence = """
+`int vasprintf(char **strp, const char *fmt, va_list ap)` (GNU, <stdio.h>) is
+the `va_list` form of `asprintf`; the buffer written to `*strp` is freed with
+`free`.
+"""
+
+[[pair]]
+acquire = "getline"
+release = "free"
+kind = "memory"
+evidence = """
+POSIX.1-2017 `ssize_t getline(char **lineptr, size_t *n, FILE *stream)`
+(<stdio.h>) allocates (via `malloc`) the buffer it fills, and the caller frees
+it with `free`. The vocabulary's `qualified_exclude = ["std::getline"]` keeps
+C++ `std::getline` -- which allocates nothing the caller owns -- out of the
+ALLOC reading.
+"""
+
+[[pair]]
+acquire = "realpath"
+release = "free"
+kind = "memory"
+evidence = """
+POSIX.1-2017 `char *realpath(const char *path, char *resolved_path)`
+(<stdlib.h>): with a null `resolved_path` the function `malloc`s the buffer
+for the resolved path, and the returned pointer may be passed to `free`.
+"""
+
+[[pair]]
+acquire = "HeapAlloc"
+release = "HeapFree"
+kind = "memory"
+evidence = """
+Win32 `HeapAlloc(HANDLE, DWORD, SIZE_T)` (heapapi.h) allocates from a heap; the
+block is freed by `HeapFree(HANDLE, DWORD, LPVOID)` against the same heap. The
+vocabulary lists both under ALLOC and RELEASE respectively.
+"""
+
+[[pair]]
+acquire = "LocalAlloc"
+release = "LocalFree"
+kind = "memory"
+evidence = """
+Win32 `LocalAlloc(UINT, SIZE_T)` (winbase.h) allocates local memory; the block
+is freed by `LocalFree(HLOCAL)`.
+"""
+
+[[pair]]
+acquire = "GlobalAlloc"
+release = "GlobalFree"
+kind = "memory"
+evidence = """
+Win32 `GlobalAlloc(UINT, SIZE_T)` (winbase.h) allocates global memory; the
+block is freed by `GlobalFree(HGLOBAL)`.
+"""
+
+[[pair]]
+acquire = "VirtualAlloc"
+release = "VirtualFree"
+kind = "memory"
+evidence = """
+Win32 `VirtualAlloc(LPVOID, SIZE_T, DWORD, DWORD)` (memoryapi.h) reserves or
+commits virtual pages; the pages are released by `VirtualFree`.
+"""
+
+[[pair]]
+acquire = "CoTaskMemAlloc"
+release = "CoTaskMemFree"
+kind = "memory"
+evidence = """
+Win32 `CoTaskMemAlloc(SIZE_T)` (combaseapi.h) allocates task memory; the block
+is freed by `CoTaskMemFree(LPVOID)`.
+"""
+
+[[pair]]
+acquire = "operator new"
+release = "operator delete"
+kind = "memory"
+evidence = """
+ISO/IEC 14882:2020 [new.delete] declares the allocation function
+`void* operator new(std::size_t)` and the deallocation function
+`void operator delete(void*)` in <new>: memory allocated by `operator new` is
+deallocated by `operator delete`. The graph materialises the corresponding
+`new_expression` / `delete_expression` syntax rather than these callee names;
+see `note` item 2.
+"""
+
+[[pair]]
+acquire = "operator new[]"
+release = "operator delete[]"
+kind = "memory"
+evidence = """
+ISO/IEC 14882:2020 [new.delete.array] declares the array forms
+`void* operator new[](std::size_t)` / `void operator delete[](void*)`: array
+allocations pair with `delete[]`, not scalar `delete` -- the canonical CWE-763
+mismatch this table exists to make checkable.
+"""
+
+[[pair]]
+acquire = "g_malloc"
+release = "g_free"
+kind = "memory"
+evidence = """
+GLib `gpointer g_malloc(gsize n_bytes)` (gmem.h) allocates memory that is
+freed by `g_free(gpointer mem)` -- the GLib memory-allocation pair, distinct
+from the refcounted GObject path (see `g_object_new`).
+"""
+
+[[pair]]
+acquire = "g_malloc0"
+release = "g_free"
+kind = "memory"
+evidence = """
+GLib `g_malloc0(gsize n_bytes)` allocates and zeroes memory; freed by `g_free`.
+"""
+
+[[pair]]
+acquire = "g_new"
+release = "g_free"
+kind = "memory"
+evidence = """
+GLib `g_new(struct_type, n_structs)` allocates an array of a struct type; the
+memory is freed by `g_free`.
+"""
+
+[[pair]]
+acquire = "g_new0"
+release = "g_free"
+kind = "memory"
+evidence = """
+GLib `g_new0(struct_type, n_structs)` allocates and zeroes an array of a struct
+type; the memory is freed by `g_free`.
+"""
+
+[[pair]]
+acquire = "g_strdup"
+release = "g_free"
+kind = "memory"
+evidence = """
+GLib `g_strdup(const gchar *str)` returns a newly allocated copy of the string;
+freed by `g_free`. Direct GLib analogue of POSIX `strdup`.
+"""
+
+[[pair]]
+acquire = "g_object_new"
+release = "g_object_unref"
+kind = "memory"
+evidence = """
+GLib `g_object_new(...)` creates a refcounted GObject; ownership is released by
+`g_object_unref`, never `g_free`, because GObject instances are refcounted
+rather than raw-memory allocations. Declared per-pair so the GLib distinction
+is not flattened into one release family (see `note` item 3).
+"""
+
+# ---------------------------------------------------------------------------
+# Allocator pairs (streams). ISO/IEC 9899:2018 7.21.5 / POSIX.1-2017 <stdio.h>.
+
+[[pair]]
+acquire = "fopen"
+release = "fclose"
+kind = "stream"
+evidence = """
+ISO/IEC 9899:2018 7.21.5.3 declares `FILE *fopen(const char *, const char *)`;
+7.21.5.1 declares `int fclose(FILE *stream)` and specifies that the stream is
+closed and its buffer disassociated -- a `FILE *` from `fopen` is released by
+`fclose`.
+"""
+
+[[pair]]
+acquire = "freopen"
+release = "fclose"
+kind = "stream"
+evidence = """
+ISO/IEC 9899:2018 7.21.5.4 `FILE *freopen(...)` opens a stream, returning either
+the reopened `stream` or a new `FILE *`; the resulting stream is closed by
+`fclose` (7.21.5.1).
+"""
+
+[[pair]]
+acquire = "fdopen"
+release = "fclose"
+kind = "stream"
+evidence = """
+POSIX.1-2017 `FILE *fdopen(int fildes, const char *mode)` (<stdio.h>) associates
+a stream with a file descriptor; the `FILE *` is closed by `fclose` (which
+closes the association without necessarily closing the underlying descriptor).
+"""
+
+[[pair]]
+acquire = "popen"
+release = "pclose"
+kind = "stream"
+evidence = """
+POSIX.1-2017 `FILE *popen(const char *command, const char *mode)` (<stdio.h>)
+opens a pipe to a process; the returned stream must be closed by `pclose`,
+not `fclose`, because `pclose` also waits for the process -- releasing a
+`popen` stream with `fclose` is the mismatch this pair is meant to catch.
+"""
+
+[[pair]]
+acquire = "tmpfile"
+release = "fclose"
+kind = "stream"
+evidence = """
+ISO/IEC 9899:2018 7.21.4.3 `FILE *tmpfile(void)` creates a binary stream that
+is removed on close; the returned `FILE *` is closed by `fclose` (7.21.5.1).
+"""
+
+# ---------------------------------------------------------------------------
+# Sinks: a callee that takes ownership of its Nth argument, so a resource
+# handed to that position is not this frame's leak. Ordinals are 0-based.
+
+[[sink]]
+name = "realloc"
+ordinal = 0
+evidence = """
+ISO/IEC 9899:2018 7.22.3.5: `realloc` "deallocates the old object pointed to by
+ptr" -- the first argument is consumed by the call, so a pointer handed to
+`realloc(p, n)` is no longer owned by the caller once the call returns.
+"""
+
+[[sink]]
+name = "fclose"
+ordinal = 0
+evidence = """
+ISO/IEC 9899:2018 7.21.5.1: `fclose` closes the stream passed as its (only)
+argument and disassociates its buffer -- the `FILE *` is owned by the call
+thereafter.
+"""
+
+[[sink]]
+name = "pclose"
+ordinal = 0
+evidence = """
+POSIX.1-2017 `int pclose(FILE *stream)`: closes a `popen` stream and waits for
+the associated process -- the stream argument is consumed by the call, and
+its resource is released there, not leaked by the caller.
+"""
+
+# ---------------------------------------------------------------------------
+# Wrappers: a type that owns the resource it holds and releases it on every
+# exit path. `type_token` is the type's last identifier with namespace and
+# template arguments already dropped (parsing/declarations.py), so entries
+# are bare tokens such as `unique_ptr`, not `std::unique_ptr<T>`.
+
+[[wrapper]]
+type = "unique_ptr"
+evidence = """
+ISO/IEC 14882:2020 [unique.ptr]: `std::unique_ptr` owns and manages another
+object and deletes it through its held pointer on destruction -- the RAII
+wrapper a resource must not be reported as leaked while it is held in one.
+"""
+
+[[wrapper]]
+type = "shared_ptr"
+evidence = """
+ISO/IEC 14882:2020 [util.smartptr.shared]: `std::shared_ptr` retains shared
+ownership; the managed object is destroyed when the last `shared_ptr` owning
+it is destroyed.
+"""
+
+[[wrapper]]
+type = "weak_ptr"
+evidence = """
+ISO/IEC 14882:2020 [util.smartptr.weak]: `std::weak_ptr` holds a non-owning
+reference into a `shared_ptr`'s control block; it does not own the object, so
+a resource is owned by the `shared_ptr`, not the `weak_ptr` -- declared for the
+sake of completeness, not because it frees anything.
+"""
+
+[[wrapper]]
+type = "string"
+evidence = """
+ISO/IEC 14882:2020 [basic.string]: `std::basic_string` (including
+`std::string`) owns the character array it uses, releasing it on destruction.
+"""
+
+[[wrapper]]
+type = "vector"
+evidence = """
+ISO/IEC 14882:2020 [vector]: `std::vector` owns a contiguous array of its
+elements, released on destruction.
+"""
+
+[[wrapper]]
+type = "deque"
+evidence = """
+ISO/IEC 14882:2020 [deque]: `std::deque` owns its internal blocks of elements,
+released on destruction.
+"""
+
+[[wrapper]]
+type = "list"
+evidence = """
+ISO/IEC 14882:2020 [list]: `std::list` owns its doubly-linked nodes, released
+on destruction.
+"""
+
+[[wrapper]]
+type = "forward_list"
+evidence = """
+ISO/IEC 14882:2020 [forwardlist]: `std::forward_list` owns its singly-linked
+nodes, released on destruction.
+"""
+
+[[wrapper]]
+type = "map"
+evidence = """
+ISO/IEC 14882:2020 [associative.reqmts]: `std::map` owns its tree nodes,
+released on destruction.
+"""
+
+[[wrapper]]
+type = "set"
+evidence = """
+ISO/IEC 14882:2020 [associative.reqmts]: `std::set` owns its tree nodes,
+released on destruction.
+"""
+
+[[wrapper]]
+type = "multimap"
+evidence = """
+ISO/IEC 14882:2020 [associative.reqmts]: `std::multimap` owns its tree nodes,
+released on destruction.
+"""
+
+[[wrapper]]
+type = "multiset"
+evidence = """
+ISO/IEC 14882:2020 [associative.reqmts]: `std::multiset` owns its tree nodes,
+released on destruction.
+"""
+
+[[wrapper]]
+type = "unordered_map"
+evidence = """
+ISO/IEC 14882:2020 [unord.req]: `std::unordered_map` owns its hash buckets and
+nodes, released on destruction.
+"""
+
+[[wrapper]]
+type = "unordered_set"
+evidence = """
+ISO/IEC 14882:2020 [unord.req]: `std::unordered_set` owns its hash buckets and
+nodes, released on destruction.
+"""
+
+[[wrapper]]
+type = "unordered_multimap"
+evidence = """
+ISO/IEC 14882:2020 [unord.req]: `std::unordered_multimap` owns its hash buckets
+and nodes, released on destruction.
+"""
+
+[[wrapper]]
+type = "unordered_multiset"
+evidence = """
+ISO/IEC 14882:2020 [unord.req]: `std::unordered_multiset` owns its hash buckets
+and nodes, released on destruction.
+"""

@@ -318,5 +318,115 @@ class AnalyzerIdentityTests(unittest.TestCase):
         self.assertEqual(base_snapshot(self.database), before)
 
 
+class DeclaredContractTests(unittest.TestCase):
+    """S5 (issue-pilot#61): the declared ownership/allocator contract data.
+
+    `contracts.toml` ships the knowledge that cannot be read out of the graph
+    -- allocator acquire/release pairs (`malloc` <-> `free`) plus the
+    sink/wrapper entries the M4/M11 queries read. These tests pin the four
+    acceptance properties: the pairs load, every entry carries audit evidence,
+    the data is consumable through `ContractTable` (the interface the defect
+    queries accept), and a missing file degrades to an empty table rather than
+    a crash.
+    """
+
+    def test_load_declared_reads_pairs_sinks_and_wrappers(self) -> None:
+        from provenlattice.contracts import load_declared
+
+        declared = load_declared()
+        pairs = declared.get("pair", [])
+        wrappers = declared.get("wrapper", [])
+        self.assertTrue(pairs, "contracts.toml should declare allocator pairs")
+        self.assertTrue(wrappers, "contracts.toml should declare wrapper types")
+        acquires = {entry["acquire"] for entry in pairs}
+        releases = {entry["release"] for entry in pairs}
+        self.assertIn("malloc", acquires)
+        self.assertIn("free", releases)
+        self.assertIn("fopen", acquires)
+        self.assertIn("fclose", releases)
+        self.assertIn("operator new", acquires)
+        self.assertIn("operator delete", releases)
+
+    def test_every_declared_entry_carries_evidence(self) -> None:
+        from provenlattice.contracts import load_declared
+
+        declared = load_declared()
+        for key in ("pair", "sink", "wrapper"):
+            for entry in declared.get(key, []):
+                self.assertTrue(
+                    entry.get("evidence"),
+                    f"{key} entry {entry!r} has no evidence",
+                )
+
+    def test_missing_file_degrades_to_empty_table(self) -> None:
+        from provenlattice.contracts import load_declared
+
+        with tempfile.TemporaryDirectory() as tmp:
+            table = load_declared(Path(tmp) / "nope.toml")
+        self.assertEqual(table, {"sink": [], "wrapper": [], "pair": []})
+
+    def test_pair_without_evidence_is_rejected(self) -> None:
+        from provenlattice.contracts import load_declared
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.toml"
+            path.write_text(
+                '[[pair]]\nacquire = "malloc"\nrelease = "free"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                load_declared(path)
+
+    def test_pair_without_acquire_or_release_is_rejected(self) -> None:
+        from provenlattice.contracts import load_declared
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.toml"
+            path.write_text(
+                '[[pair]]\nrelease = "free"\nevidence = "x"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                load_declared(path)
+
+    def test_unknown_top_level_key_is_rejected(self) -> None:
+        from provenlattice.contracts import load_declared
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.toml"
+            path.write_text('bogus = []\n', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_declared(path)
+
+    def test_build_exposes_allocator_pairs_for_queries(self) -> None:
+        from provenlattice.contracts import build, load_declared
+
+        table = build([], [], declared=load_declared())
+        # M4 (leak) reads the release an acquire half hands its resource to.
+        self.assertEqual(table.paired_releases("malloc"), frozenset({"free"}))
+        self.assertEqual(
+            table.paired_releases("operator new"), frozenset({"operator delete"})
+        )
+        self.assertEqual(
+            table.paired_releases("operator new[]"), frozenset({"operator delete[]"})
+        )
+        # M11 (release mismatch) reads the reverse and the pair check.
+        self.assertTrue(table.is_valid_pair("malloc", "free"))
+        self.assertFalse(table.is_valid_pair("malloc", "operator delete"))
+        self.assertFalse(table.is_valid_pair("operator new", "free"))
+        self.assertIn("malloc", table.acquires_for("free"))
+        self.assertNotIn("malloc", table.acquires_for("operator delete"))
+        # An unknown acquire yields nothing declared, never a wrong answer.
+        self.assertEqual(table.paired_releases("no_such_allocator"), frozenset())
+        self.assertFalse(table.is_valid_pair("no_such_allocator", "free"))
+
+    def test_declared_pairs_are_counted_in_coverage(self) -> None:
+        from provenlattice.contracts import build, load_declared
+
+        table = build([], [], declared=load_declared())
+        self.assertGreater(table.coverage["declared_pairs"], 0)
+        self.assertGreater(table.coverage["declared_wrappers"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

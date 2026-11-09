@@ -12,7 +12,8 @@ Three sources, and every entry says which one it came from:
 
 * **Declared** (`semantics/contracts.toml`) -- the corpus knowledge that cannot
   be read out of the graph at all, such as `RedisModule_SetKeyMeta` taking
-  ownership of its third argument. Each entry carries the `evidence` that makes
+  ownership of its third argument, or that `malloc` and `free` are the two
+  halves of one allocator pair. Each entry carries the `evidence` that makes
   it checkable against the source, because a hand-written table nobody can
   audit is folklore.
 * **Inferred from a pair** -- two functions whose names share a stem once the
@@ -203,6 +204,7 @@ class ContractTable:
     sinks: Mapping[str, tuple[int, ...]]
     consumes: Mapping[str, int]
     wrappers: frozenset[str]
+    allocator_pairs: Mapping[str, frozenset[str]]
     pairs: Mapping[str, str]
     pair_labels: Mapping[str, str]
     storages: frozenset[str]
@@ -254,12 +256,40 @@ class ContractTable:
     def is_wrapper(self, type_token: str) -> bool:
         return type_token in self.wrappers
 
+    def paired_releases(self, acquire: str) -> frozenset[str]:
+        """The deallocators a declared acquire half pairs with.
+
+        Empty for an unknown acquire: this layer only ever asserts pairings it
+        has declared, so an empty answer is "nothing declared", never "this
+        acquire needs no release".
+        """
+        return self.allocator_pairs.get(acquire, frozenset())
+
+    def acquires_for(self, release: str) -> frozenset[str]:
+        """The allocators a declared release half pairs with."""
+        return frozenset(
+            acquire
+            for acquire, releases in self.allocator_pairs.items()
+            if release in releases
+        )
+
+    def is_valid_pair(self, acquire: str, release: str) -> bool:
+        """Whether a declared pair links `acquire` to `release`.
+
+        `False` covers both "declared elsewhere" and "not declared": the two
+        must not be collapsed. A mismatch verdict (`malloc` freed by `delete`)
+        is the caller's three-state decision, made from `paired_releases` and
+        `acquires_for`, not from this boolean alone.
+        """
+        return release in self.allocator_pairs.get(acquire, frozenset())
+
 
 EMPTY = ContractTable(
     callees={},
     sinks={},
     consumes={},
     wrappers=frozenset(),
+    allocator_pairs={},
     pairs={},
     pair_labels={},
     storages=frozenset(),
@@ -277,16 +307,16 @@ def load_declared(path: Path | None = None) -> dict[str, Any]:
     """
     source = path or DECLARED_FILE
     if not source.exists():
-        return {"sink": [], "wrapper": []}
+        return {"sink": [], "wrapper": [], "pair": []}
     try:
         payload = tomllib.loads(source.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as error:
         raise ValueError(f"{source.name}: {error}") from error
-    unknown = sorted(set(payload) - {"sink", "wrapper", "note"})
+    unknown = sorted(set(payload) - {"sink", "wrapper", "note", "pair"})
     if unknown:
         raise ValueError(
             f"{source.name}: unknown top-level keys {', '.join(unknown)}; "
-            f"expected sink, wrapper, note"
+            f"expected sink, wrapper, note, pair"
         )
     for entry in payload.get("sink", []):
         if not isinstance(entry.get("name"), str) or not isinstance(entry.get("ordinal"), int):
@@ -298,6 +328,15 @@ def load_declared(path: Path | None = None) -> dict[str, Any]:
             raise ValueError(f"{source.name}: every wrapper needs a type")
         if not entry.get("evidence"):
             raise ValueError(f"{source.name}: wrapper {entry['type']!r} has no evidence")
+    for entry in payload.get("pair", []):
+        if not isinstance(entry.get("acquire"), str) or not isinstance(entry.get("release"), str):
+            raise ValueError(
+                f"{source.name}: every pair needs an acquire and a release name"
+            )
+        if not entry.get("evidence"):
+            raise ValueError(
+                f"{source.name}: pair {entry['acquire']!r}/{entry['release']!r} has no evidence"
+            )
     return payload
 
 
@@ -326,7 +365,7 @@ def build(
     """
     if points is None:
         points = sparsecfg.materialize_points(events, edges)
-    table = declared if declared is not None else {"sink": [], "wrapper": []}
+    table = declared if declared is not None else {"sink": [], "wrapper": [], "pair": []}
     names = names or {}
 
     callees, ambiguous_spans = _callees(references)
@@ -338,6 +377,12 @@ def build(
         name = str(entry["name"])
         sinks[name] = tuple(sorted({*sinks.get(name, ()), int(entry["ordinal"])}))
     wrappers = frozenset(str(entry["type"]) for entry in table.get("wrapper", []))
+    allocator_pairs: dict[str, set[str]] = {}
+    for entry in table.get("pair", []):
+        allocator_pairs.setdefault(str(entry["acquire"]), set()).add(str(entry["release"]))
+    allocator_pairs = {
+        acquire: frozenset(releases) for acquire, releases in allocator_pairs.items()
+    }
 
     call_points = sum(1 for info in points.values() if info["event_type"] == "CALL")
     summaries = _summaries(sinks, consumes, pairs, names)
@@ -365,6 +410,7 @@ def build(
         "contract_anchoring_rejected": rejected,
         "declared_sinks": len(sinks),
         "declared_wrappers": len(wrappers),
+        "declared_pairs": len(allocator_pairs),
         "summaries": len(summaries),
         "summaries_inferred": sum(1 for s in summaries if s.provenance.startswith("inferred:")),
         "summaries_declared": sum(1 for s in summaries if s.provenance.startswith("declared:")),
@@ -374,6 +420,7 @@ def build(
         sinks=sinks,
         consumes=consumes,
         wrappers=wrappers,
+        allocator_pairs=allocator_pairs,
         pairs=pairs,
         pair_labels=pair_labels,
         storages=OWNER_STORAGES | {FUNCTION_STATIC_STORAGE},
@@ -620,6 +667,11 @@ def describe(table: ContractTable, *, limit: int = 40) -> list[str]:
     )
     lines.append(f"declared wrappers ({len(table.wrappers)}):")
     lines.extend(f"  {token}" for token in sorted(table.wrappers)[:limit])
+    lines.append(f"declared allocator pairs ({len(table.allocator_pairs)}):")
+    lines.extend(
+        f"  {acquire} -> {', '.join(sorted(releases))}"
+        for acquire, releases in sorted(table.allocator_pairs.items())[:limit]
+    )
     rejected = table.coverage.get("contract_anchoring_rejected", [])
     lines.append(f"anchoring rejected ({len(rejected)}):")
     lines.extend(f"  {item}" for item in rejected[:limit])

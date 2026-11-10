@@ -201,6 +201,17 @@ class RaiiLockTests(LockSemanticsBase):
         self.assertTrue(lock["subject_exact"])
         self.assertEqual(lock["acquire_kind"], "blocking")
 
+    def test_lock_guard_carries_lexical_scope_end(self) -> None:
+        # Issue #69: a RAII acquisition carries its lexical scope end byte, so
+        # a consumer can hold it from the declaration to that byte and not past.
+        lock = self.events_of_type("src/raii.cc", "LOCK")[0]
+        self.assertIn("raii_scope_end", lock)
+        scope_end = lock["raii_scope_end"]
+        self.assertIsInstance(scope_end, int)
+        # The guard is declared in `guarded`'s body, so its scope end is the
+        # function body's closing brace -- after the declaration's own end.
+        self.assertGreater(scope_end, lock["end_byte"])
+
 
 class InexactIdentityTests(LockSemanticsBase):
     def setUp(self) -> None:
@@ -234,7 +245,23 @@ class BaselineStabilityTests(LockSemanticsBase):
             self.assertNotIn("lock_identity", event)
             self.assertNotIn("acquire_kind", event)
             self.assertNotIn("raii", event)
+            self.assertNotIn("raii_scope_end", event)
             self.assertNotIn("subject_exact", event)
+
+    def test_non_raii_lock_carries_no_scope_end(self) -> None:
+        # `raii_scope_end` is meaningful only on a RAII acquisition; a blocking
+        # pthread lock has no lexical scope and must not carry the field.
+        write(self.root, "src/lock.c",
+              "#include <pthread.h>\n"
+              "pthread_mutex_t g_lock;\n"
+              "void guarded(void) {\n"
+              "    pthread_mutex_lock(&g_lock);\n"
+              "    pthread_mutex_unlock(&g_lock);\n"
+              "}\n")
+        self.analyze_events()
+        locks = self.events_of_type("src/lock.c", "LOCK")
+        self.assertEqual(len(locks), 1)
+        self.assertNotIn("raii_scope_end", locks[0])
 
 
 if __name__ == "__main__":

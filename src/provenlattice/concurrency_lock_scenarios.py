@@ -344,11 +344,15 @@ def _owner_label(event: Mapping[str, Any]) -> str:
 
 
 def _lock_fact_of(event: Mapping[str, Any]) -> dict[str, Any]:
+    scope_end = event.get("raii_scope_end")
     return {
         "lock_identity": event.get("lock_identity") or "",
         "subject_exact": bool(event.get("subject_exact")),
         "acquire_kind": event.get("acquire_kind") or _ACQUIRE_BLOCKING,
         "raii": bool(event.get("raii")),
+        # Issue #69: the guard's lexical scope end byte, present only on RAII
+        # acquisitions; None elsewhere so the field never reads as a scope.
+        "raii_scope_end": int(scope_end) if scope_end is not None else None,
     }
 
 
@@ -572,6 +576,47 @@ def _relation_sort_key(relation: Mapping[str, Any]) -> tuple:
     )
 
 
+def _raii_scopes(
+    threaded: Mapping[str, Mapping[str, Any]],
+    lock_by_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[tuple[str, int, int]], frozenset[str]]:
+    """RAII guards active in one method, and the identities they release.
+
+    Returns ``(scopes, identities)``. ``scopes`` is a list of
+    ``(lock_identity, declaration_start_byte, scope_end_byte)`` for every
+    provably-identified RAII acquisition in the method, sorted by start byte.
+    ``identities`` is the set of those lock identities, so the caller can tell
+    a RAII guard -- released implicitly at its scope end -- from a blocking
+    lock that needs an explicit unlock.
+
+    A RAII acquisition is deterministic and lexical: it cannot be conditionally
+    held and it is released on every exit path, so its hold interval is read
+    straight off the lock fact (``raii_scope_end``, Issue #69) rather than
+    propagated over the CFG. Only an exact, non-empty identity participates; an
+    inexact root or an unrecovered scope end stays out, exactly like the
+    blocking path's identity gate.
+    """
+    scopes: list[tuple[str, int, int]] = []
+    for nid, ev in threaded.items():
+        if ev.get("event_type") != _LOCK:
+            continue
+        fact = lock_by_id.get(nid)
+        if not fact or not fact.get("raii"):
+            continue
+        if not fact["subject_exact"] or not fact["lock_identity"]:
+            continue
+        scope_end = fact.get("raii_scope_end")
+        if not scope_end:
+            continue
+        scopes.append((
+            fact["lock_identity"],
+            int(ev.get("start_byte") or 0),
+            int(scope_end),
+        ))
+    scopes.sort(key=lambda item: (item[1], item[2], item[0]))
+    return scopes, frozenset(identity for identity, _, _ in scopes)
+
+
 def build_access_lockset(
     sparse_events: Iterable[Mapping[str, Any]],
     edges: Iterable[Mapping[str, Any]] = (),
@@ -641,6 +686,9 @@ def build_access_lockset(
 
         held_in, succ = _threaded_dataflow(
             threaded, edges_by_owner.get(owner, ()), lock_by_id)
+        # RAII guards are lexical, not dataflow: their hold interval is read
+        # straight off the lock fact rather than propagated over the CFG.
+        raii_scopes, raii_identities = _raii_scopes(threaded, lock_by_id)
 
         # Method-level, conservative limitations.
         limitations: list[str] = []
@@ -669,6 +717,17 @@ def build_access_lockset(
         ):
             successor = _flow_successor(ev, threaded)
             held = held_in[successor] if successor is not None else held_in[_EXIT]
+            # A RAII guard held over this access's byte position protects it:
+            # the lock is held from its declaration to its scope end (Issue #69),
+            # so an access inside that interval is protected and one after it is
+            # not -- which is what stops a guard from reaching past an inner
+            # scope's closing brace to method exit.
+            start_byte = int(ev.get("start_byte") or 0)
+            held = held | frozenset(
+                identity
+                for identity, decl_start, scope_end in raii_scopes
+                if decl_start <= start_byte < scope_end
+            )
             access_records.append(
                 _access_record(owner, owner_label, ev, held, limitations))
             for lock in sorted(held):
@@ -679,6 +738,11 @@ def build_access_lockset(
                     "owner": owner_label,
                     "owner_symbol_id": owner,
                 })
+                # A RAII lock releases implicitly at its scope end, so "no
+                # explicit unlock on the path" is not a leak and must not
+                # surface as UNLOCK_OMITTED_ON_PATH.
+                if lock in raii_identities:
+                    continue
                 if _omits_unlock_on_path(successor, lock, succ, threaded, lock_by_id):
                     relations.append({
                         "relation": "UNLOCK_OMITTED_ON_PATH",

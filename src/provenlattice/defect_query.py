@@ -40,6 +40,124 @@ MECHANISM_QUERIES = (
     defect.RESOURCE_LIFETIME,
 )
 
+# Category selection: a named group of detectors. Each value is an ordered
+# sequence of ``(query_name, extra_kwargs)`` pairs, and ``extra_kwargs`` is
+# forwarded to ``defect.run`` (which drops keys a query does not accept). The
+# ``defect_keys`` entries reuse the queries' built-in matrix-key filter that
+# runs *before* truncation, so `resource_lifetime` answers ``memory`` with
+# matrix 4.1 only and ``concurrency`` with 4.6 only -- the one query whose two
+# halves belong to different categories is split at the matrix-key level, never
+# by query name. ``include_locks=False`` on the memory half turns the lock walk
+# off entirely rather than computing it and filtering afterwards.
+#
+# The R1-A / R1-B / R1-C wiring is deliberately *not* exposed here as a user
+# switch: those remain query-internal abilities. A category only selects which
+# detectors run.
+CATEGORY_QUERIES: dict[str, tuple[tuple[str, dict[str, object]], ...]] = {
+    "memory": (
+        (defect.RESOURCE_LIFETIME, {"defect_keys": ("4.1",), "include_locks": False}),
+        (defect.NULL_FLOW, {}),
+        (defect.USE_AFTER_FREE, {}),
+        (defect.DOUBLE_FREE, {}),
+        (defect.MISMATCHED_FREE, {}),
+    ),
+    "concurrency": (
+        (defect.RACE_CONDITION, {}),
+        (defect.LOCK_ORDER, {}),
+        (defect.RESOURCE_LIFETIME, {"defect_keys": ("4.6",)}),
+    ),
+    "dataflow": (
+        (defect.TAINT_PATH, {}),
+    ),
+    "reliability": (
+        (defect.ERROR_HANDLING, {}),
+    ),
+}
+# Sorted for stable error text and discovery order; "all" is not listed because
+# it is the no-selection default, not a distinct group.
+KNOWN_CATEGORIES = tuple(sorted(CATEGORY_QUERIES))
+
+
+def _expand_categories(category: str) -> list[tuple[str, dict[str, object]]]:
+    """Parse a comma-separated category list into ordered ``(query, kwargs)``.
+
+    Deterministic: a category keeps its declared order, and ``resource_lifetime``
+    named under both ``memory`` and ``concurrency`` yields two specs (4.1 and
+    4.6) instead of a merged one -- the two matrix halves are selected
+    independently. ``all`` expands to every supported query; an unknown name
+    fails closed instead of silently degrading.
+    """
+    names: list[str] = []
+    for item in category.split(","):
+        name = item.strip()
+        if not name:
+            continue
+        if name != "all" and name not in KNOWN_CATEGORIES:
+            raise AnalysisRequestError(
+                "invalid_request",
+                f"unknown category {name!r}; known: {', '.join((*KNOWN_CATEGORIES, 'all'))}",
+            )
+        if name not in names:
+            names.append(name)
+    if not names:
+        raise AnalysisRequestError("invalid_request", "no category requested")
+    specs: list[tuple[str, dict[str, object]]] = []
+    for name in names:
+        if name == "all":
+            specs.extend((query_name, {}) for query_name in SUPPORTED_DEFECT_QUERIES)
+        else:
+            specs.extend(CATEGORY_QUERIES[name])
+    return specs
+
+
+def _run_query_specs(
+    specs: list[tuple[str, dict[str, object]]],
+    events: list[dict],
+    control_edges: list[dict],
+    *,
+    subject: str | None,
+    max_hops: int,
+    max_paths: int,
+    max_candidates: int,
+    names: dict,
+    contract_table: object,
+    signatures: dict,
+) -> tuple[list, list, bool, dict, dict]:
+    """Run ``(query, kwargs)`` specs and merge their results.
+
+    Shared by the ``all`` and ``category`` paths; the single-query path keeps
+    its own shape because it exposes one query's coverage block verbatim rather
+    than the additive merge.
+    """
+    results = []
+    truncated = False
+    coverage: dict = {}
+    for query_name, extra in specs:
+        one = defect.run(
+            query_name, events, control_edges,
+            subject=subject, max_hops=max_hops, max_paths=max_paths,
+            max_candidates=max_candidates, names=names,
+            callees=contract_table, signatures=signatures,
+            contracts=contract_table,
+            **extra,
+        )
+        results.append(one)
+        truncated = truncated or one.truncated
+        for key, value in one.coverage.items():
+            if isinstance(value, (int, float)):
+                coverage[key] = coverage.get(key, 0) + value
+            else:
+                coverage.setdefault(key, value)
+    candidates = sorted(
+        (c for r in results for c in r.candidates),
+        key=lambda c: c.sort_key())
+    mechanism_facts = {
+        one.query: [candidate.to_dict() for candidate in one.candidates]
+        for one in results
+        if one.query in MECHANISM_QUERIES
+    }
+    return results, candidates, truncated, coverage, mechanism_facts
+
 
 def _upstream_state(store: AnalysisStore) -> dict:
     """The freshness of every upstream feature, per file, fail-closed.
@@ -152,6 +270,7 @@ def query_defect_candidates(
     repo: str | Path,
     *,
     defect_type: str = "all",
+    category: str | None = None,
     subject: str | None = None,
     max_hops: int = 64,
     max_paths: int = 8,
@@ -168,6 +287,12 @@ def query_defect_candidates(
     missing upstream fails the whole query closed rather than yielding
     candidates over partial facts.
 
+    ``category`` selects a group of detectors (``memory`` / ``concurrency`` /
+    ``dataflow`` / ``reliability`` / ``all``, comma-separated) and is an
+    alternative axis to ``defect_type``: they are mutually exclusive, and naming
+    a category together with a specific ``defect_type`` fails closed as an
+    ``invalid_request`` rather than defining an implicit union/intersection.
+
     ``confidence_gate`` / ``suppress_below`` are the SUB-11 / R11 precision
     guardrail: by default candidates whose confidence *band* falls below
     ``DEFAULT_CONFIDENCE_THRESHOLD`` are suppressed from both ``candidates``
@@ -176,6 +301,11 @@ def query_defect_candidates(
     ``confidence_gate=None`` (or ``suppress_below=False``) to see the
     unfiltered set.
     """
+    if category and defect_type not in ("all", ""):
+        raise AnalysisRequestError(
+            "invalid_request",
+            "--type and --category are mutually exclusive; specify exactly one",
+        )
     root = Path(repo).resolve()
     database = Path(database).resolve() if database else root / ".provenlattice" / "codegraph.db"
     started_payload: dict = {}
@@ -289,42 +419,25 @@ def query_defect_candidates(
         )
 
         query = defect_type
-        if defect_type in ("all", ""):
-            # "all" over the I2A surface means the two ported queries; PR's
-            # dispatcher handled "all" in GraphQuery.get_defect_candidates,
-            # which is this service's counterpart.
-            results = []
-            truncated = False
-            coverage: dict = {}
-            for query_name in SUPPORTED_DEFECT_QUERIES:
-                one = defect.run(
-                    query_name, events, control_edges,
-                    subject=subject, max_hops=max_hops, max_paths=max_paths,
-                    max_candidates=max_candidates, names=names,
-                    callees=contract_table, signatures=signatures,
-                    contracts=contract_table,
-                )
-                results.append(one)
-                truncated = truncated or one.truncated
-                for key, value in one.coverage.items():
-                    if isinstance(value, (int, float)):
-                        coverage[key] = coverage.get(key, 0) + value
-                    else:
-                        coverage.setdefault(key, value)
-            candidates = sorted(
-                (c for r in results for c in r.candidates),
-                key=lambda c: c.sort_key())
+        if category:
+            specs = _expand_categories(category)
+            _, candidates, truncated, coverage, mechanism_facts = _run_query_specs(
+                specs, events, control_edges,
+                subject=subject, max_hops=max_hops, max_paths=max_paths,
+                max_candidates=max_candidates, names=names,
+                contract_table=contract_table, signatures=signatures,
+            )
+            query = "category " + category + " (" + ", ".join(
+                dict.fromkeys(name for name, _ in specs)) + ")"
+        elif defect_type in ("all", ""):
+            specs = [(query_name, {}) for query_name in SUPPORTED_DEFECT_QUERIES]
+            _, candidates, truncated, coverage, mechanism_facts = _run_query_specs(
+                specs, events, control_edges,
+                subject=subject, max_hops=max_hops, max_paths=max_paths,
+                max_candidates=max_candidates, names=names,
+                contract_table=contract_table, signatures=signatures,
+            )
             query = "all (" + ", ".join(SUPPORTED_DEFECT_QUERIES) + ")"
-            # SUB-06 / R10: expose the non-race mechanism results as their own
-            # additive block, keyed by mechanism name. This is a re-grouping of
-            # the already-serialized candidates (no new computation); the block
-            # is present even when race_condition produced zero candidates, so
-            # lock_order / resource_lifetime state stays visible.
-            mechanism_facts = {
-                one.query: [candidate.to_dict() for candidate in one.candidates]
-                for one in results
-                if one.query in MECHANISM_QUERIES
-            }
         else:
             try:
                 result = defect.run(
@@ -380,6 +493,7 @@ def query_defect_candidates(
     return {
         "query": query,
         "defect_type": defect_type,
+        "category": category,
         "status": "available",
         "candidates": [pair[0] for pair in evidence_pairs],
         "evidence_bundles": [pair[1] for pair in evidence_pairs],

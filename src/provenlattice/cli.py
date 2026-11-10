@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
              "race_condition, null_flow, use_after_free, double_free, "
              "taint_path, error_handling, mismatched_free "
              "(or a matrix key 3.1/4.1/4.2/4.3/9.1/taint)")
+    defect_query_cmd.add_argument(
+        "--category", default=None,
+        help="run one or more defect categories (comma-separated): "
+             "memory, concurrency, dataflow, reliability, all; "
+             "mutually exclusive with --type")
     defect_query_cmd.add_argument("--subject", default=None)
     defect_query_cmd.add_argument("--max-hops", type=int, default=64)
     defect_query_cmd.add_argument("--max-paths", type=int, default=8)
@@ -216,7 +221,8 @@ def run(args: argparse.Namespace) -> dict:
     if args.command == "defect":
         try:
             return query_defect_candidates(
-                args.repo, defect_type=args.type, subject=args.subject,
+                args.repo, defect_type=args.type, category=args.category,
+                subject=args.subject,
                 max_hops=args.max_hops, max_paths=args.max_paths,
                 max_candidates=args.max_candidates, database=database,
             )
@@ -225,6 +231,7 @@ def run(args: argparse.Namespace) -> dict:
                 "status": "failed",
                 "error": {"code": error.code, "detail": error.detail},
                 "defect_type": args.type,
+                "category": args.category,
             }
     if args.command == "concurrency-profile":
         from .concurrency_profile import run_concurrency_profile

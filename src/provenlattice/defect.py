@@ -107,9 +107,11 @@ USE_AFTER_FREE = "use_after_free"
 DOUBLE_FREE = "double_free"
 TAINT_PATH = "taint_path"
 ERROR_HANDLING = "error_handling"
+MISMATCHED_FREE = "mismatched_free"
 QUERY_NAMES = (
     RESOURCE_LIFETIME, LOCK_ORDER, RACE_CONDITION,
     NULL_FLOW, USE_AFTER_FREE, DOUBLE_FREE, TAINT_PATH, ERROR_HANDLING,
+    MISMATCHED_FREE,
 )
 
 # The matrix keys the stage 6 queries answer. `taint_path` has no matrix family:
@@ -123,6 +125,13 @@ DOUBLE_FREE_KEY = "4.2"
 USE_AFTER_FREE_KEY = "4.3"
 TAINT_KEY = "taint"
 ERROR_HANDLING_KEY = "9.1"
+# The mismatched-free query has no matrix number, for the same reason
+# `taint_path` has none: `defect-evidence-matrix-v1.md` is not in this
+# repository, so the M11 slot (between 4.3 and 4.5) cannot be pinned to a
+# number without inventing one. The key is a *name* rather than a matrix
+# number, and `defect_patterns.toml` carries no row for it, exactly like
+# `taint` (see the header note there).
+MISMATCHED_FREE_KEY = "mismatch"
 
 # Confidence is a *band*, not a measurement: it says which of the three states
 # the candidate landed in and how much of the pattern's decisive predicate the
@@ -141,6 +150,13 @@ RACE_CONFIDENCE = {0: 0.5, 1: 0.4, 2: 0.3}
 NULL_FLOW_CONFIDENCE = {RESOLVED: 0.5, AMBIGUOUS: 0.3, UNRESOLVED: 0.1}
 USE_AFTER_FREE_CONFIDENCE = {RESOLVED: 0.5, AMBIGUOUS: 0.3, UNRESOLVED: 0.1}
 DOUBLE_FREE_CONFIDENCE = {RESOLVED: 0.5, AMBIGUOUS: 0.3, UNRESOLVED: 0.1}
+# A mismatched release is a declared-pair violation, not a flow fact: the band
+# tracks how much of the decisive predicate (same object, reachable, both
+# halves declared) the graph could answer, so `resolved` means the release and
+# its acquire share a resolved identity and the graph confirmed one reaches the
+# other. It reads the contract table for the verdict itself, which is why the
+# band mirrors the other DFG queries rather than sitting with `resource_lifetime`.
+MISMATCHED_FREE_CONFIDENCE = {RESOLVED: 0.5, AMBIGUOUS: 0.3, UNRESOLVED: 0.1}
 TAINT_CONFIDENCE = {RESOLVED: 0.3, AMBIGUOUS: 0.2}
 # Two states, not three, and the absence of `unresolved` is a fact about the
 # query rather than an omission: its source population is *defined* as the calls
@@ -264,6 +280,11 @@ _MISSING_ALIASING = (
 _MISSING_RELEASE_IN_CALLEE = (
     "a release performed inside a callee: the graph only sees RELEASE points "
     "in the method it walked"
+)
+_MISSING_RELEASE_MATCH = (
+    "the full release-path contract: whether the released pointer reached this "
+    "release through an alias or a callee the graph does not model, so a pair "
+    "is checked on the acquire and release spellings alone"
 )
 _MISSING_ERROR_PATH = (
     "whether the error path is reachable in practice: the graph reports the "
@@ -466,7 +487,7 @@ def query_for(defect_key: str) -> str:
 
 
 # The two structures every query reads off the published graph, named so the
-# eight signatures that take them stay readable. Both are pure functions of
+# nine signatures that take them stay readable. Both are pure functions of
 # `(events, edges)`, and neither is written to after construction -- see
 # `_published_graph` for what that buys.
 Points = dict[str, dict[str, Any]]
@@ -492,7 +513,7 @@ def run(
     truth about what each query honours.
 
     `points` and `adjacency` are the one pair every query shares. A caller
-    running all eight -- `GraphQuery.get_defect_candidates(defect_type="all")`
+    running all nine -- `GraphQuery.get_defect_candidates(defect_type="all")`
     does -- builds them once and hands them in; a caller running one leaves
     them `None` and that query builds its own pair, which is what a test
     driving a single query directly has always done.
@@ -506,6 +527,7 @@ def run(
         DOUBLE_FREE: double_free,
         TAINT_PATH: taint_path,
         ERROR_HANDLING: error_handling,
+        MISMATCHED_FREE: mismatched_free,
     }
     try:
         function = functions[query]
@@ -3512,7 +3534,7 @@ def _disqualification_coverage(
 ) -> dict[str, Any]:
     """The elimination half of a stage 6 coverage block.
 
-    The same three keys the contracts layer uses, so the eight queries have one
+    The same three keys the contracts layer uses, so the nine queries have one
     schema and a comparison column does not need a per-query reader.
     """
     return {
@@ -4778,6 +4800,339 @@ def _double_free_candidate(
             "methods": [item for item in [_method_name(second, names)] if item],
             "exit_point": "",
         },
+    )
+
+
+def _mismatch_verdict(
+    contracts: ContractTable, acquire: str, release: str
+) -> str:
+    """The three-state allocator-pair verdict: `valid`, `mismatch`, `unknown`.
+
+    `is_valid_pair` alone collapses "declared elsewhere" and "not declared",
+    so the verdict is built from `paired_releases` and `acquires_for`: only
+    when *both* halves are declared can the two disagree and be called a
+    mismatch. An unknown half -- an acquire nobody paired, or a release nobody
+    declared -- fails closed to `unknown` rather than being judged, which is
+    the layer's "an empty answer is nothing declared, never an assumed one".
+    """
+    paired = contracts.paired_releases(acquire)
+    released_by = contracts.acquires_for(release)
+    if not paired or not released_by:
+        return "unknown"
+    if contracts.is_valid_pair(acquire, release):
+        return "valid"
+    return "mismatch"
+
+
+def _mismatch_status(
+    alloc: Mapping[str, Any],
+    release: Mapping[str, Any],
+    state: str,
+    *,
+    identity: bool,
+) -> str:
+    """The state one acquire/release pair can carry, on the double-free model.
+
+    `resolved` needs both points to declare the *same* object and the graph to
+    confirm the acquire can reach the release. A pair joined only through a
+    copy annotation is `ambiguous`; so is a pair whose reachability the graph
+    could not answer. Either side without a declaration is `unresolved`.
+    """
+    alloc_key = _identity(alloc, identity=identity)
+    release_key = _identity(release, identity=identity)
+    if not alloc_key or not release_key:
+        return UNRESOLVED
+    if not (alloc.get("subject_decl") and release.get("subject_decl")):
+        return UNRESOLVED
+    if alloc_key != release_key:
+        return AMBIGUOUS
+    if _identity_cap(alloc, identity=identity) or _identity_cap(release, identity=identity):
+        return AMBIGUOUS
+    if state != REACHABLE:
+        return AMBIGUOUS
+    return RESOLVED
+
+
+def _mismatch_candidate(
+    alloc_id: str,
+    release_id: str,
+    alloc: Mapping[str, Any],
+    release: Mapping[str, Any],
+    points: Mapping[str, Mapping[str, Any]],
+    names: Mapping[str, str] | None,
+    status: str,
+    *,
+    identity: bool,
+    reach: _Reachability,
+    max_hops: int,
+    max_paths: int,
+    reach_state: str,
+    acquire_name: str,
+    release_name: str,
+    contracts: ContractTable,
+) -> Candidate:
+    """One mismatched-release candidate, anchored on the *release* point.
+
+    The release is the defect -- the allocation was legitimate -- so the
+    anchor, subject and citation are the release's, and the acquire travels in
+    the facts and metadata as the antecedent. The structured evidence is the
+    pair itself: `allocator_pair` records the two spellings plus the declared
+    partners each table entry would have expected, so a reader can check the
+    mismatch against the declared table rather than a confidence number.
+    """
+    identity_key = _identity(release, identity=identity)
+    owner = str(release.get("owner_symbol_id", ""))
+    paths, truncated = _flow_path(reach, points, alloc_id, release_id, max_hops, max_paths)
+    uncertain: list[dict[str, Any]] = []
+    if not identity_key:
+        uncertain.append(_uncertain(
+            "SUBJECT_UNRESOLVED", decisive=True,
+            detail="the release names no target, so the candidate cannot be attributed",
+        ))
+    elif not (alloc.get("subject_decl") and release.get("subject_decl")):
+        uncertain.append(_uncertain(
+            "IDENTITY_UNKNOWN", decisive=True,
+            detail=(
+                "the acquire or release names no declaration, so the two are "
+                "joined by spelling rather than by object"
+            ),
+            point=release_id, source=_span(release),
+        ))
+    elif identity_key != _identity(alloc, identity=identity):
+        uncertain.append(_uncertain(
+            "ALIAS_PAIR", decisive=True,
+            detail=(
+                "the release is joined to the acquire through a same-statement "
+                "copy annotation, which is a candidate-level alias and not an identity"
+            ),
+            point=alloc_id, source=_span(alloc),
+        ))
+    else:
+        cap = _identity_cap(release, identity=identity)
+        if cap is not None:
+            uncertain.append(_uncertain(
+                cap["fact"], decisive=True, detail=cap["detail"],
+                point=release_id, source=_span(release),
+            ))
+    if reach_state == REACH_UNKNOWN:
+        uncertain.append(_uncertain(
+            "REACH_UNKNOWN", decisive=True,
+            detail=(
+                "the acquire has no position in the control-flow graph, so the "
+                "graph cannot say the release runs after it"
+            ),
+            point=alloc_id, source=_span(alloc),
+        ))
+    steps = [alloc_id, release_id]
+    return Candidate(
+        defect_key=MISMATCHED_FREE_KEY,
+        query=MISMATCHED_FREE,
+        subject={
+            "kind": "release",
+            "name": _identity_display(release),
+            "identity": identity_key,
+            "storage": release.get("subject_storage", ""),
+            "type": release.get("subject_type", ""),
+            "member": release.get("subject_member", ""),
+            "method": _method_name(release, names),
+            "owner_symbol_id": owner,
+        },
+        anchor=release_id,
+        discriminator=(
+            f"{identity_key or 'anonymous'}|{owner}|{_step(alloc)}|{_step(release)}"
+        ),
+        resolution_status=status,
+        confidence=MISMATCHED_FREE_CONFIDENCE[status],
+        facts=tuple(
+            _point_fact(point_id, points[point_id], names)
+            for point_id in steps if _citable(point_id, points)
+        ),
+        uncertain_facts=tuple(uncertain),
+        paths=paths,
+        source_evidence=_source_evidence(steps, points),
+        missing_evidence=(
+            _MISSING_RELEASE_MATCH, _MISSING_ALIASING, _MISSING_RELEASE_IN_CALLEE,
+        ),
+        metadata={
+            "allocator_pair": {
+                "acquire": acquire_name,
+                "release": release_name,
+                "declared_releases": sorted(contracts.paired_releases(acquire_name)),
+                "declared_acquires": sorted(contracts.acquires_for(release_name)),
+            },
+            "acquire": {
+                "point": alloc_id,
+                "source": _span(alloc),
+                "subject": alloc.get("subject", ""),
+                "matched_name": acquire_name,
+            },
+            "release": {
+                "point": release_id,
+                "source": _span(release),
+                "subject": release.get("subject", ""),
+                "matched_name": release_name,
+            },
+            "reach": reach_state,
+            "path_recorded": bool(paths),
+            "paths_truncated": truncated,
+            "anchor_span": {
+                "relative_path": release.get("relative_path", ""),
+                "start_line": release.get("start_line", 0),
+                "end_line": release.get("end_line", 0),
+            },
+            "methods": [item for item in [_method_name(release, names)] if item],
+            "exit_point": "",
+        },
+    )
+
+
+def mismatched_free(
+    events: Iterable[Any],
+    edges: Iterable[Any],
+    *,
+    subject: str | None = None,
+    max_hops: int = 64,
+    max_paths: int = 8,
+    max_candidates: int = 20,
+    names: Mapping[str, str] | None = None,
+    identity: bool = True,
+    defect_keys: Collection[str] | None = None,
+    contracts: ContractTable | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
+) -> DefectQueryResult:
+    """M11 (invalid/mismatched free): an acquire released by a non-paired half.
+
+    A resource produced by a declared acquire half must be released by the
+    paired half; releasing it with any other *declared* spelling is a mismatch
+    verdict. The verdict comes off `allocator_pairs` / `paired_releases` /
+    `acquires_for` / `is_valid_pair` -- the data R1-C wires into a live query
+    for the first time -- and it is three-state, never assumed:
+
+    * both halves declared and paired   -> `valid`, no candidate;
+    * both halves declared, not paired  -> `mismatch`, a candidate with the
+      pair as structured evidence;
+    * either half unknown              -> `unknown`, fail-closed: nothing is
+      judged, because "not declared" is not "declared wrong".
+
+    No graph relation is minted here: the query pairs ALLOC and RELEASE points
+    inside one method on the same identity, with the same intervening-def and
+    reachability eliminations `double_free` uses, and reads the contract table
+    for the verdict only.
+    """
+    points, adjacency = _published_graph(events, edges, points, adjacency)
+    if contracts is None:
+        # No declared table means no pairs to check: fail closed, but say so.
+        return DefectQueryResult(
+            query=MISMATCHED_FREE,
+            candidates=(),
+            coverage={
+                "contracts_available": False,
+                "pair_checks": 0,
+                "population": {},
+                "states": {},
+                "semantic_points": len(points),
+                "semantic_edges": sum(len(item) for item in adjacency.values()),
+                "points_by_type": _points_by_type(points),
+            },
+            truncated=False,
+        )
+    reach = _Reachability(adjacency, points)
+    by_owner = _by_owner(points)
+    alias_groups, may_alias_edges = _alias_groups_with_may_alias(points, edges)
+    population: Counter = Counter()
+    states: Counter = Counter()
+    pair_checks = 0
+    candidates: list[Candidate] = []
+    wanted = _wanted(MISMATCHED_FREE_KEY, defect_keys)
+
+    for owner in sorted(by_owner):
+        point_ids = by_owner[owner]
+        groups = alias_groups.get(owner, {})
+        allocs = [
+            point_id for point_id in point_ids
+            if points[point_id]["event_type"] == "ALLOC" and points[point_id].get("subject")
+        ]
+        releases = [
+            point_id for point_id in point_ids
+            if points[point_id]["event_type"] == "RELEASE" and points[point_id].get("subject")
+        ]
+        if not allocs or not releases:
+            continue
+        definitions: dict[tuple[str, ...], list[tuple[int, str, int]]] = {}
+        for point_id in point_ids:
+            info = points[point_id]
+            if info["event_type"] in DEF_EVENTS:
+                definitions.setdefault(_flow_key(info), []).append(_position(info))
+        for positions in definitions.values():
+            positions.sort()
+        positions_of = {
+            point_id: _position(points[point_id]) for point_id in (*allocs, *releases)
+        }
+        for alloc_id in allocs:
+            alloc = points[alloc_id]
+            acquire_name = str(alloc.get("matched_name", ""))
+            alloc_position = positions_of[alloc_id]
+            roots = _alias_closure(groups, str(alloc["subject"]))
+            between = definitions.get(_flow_key(alloc), ())
+            for release_id in releases:
+                release = points[release_id]
+                release_position = positions_of[release_id]
+                if release_position <= alloc_position:
+                    continue
+                if str(release["subject"]) not in roots:
+                    continue
+                population["same-identity-pair"] += 1
+                if not wanted or (subject is not None and _identity_display(release) != subject):
+                    continue
+                # An intervening definition of the same flow object means this
+                # release frees the *new* value, not this acquire's.
+                index_after = bisect.bisect_right(between, alloc_position)
+                if index_after < len(between) and between[index_after] < release_position:
+                    continue
+                state = reach.state(alloc_id, release_id)
+                if state == DISJOINT:
+                    continue
+                release_name = str(release.get("matched_name", ""))
+                # The three-state contract verdict, read from the declared table.
+                pair_checks += 1
+                verdict = _mismatch_verdict(contracts, acquire_name, release_name)
+                if verdict == "valid":
+                    population["valid-pair"] += 1
+                    continue
+                if verdict == "unknown":
+                    population["unknown-contract"] += 1
+                    continue
+                population["mismatch"] += 1
+                status = _mismatch_status(alloc, release, state, identity=identity)
+                states[status] += 1
+                candidates.append(_mismatch_candidate(
+                    alloc_id, release_id, alloc, release, points, names, status,
+                    identity=identity, reach=reach, max_hops=max_hops,
+                    max_paths=max_paths, reach_state=state,
+                    acquire_name=acquire_name, release_name=release_name,
+                    contracts=contracts,
+                ))
+
+    candidates.sort(key=Candidate.sort_key)
+    truncated = len(candidates) > max_candidates
+    coverage = {
+        "contracts_available": True,
+        "declared_pairs": int(contracts.coverage.get("declared_pairs", 0)),
+        "pair_checks": pair_checks,
+        "population": dict(sorted(population.items())),
+        "states": dict(sorted(states.items())),
+        "candidates": len(candidates),
+        "candidates_by_key": _count_by_key(candidates),
+        "may_alias_edges": may_alias_edges,
+        "max_hops": max_hops,
+        "semantic_points": len(points),
+        "semantic_edges": sum(len(item) for item in adjacency.values()),
+        "points_by_type": _points_by_type(points),
+    }
+    return DefectQueryResult(
+        query=MISMATCHED_FREE, candidates=tuple(candidates[:max_candidates]),
+        coverage=coverage, truncated=truncated,
     )
 
 

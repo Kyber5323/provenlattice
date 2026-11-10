@@ -26,7 +26,7 @@ provenlattice defect /path/to/repo --type double_free --json
 provenlattice defect /path/to/repo --type use_after_free --json
 provenlattice defect /path/to/repo --type null_flow --json
 
-# 全部八类
+# 全部九类
 provenlattice defect /path/to/repo --type all --json
 
 # 带预算限制
@@ -46,6 +46,7 @@ provenlattice defect /path/to/repo --type all \
 | race_condition | — | 共享变量无锁读写 |
 | taint_path | taint | source→sink 传播 |
 | error_handling | 9.1 | 返回值未检查 |
+| mismatched_free | mismatch | 分配器与释放函数不配对（CWE-590/762/763） |
 
 ## 3. 结果 JSON 结构
 

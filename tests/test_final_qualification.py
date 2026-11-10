@@ -1,4 +1,4 @@
-"""Final integration qualification: per-query functional tests for all 8.
+"""Final integration qualification: per-query functional tests for all 9.
 
 Every query gets: positive (known defect), negative (safe code), unknown /
 degraded, stale / missing dependency, candidate traceability, and budget
@@ -23,7 +23,7 @@ from provenlattice.orchestrator import analyze_scope
 ALL_QUERIES = (
     "resource_lifetime", "lock_order", "race_condition",
     "null_flow", "use_after_free", "double_free",
-    "taint_path", "error_handling",
+    "taint_path", "error_handling", "mismatched_free",
 )
 
 
@@ -407,8 +407,62 @@ class TaintPathQualTests(QualificationBase):
         self.assertEqual(env["status"], "stale")
 
 
+class MismatchedFreeQualTests(QualificationBase):
+    POSITIVE = """#include <stdlib.h>
+int mf_pos(int n) {
+    int *p = g_malloc(sizeof(int));
+    if (!p) return -1;
+    free(p);            // g_malloc pairs with g_free, not free
+    return n;
+}
+"""
+    NEGATIVE = """#include <stdlib.h>
+int mf_neg(int n) {
+    int *p = malloc(sizeof(int));
+    if (!p) return -1;
+    free(p);
+    return n;
+}
+"""
+
+    def test_positive_mismatched_release(self) -> None:
+        self.build({"src/t.c": self.POSITIVE})
+        cands = self.candidates("mismatched_free")
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(cands[0]["resolution_status"], "resolved")
+        self.assertEqual(cands[0]["defect_key"], "mismatch")
+        pair = cands[0]["metadata"]["allocator_pair"]
+        self.assertEqual(pair["acquire"], "g_malloc")
+        self.assertEqual(pair["release"], "free")
+
+    def test_negative_declared_pair(self) -> None:
+        self.build({"src/t.c": self.NEGATIVE})
+        self.assertEqual(self.candidates("mismatched_free"), [])
+
+    def test_unknown_release_fails_closed(self) -> None:
+        self.build({"src/t.c": (
+            "#include <stdlib.h>\n"
+            "int f(int n) {\n"
+            "    int *p = malloc(sizeof(int));\n"
+            "    if (!p) return -1;\n"
+            "    cfree(p);\n"
+            "    return n;\n"
+            "}\n")})
+        self.assertEqual(self.candidates("mismatched_free"), [])
+
+    def test_stale_upstream(self) -> None:
+        write(self.root, "src/t.c", self.POSITIVE)
+        full_index(self.root, self.database)
+        analyze_scope(self.root, "src", ("defect",), database=self.database)
+        write(self.root, "src/other.c", "int other(void) { return 1; }\n")
+        incremental_update(self.root, self.database)
+        env = query_defect_candidates(self.root, defect_type="mismatched_free",
+                                      database=self.database)
+        self.assertEqual(env["status"], "stale")
+
+
 class CrossQueryTests(QualificationBase):
-    def test_all_eight_queries_run_without_error(self) -> None:
+    def test_all_nine_queries_run_without_error(self) -> None:
         self.build({"src/all.c": (
             "#include <stdlib.h>\n"
             "#include <pthread.h>\n"
@@ -467,7 +521,7 @@ class CrossQueryTests(QualificationBase):
                 "SELECT COUNT(*) FROM analysis_nodes").fetchone()[0]
             before_edges = conn.execute(
                 "SELECT COUNT(*) FROM analysis_edges").fetchone()[0]
-        # run all 8 queries
+        # run all 9 queries
         for query in ALL_QUERIES:
             query_defect_candidates(self.root, defect_type=query,
                                     database=self.database)
@@ -510,7 +564,8 @@ void eh_store(struct S *s) { s->buf = malloc(64); }
         for table in (defect.RESOURCE_CONFIDENCE, defect.LOCK_ORDER_CONFIDENCE,
                       defect.SELF_DEADLOCK_CONFIDENCE, defect.NULL_FLOW_CONFIDENCE,
                       defect.USE_AFTER_FREE_CONFIDENCE, defect.DOUBLE_FREE_CONFIDENCE,
-                      defect.TAINT_CONFIDENCE, defect.ERROR_HANDLING_CONFIDENCE):
+                      defect.TAINT_CONFIDENCE, defect.ERROR_HANDLING_CONFIDENCE,
+                      defect.MISMATCHED_FREE_CONFIDENCE):
             self.assertGreaterEqual(
                 table[defect.RESOLVED], defect.DEFAULT_CONFIDENCE_THRESHOLD)
 

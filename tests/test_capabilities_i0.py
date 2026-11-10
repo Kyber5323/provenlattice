@@ -57,7 +57,8 @@ class CapabilityContractTests(unittest.TestCase):
         self.assertEqual(record["grade"], "local-only, diagnostic")
         self.assertEqual(record["languages"], ("java",))
         # I2A: defect was partially_implemented (two of eight queries);
-        # I2B1+overnight: all eight queries are ported (implemented).
+        # I2B1+overnight: all eight queries are ported (implemented), and
+        # R1-C (issue #65) adds mismatched_free as the ninth.
         self.assertEqual(
             {feature for feature, record in CAPABILITY_CONTRACT.items()
              if record["status"] == "registered"},
@@ -67,7 +68,7 @@ class CapabilityContractTests(unittest.TestCase):
     def test_defect_capability_is_fully_implemented(self) -> None:
         record = CAPABILITY_CONTRACT["defect"]
         self.assertEqual(record["status"], "implemented")
-        self.assertEqual(len(record["supported_queries"]), 8)
+        self.assertEqual(len(record["supported_queries"]), 9)
         self.assertEqual(record["analyzer_ids"], ())
         self.assertTrue(record.get("query_time"))
         self.assertEqual(record["grade"], "local-only, diagnostic")

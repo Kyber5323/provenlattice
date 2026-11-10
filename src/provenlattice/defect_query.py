@@ -17,7 +17,6 @@ calibrated defect probability.
 
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 
 from . import contracts, defect
@@ -223,16 +222,6 @@ def query_defect_candidates(
             for row in store.storage.rows(
                 "SELECT id, signature FROM nodes WHERE kind IN ('Function','Method')")
         }
-        # The CALLS raw references: a call's callee name lives here, joined on
-        # (file_id, owner_symbol_id, start_line); the contract table's join keeps
-        # only keys that name one callee, so unresolved / ambiguous / indirect
-        # calls stay unknown ("") and never compose.
-        callee_names, _ambiguous_spans = contracts._callees(
-            store.storage.rows(
-                "SELECT file_id, owner_symbol_id, start_line, raw_name "
-                "FROM raw_references WHERE reference_type='CALLS'")
-        )
-        callees = dataclasses.replace(contracts.EMPTY, callees=callee_names)
         for row in store.storage.rows(
             "SELECT analysis_node_id, kind, payload FROM analysis_nodes "
             "WHERE feature='sparse_cfg:cpp'"
@@ -283,6 +272,22 @@ def query_defect_candidates(
             "events": len(events), "edges": len(control_edges),
         }
 
+        # R1-C: assemble the *full* contract table once and hand it to the
+        # queries that read it. The CALLS raw references carry a call's callee
+        # name, joined on (file_id, owner_symbol_id, start_line); the join keeps
+        # only keys that name one callee, so unresolved / ambiguous / indirect
+        # calls stay unknown ("") and never compose. `resource_lifetime` reads
+        # `sinks` / `wrappers` / `consumes` for its owner rulings, and
+        # `mismatched_free` reads `allocator_pairs` for the pair verdict.
+        contract_table = contracts.build(
+            events, control_edges,
+            references=store.storage.rows(
+                "SELECT file_id, owner_symbol_id, start_line, raw_name "
+                "FROM raw_references WHERE reference_type='CALLS'"),
+            names=names, signatures=signatures,
+            declared=contracts.load_declared(),
+        )
+
         query = defect_type
         if defect_type in ("all", ""):
             # "all" over the I2A surface means the two ported queries; PR's
@@ -296,7 +301,8 @@ def query_defect_candidates(
                     query_name, events, control_edges,
                     subject=subject, max_hops=max_hops, max_paths=max_paths,
                     max_candidates=max_candidates, names=names,
-                    callees=callees, signatures=signatures,
+                    callees=contract_table, signatures=signatures,
+                    contracts=contract_table,
                 )
                 results.append(one)
                 truncated = truncated or one.truncated
@@ -325,7 +331,8 @@ def query_defect_candidates(
                     query, events, control_edges,
                     subject=subject, max_hops=max_hops, max_paths=max_paths,
                     max_candidates=max_candidates, names=names,
-                    callees=callees, signatures=signatures,
+                    callees=contract_table, signatures=signatures,
+                    contracts=contract_table,
                 )
             except ValueError as error:
                 raise AnalysisRequestError(

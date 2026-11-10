@@ -28,14 +28,16 @@
 # lacks; `candidate_missing_events()` / `candidate_missing_relations()` report
 # what *candidate generation* still lacks. Every list below is sorted.
 #
-# One query has no row here at all: `taint_path`. Its defect key is `taint`,
-# which is a name and not a matrix number, and every key in this file is a
-# matrix number. Giving it a row would mean either inventing a number or
-# filing it under one it does not answer, so the query is addressed by its
-# query name (`--type taint_path`) and not by a key -- a deliberate asymmetry,
+# Two queries have no row here at all: `taint_path` and `mismatched_free`.
+# Their defect keys (`taint`, `mismatch`) are names, not matrix numbers, and
+# every key in this file is a matrix number. Giving them a row would mean
+# either inventing a number or filing them under one they do not answer, so
+# each is addressed by its query name (``--type taint_path`` /
+# ``--type mismatched_free``) and not by a key -- a deliberate asymmetry,
 # pinned by a test. The matrix's own line on taint (:286) puts the analysis
 # this query approximates outside V2, and that line is not changed by an
-# implementation existing.
+# implementation existing; `mismatched_free`'s matrix slot (M11) is not
+# pinned here because the matrix document is not in this repository.
 #
 # The 9.2/9.3/9.4 rows below carry no `requires`, and that emptiness is not the
 # claim "nothing is needed": the matrix expanded its required-events column for

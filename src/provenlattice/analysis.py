@@ -153,7 +153,7 @@ CAPABILITY_CONTRACT: dict[str, dict] = {
         "supported_queries": (
             "resource_lifetime", "lock_order", "race_condition",
             "null_flow", "use_after_free", "double_free", "taint_path",
-            "error_handling",
+            "error_handling", "mismatched_free",
         ),
         "query_time": True,
         "grade": "local-only, diagnostic",

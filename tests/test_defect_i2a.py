@@ -575,6 +575,146 @@ class MayAliasConsumptionTests(DefectTestBase):
         self.assertEqual(self._dfg_edge_count(), before)
 
 
+class MismatchedFreeTests(DefectTestBase):
+    """R1-C: mismatched_free reads the declared allocator pairs.
+
+    The verdict is read off ``allocator_pairs`` / ``paired_releases`` /
+    ``acquires_for`` / ``is_valid_pair`` -- the declared data ``contracts.toml``
+    ships -- and is three-state, never assumed: both halves declared and paired
+    is ``valid`` (no candidate), both declared and not paired is ``mismatch``
+    (a candidate whose ``metadata.allocator_pair`` is the structured evidence),
+    and an unknown half fails closed to ``unknown`` (no candidate). Reading the
+    declared table mints no graph relation.
+    """
+
+    def _mismatch_candidates(self) -> list[dict]:
+        env = self.query("mismatched_free")
+        self.assertEqual(env["status"], "available", env.get("reason"))
+        self.assertTrue(env["coverage"]["contracts_available"])
+        self.assertGreater(env["coverage"]["declared_pairs"], 0)
+        return [c for c in env["candidates"] if c["query"] == "mismatched_free"]
+
+    def _dfg_edge_count(self) -> int:
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM analysis_edges WHERE feature='sparse_dfg:cpp'"
+            ).fetchone()
+        return int(row[0])
+
+    def test_declared_pair_is_not_a_mismatch(self) -> None:
+        # malloc <-> free is a declared pair: the query reads it and judges the
+        # release valid, so no candidate (positive control).
+        self.build(
+            "#include <stdlib.h>\n"
+            "int f(int n) {\n"
+            "    int *p = malloc(sizeof(int));\n"
+            "    if (!p) return -1;\n"
+            "    free(p);\n"
+            "    return n;\n"
+            "}\n")
+        self.assertEqual(self._mismatch_candidates(), [])
+
+    def test_mismatched_release_produces_structured_evidence(self) -> None:
+        # g_malloc is paired with g_free, not free: a declared acquire released
+        # by the wrong declared half is a mismatch candidate carrying the pair
+        # as structured evidence -- not a confidence number alone.
+        self.build(
+            "#include <stdlib.h>\n"
+            "int f(int n) {\n"
+            "    int *p = g_malloc(sizeof(int));\n"
+            "    if (!p) return -1;\n"
+            "    free(p);\n"
+            "    return n;\n"
+            "}\n")
+        cands = self._mismatch_candidates()
+        self.assertEqual(len(cands), 1)
+        cand = cands[0]
+        self.assertEqual(cand["defect_key"], "mismatch")
+        self.assertEqual(cand["resolution_status"], "resolved")
+        self.assertEqual(cand["subject"]["name"], "p")
+        self.assertEqual(cand["subject"]["kind"], "release")
+        # the anchor is the release (the defect), not the acquire
+        self.assertTrue(cand["anchor"].startswith("event:"))
+        # two facts: the acquire and the release, each with its matched name
+        events = [fact["event"] for fact in cand["facts"]]
+        self.assertEqual(events, ["ALLOC", "RELEASE"])
+        names = [fact["matched_name"] for fact in cand["facts"]]
+        self.assertEqual(names, ["g_malloc", "free"])
+        # structured evidence: the pair and its declared alternatives
+        pair = cand["metadata"]["allocator_pair"]
+        self.assertEqual(pair["acquire"], "g_malloc")
+        self.assertEqual(pair["release"], "free")
+        # g_malloc's only declared partner is g_free, not free...
+        self.assertEqual(pair["declared_releases"], ["g_free"])
+        # ...and free's declared partners include malloc but not g_malloc.
+        self.assertIn("malloc", pair["declared_acquires"])
+        self.assertNotIn("g_malloc", pair["declared_acquires"])
+
+    def test_mismatch_in_the_other_direction(self) -> None:
+        # a malloc resource freed by g_free (the wrong declared half) is the
+        # mirror image: still a mismatch, anchored on g_free.
+        self.build(
+            "#include <stdlib.h>\n"
+            "int f(int n) {\n"
+            "    int *p = malloc(sizeof(int));\n"
+            "    if (!p) return -1;\n"
+            "    g_free(p);\n"
+            "    return n;\n"
+            "}\n")
+        cands = self._mismatch_candidates()
+        self.assertEqual(len(cands), 1)
+        pair = cands[0]["metadata"]["allocator_pair"]
+        self.assertEqual(pair["acquire"], "malloc")
+        self.assertEqual(pair["release"], "g_free")
+        # malloc's only declared partner is free, not g_free...
+        self.assertEqual(pair["declared_releases"], ["free"])
+        # ...and g_free's declared partners are the glib allocators, not malloc.
+        self.assertIn("g_malloc", pair["declared_acquires"])
+        self.assertNotIn("malloc", pair["declared_acquires"])
+
+    def test_unknown_release_fails_closed(self) -> None:
+        # cfree is in the RELEASE vocabulary but is not a declared pair half:
+        # the verdict is unknown, and nothing is judged (fail-closed).
+        self.build(
+            "#include <stdlib.h>\n"
+            "int f(int n) {\n"
+            "    int *p = malloc(sizeof(int));\n"
+            "    if (!p) return -1;\n"
+            "    cfree(p);\n"
+            "    return n;\n"
+            "}\n")
+        self.assertEqual(self._mismatch_candidates(), [])
+
+    def test_undeclared_acquire_fails_closed(self) -> None:
+        # strdupa is in the ALLOC vocabulary but is not a declared pair half:
+        # the acquire is unknown, so the pair cannot be judged and fails closed.
+        self.build(
+            "#include <stdlib.h>\n"
+            "#include <string.h>\n"
+            "int f(const char *s) {\n"
+            "    char *p = strdupa(s);\n"
+            "    free(p);\n"
+            "    return 0;\n"
+            "}\n")
+        self.assertEqual(self._mismatch_candidates(), [])
+
+    def test_mismatched_free_mints_no_edges(self) -> None:
+        # reading the declared table is query-time only: the query mints no
+        # allocator graph relation (hallucinated edge = 0) on either a valid or
+        # a mismatched fixture.
+        self.build(
+            "#include <stdlib.h>\n"
+            "int f(int n) {\n"
+            "    int *p = g_malloc(sizeof(int));\n"
+            "    if (!p) return -1;\n"
+            "    free(p);\n"
+            "    return n;\n"
+            "}\n")
+        before = self._dfg_edge_count()
+        self.assertEqual(len(self._mismatch_candidates()), 1)
+        self.assertEqual(self._dfg_edge_count(), before)
+
+
 class ServiceContractTests(DefectTestBase):
     def test_default_index_never_runs_defect(self) -> None:
         write(self.root, "src/plain.c",
@@ -614,7 +754,7 @@ class ServiceContractTests(DefectTestBase):
             "#include <stdlib.h>\n"
             "int r01(int n) { char *p = malloc(8); free(p); return n; }\n")
         from provenlattice.analysis_query import AnalysisRequestError
-        # all eight queries are now implemented; an unknown type still raises
+        # all nine queries are now implemented; an unknown type still raises
         with self.assertRaises(AnalysisRequestError) as caught:
             self.query("nonexistent_query")
         self.assertEqual(caught.exception.code, "unknown_defect_query")

@@ -76,7 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--type", default="all",
         help="defect query: all, or one of resource_lifetime, lock_order, "
              "race_condition, null_flow, use_after_free, double_free, "
-             "taint_path, error_handling (or a matrix key 3.1/4.1/4.2/4.3/9.1/taint)")
+             "taint_path, error_handling, mismatched_free "
+             "(or a matrix key 3.1/4.1/4.2/4.3/9.1/taint)")
     defect_query_cmd.add_argument("--subject", default=None)
     defect_query_cmd.add_argument("--max-hops", type=int, default=64)
     defect_query_cmd.add_argument("--max-paths", type=int, default=8)

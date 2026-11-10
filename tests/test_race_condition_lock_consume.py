@@ -83,9 +83,9 @@ void *reader(void *arg) {
 }
 """
 
-# std::lock_guard: RAII releases implicitly at scope exit; the shared producer
-# excludes it from held_locks, so even a same-mutex guard pair is not
-# discharged as protected.
+# std::lock_guard: the two accesses sit inside their guards' lexical scope, so
+# they are held (``raii_scope_end``, issue #69) and a same-mutex guard pair now
+# discharges as SAME_LOCK-protected.
 RAII_SAME_LOCK = r"""
 #include <mutex>
 std::mutex m;
@@ -186,8 +186,9 @@ void *reader(void *arg) {
 }
 """
 
-# RAII scope end is not materialized yet (#69). The access after the inner
-# scope must stay ambiguous rather than inheriting the guard to method exit.
+# RAII scope end IS materialized (#69): the guard is held only within its inner
+# block, so the access after the closing brace must stay ambiguous rather than
+# inheriting the guard to method exit.
 RAII_SCOPE_ENDED_BEFORE_ACCESS = r"""
 #include <mutex>
 std::mutex m;
@@ -216,8 +217,11 @@ class RaceConditionConsumeTests(unittest.TestCase):
         self.assertIn("DIFFERENT_LOCK", relations)
         self.assertNotIn("SAME_LOCK", relations)
 
-    def test_std_lock_guard_raii_not_discharged(self):
-        self.assertEqual(len(_races(RAII_SAME_LOCK, "src/t.cpp")), 1)
+    def test_std_lock_guard_raii_same_lock_discharges(self):
+        # Pre-#69 this pair was not discharged (``raii=True`` was never held);
+        # with ``raii_scope_end`` the accesses are held within their guards, so
+        # the same-mutex pair discharges as protected.
+        self.assertEqual(_races(RAII_SAME_LOCK, "src/t.cpp"), [])
 
     def test_non_atomic_rmw_still_flags(self):
         self.assertEqual(len(_races(NON_ATOMIC_RMW)), 1)

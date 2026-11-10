@@ -352,6 +352,7 @@ def query_defect_candidates(
         lockset: dict[str, Any] | None = None
         if defect_type in ("all", "", defect.RACE_CONDITION):
             lockset = build_access_lockset(events, lockset_edges, lock_facts)
+        access_locksets = lockset["access_locksets"] if lockset else None
 
         started_payload = {
             "events": len(events), "edges": len(control_edges),
@@ -389,6 +390,7 @@ def query_defect_candidates(
                     max_candidates=max_candidates, names=names,
                     callees=contract_table, signatures=signatures,
                     contracts=contract_table, lock_facts=lock_facts,
+                    access_locksets=access_locksets,
                 )
                 results.append(one)
                 truncated = truncated or one.truncated
@@ -419,6 +421,7 @@ def query_defect_candidates(
                     max_candidates=max_candidates, names=names,
                     callees=contract_table, signatures=signatures,
                     contracts=contract_table, lock_facts=lock_facts,
+                    access_locksets=access_locksets,
                 )
             except ValueError as error:
                 raise AnalysisRequestError(

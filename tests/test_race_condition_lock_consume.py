@@ -1,10 +1,10 @@
 """defect --type race_condition consumes shared concurrency lock facts (P0+P1).
 
-The race verdict now consumes the events layer's ``lock_identity`` / ``raii`` /
-``acquire_kind`` facts instead of re-deriving lock identity from the raw LOCK
-subject, and the candidate's ``evidence_v2`` joins the shared producer's
-per-access held-lockset and lock relations on the same access event ids the
-concurrency-profile path uses.
+The race verdict now consumes one bundle produced from the events layer's
+``lock_identity`` / ``raii`` / ``acquire_kind`` facts instead of maintaining a
+second lock analysis, and the candidate's ``evidence_v2`` joins that producer's
+per-access held-lockset, lock relations, and competing-access pairs on the same
+access event ids the concurrency-profile path uses.
 
 These tests pin the acceptance matrix that was previously unverifiable:
 wrong_lock, std::lock_guard (RAII), non_atomic_rmw, the control case (a single
@@ -167,9 +167,44 @@ void *reader(void *arg) {
 }
 """
 
+# A syntactically nearby mutex is not protection after its explicit release.
+EXPLICIT_UNLOCK_BEFORE_ACCESS = r"""
+#include <pthread.h>
+pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+int shared = 0;
+void *writer(void *arg) {
+    pthread_mutex_lock(&m);
+    pthread_mutex_unlock(&m);
+    shared = 1;
+    return NULL;
+}
+void *reader(void *arg) {
+    pthread_mutex_lock(&m);
+    pthread_mutex_unlock(&m);
+    int v = shared;
+    return (void *)(long)v;
+}
+"""
+
+# RAII scope end is not materialized yet (#69). The access after the inner
+# scope must stay ambiguous rather than inheriting the guard to method exit.
+RAII_SCOPE_ENDED_BEFORE_ACCESS = r"""
+#include <mutex>
+std::mutex m;
+int shared = 0;
+void writer() {
+    { std::lock_guard<std::mutex> g(m); }
+    shared = 1;
+}
+int reader() {
+    { std::lock_guard<std::mutex> g(m); }
+    return shared;
+}
+"""
+
 
 class RaceConditionConsumeTests(unittest.TestCase):
-    """The race verdict consumes lock_identity / raii / acquire_kind."""
+    """The race verdict consumes the shared producer's bundle."""
 
     def test_control_same_deterministic_lock_discharges(self):
         self.assertEqual(_races(CONTROL), [])
@@ -191,6 +226,18 @@ class RaceConditionConsumeTests(unittest.TestCase):
         self.assertEqual(len(_races(TRYLOCK)), 1)
         self.assertEqual(len(_races(TIMEDLOCK)), 1)
         self.assertEqual(len(_races(SEM_WAIT)), 1)
+
+    def test_explicit_unlock_before_access_is_not_protection(self):
+        races = _races(EXPLICIT_UNLOCK_BEFORE_ACCESS)
+        self.assertEqual(len(races), 1)
+        locksets = races[0]["evidence_v2"]["lock"]["access_locksets"]
+        self.assertTrue(locksets)
+        self.assertTrue(all(not record["held_locks"] for record in locksets))
+
+    def test_raii_inner_scope_end_stays_ambiguous(self):
+        races = _races(RAII_SCOPE_ENDED_BEFORE_ACCESS, "src/t.cpp")
+        self.assertEqual(len(races), 1)
+        self.assertEqual(races[0]["resolution_status"], "ambiguous")
 
 
 class RaceConditionEvidenceTests(unittest.TestCase):
@@ -227,6 +274,21 @@ class RaceConditionEvidenceTests(unittest.TestCase):
         self.assertEqual(held, {frozenset({"lock_a"}), frozenset({"lock_b"})})
         relation_kinds = {r["relation"] for r in lock["relations"]}
         self.assertIn("PROTECTS", relation_kinds)
+
+    def test_competing_access_comes_from_the_same_bundle(self):
+        races = _races(WRONG_LOCK)
+        self.assertEqual(len(races), 1)
+        candidate = races[0]
+        related_ids = {
+            item["event_id"] for item in candidate.get("related_accesses") or ()
+        }
+        competing = candidate["evidence_v2"]["competing_access"]
+        self.assertTrue(competing)
+        for pair in competing:
+            endpoints = {
+                side["access_event_id"] for side in pair.get("accesses") or ()
+            }
+            self.assertEqual(endpoints, related_ids)
 
 
 if __name__ == "__main__":

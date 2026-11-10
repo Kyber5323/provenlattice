@@ -2387,8 +2387,7 @@ def race_condition(
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
     bindings: ParameterBindingTable | None = None,
-    lock_facts: Iterable[Any] | None = None,
-    access_locksets: Iterable[Any] | None = None,
+    race_facts: Mapping[str, Any] | None = None,
     points: Points | None = None,
     adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
@@ -2432,12 +2431,7 @@ def race_condition(
     important shared state this query can see.
     """
     points, adjacency = _published_graph(events, edges, points, adjacency)
-    lock_fact_by_id = _lock_fact_index(lock_facts) if lock_facts is not None else {}
-    held_by_access = _held_by_access(access_locksets)
-    reverse = _reverse_adjacency(adjacency)
-    methods_index = _method_index(
-        points, reverse, identity=identity, lock_fact_by_id=lock_fact_by_id)
-
+    race_fact_index = _race_fact_index(race_facts)
     # The synchronization facilities, by identity. Subtracting them by spelling
     # is what stage 4 did, and it subtracted too much: the LOCK subject and the
     # race subject were both the root of a member path (`index`), so a lock on
@@ -2575,28 +2569,18 @@ def race_condition(
         # The access events ride in the same list for kind and evidence.
         sides: dict[str, tuple[str, bool, bool, dict]] = {}
 
-        def cf_points(point_ids: list[str]) -> list[str]:
-            return [
-                point_id for point_id in point_ids
-                if points[point_id]["event_type"] not in RACE_ACCESS_EVENTS
-            ]
-
         def side(owner: str) -> tuple[str, bool, bool, dict]:
             if owner not in sides:
                 point_ids = methods[owner]
                 kind, decided = _access_kind(points, point_ids)
+                access_event_ids = [
+                    point_id for point_id in point_ids
+                    if points[point_id]["event_type"] in RACE_ACCESS_EVENTS
+                ]
                 sides[owner] = (
                     kind, decided,
                     _touches_atomically(points, point_ids, key, identity=identity),
-                    _protection(
-                        methods_index[owner], points, adjacency, cf_points(point_ids), max_hops,
-                        identity=identity, lock_fact_by_id=lock_fact_by_id,
-                        access_event_ids=[
-                            pid for pid in point_ids
-                            if points[pid]["event_type"] in RACE_ACCESS_EVENTS
-                        ],
-                        held_by_access=held_by_access,
-                    ),
+                    _race_bundle_protection(access_event_ids, race_fact_index),
                 )
             return sides[owner]
 
@@ -2611,10 +2595,8 @@ def race_condition(
                 if atomic_a and atomic_b:
                     disqualified_atomic += 1
                     continue
-                if (
-                    protection_a["status"] == RESOLVED
-                    and protection_b["status"] == RESOLVED
-                    and protection_a["lock"] == protection_b["lock"]
+                if _race_bundle_same_lock(
+                    protection_a, protection_b, race_fact_index
                 ):
                     disqualified_same_lock += 1
                     continue
@@ -2765,6 +2747,117 @@ def _access_kind(
     return "read", False
 
 
+def _race_fact_index(race_facts: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Index shared race facts without recomputing lock state."""
+    if not race_facts:
+        return {}
+    accesses = {
+        str(record.get("access_event_id")): dict(record)
+        for record in race_facts.get("access_locksets") or ()
+        if isinstance(record, Mapping) and record.get("access_event_id")
+    }
+    protects: dict[str, set[str]] = {}
+    same: dict[frozenset[str], frozenset[str]] = {}
+    different: set[frozenset[str]] = set()
+    for relation in race_facts.get("relations") or ():
+        if not isinstance(relation, Mapping):
+            continue
+        kind = relation.get("relation")
+        if kind == "PROTECTS" and relation.get("access_event_id") and relation.get("lock"):
+            protects.setdefault(str(relation["access_event_id"]), set()).add(
+                str(relation["lock"])
+            )
+            continue
+        endpoints = relation.get("access_event_ids") or ()
+        if len(endpoints) != 2:
+            continue
+        pair = frozenset(str(endpoint) for endpoint in endpoints)
+        if len(pair) != 2:
+            continue
+        if kind == "SAME_LOCK":
+            same[pair] = frozenset(str(lock) for lock in relation.get("locks") or ())
+        elif kind == "DIFFERENT_LOCK":
+            different.add(pair)
+    return {
+        "accesses": accesses,
+        "protects": protects,
+        "same": same,
+        "different": different,
+    }
+
+
+def _race_bundle_protection(
+    access_event_ids: Sequence[str], race_fact_index: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return exact common protection for one side, otherwise ambiguous."""
+    accesses = race_fact_index.get("accesses") or {}
+    protects = race_fact_index.get("protects") or {}
+    if not access_event_ids or not accesses:
+        return {
+            "status": AMBIGUOUS, "lock": "", "locks": (), "display": "",
+            "access_event_ids": tuple(access_event_ids),
+            "detail": "no shared access-lockset fact is available",
+        }
+    held_sets: list[set[str]] = []
+    limitations: set[str] = set()
+    for event_id in access_event_ids:
+        record = accesses.get(event_id)
+        if record is None:
+            return {
+                "status": AMBIGUOUS, "lock": "", "locks": (), "display": "",
+                "access_event_ids": tuple(access_event_ids),
+                "detail": f"access-lockset fact is missing for {event_id}",
+            }
+        limitations.update(str(item) for item in record.get("limitation") or () if item)
+        # A held lock is decisive only when the producer also emitted PROTECTS
+        # for this exact access. This fails closed on a partial bundle.
+        held_sets.append(
+            set(str(lock) for lock in record.get("held_locks") or ())
+            & set(protects.get(event_id) or ())
+        )
+    if limitations:
+        return {
+            "status": AMBIGUOUS, "lock": "", "locks": (), "display": "",
+            "access_event_ids": tuple(access_event_ids),
+            "detail": "shared lock facts are limited: " + ", ".join(sorted(limitations)),
+        }
+    common = set.intersection(*held_sets) if held_sets else set()
+    if not common:
+        return {
+            "status": AMBIGUOUS, "lock": "", "locks": (), "display": "",
+            "access_event_ids": tuple(access_event_ids),
+            "detail": "shared producer reports no exact common held lock",
+        }
+    locks = tuple(sorted(common))
+    return {
+        "status": RESOLVED, "lock": locks[0], "locks": locks,
+        "display": ", ".join(locks), "access_event_ids": tuple(access_event_ids),
+        "detail": "held-lockset and PROTECTS agree for every access",
+    }
+
+
+def _race_bundle_same_lock(
+    left: Mapping[str, Any], right: Mapping[str, Any],
+    race_fact_index: Mapping[str, Any],
+) -> bool:
+    """Whether every cross-side access pair has one exact shared lock."""
+    if left.get("status") != RESOLVED or right.get("status") != RESOLVED:
+        return False
+    common = set(left.get("locks") or ()) & set(right.get("locks") or ())
+    if not common:
+        return False
+    same = race_fact_index.get("same") or {}
+    different = race_fact_index.get("different") or set()
+    for left_id in left.get("access_event_ids") or ():
+        for right_id in right.get("access_event_ids") or ():
+            if left_id == right_id:
+                continue
+            pair = frozenset((left_id, right_id))
+            if pair in different or not (set(same.get(pair) or ()) & common):
+                return False
+    return True
+
+
 def _touches_atomically(
     points: Mapping[str, Mapping[str, Any]],
     point_ids: Sequence[str],
@@ -2784,7 +2877,6 @@ def _method_index(
     reverse: Mapping[str, list[str]],
     *,
     identity: bool = True,
-    lock_fact_by_id: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Per-method facts the protection test needs, computed once.
 
@@ -2797,15 +2889,6 @@ def _method_index(
     Entry points are the method's points with no predecessor inside the
     method: edges are intra-owner, so "no incoming edge" is exactly "control
     flow can start here".
-
-    ``unlocks`` is keyed by the same canonical lock identity ``_protection``
-    compares on (the events layer's ``lock_identity``, via ``lock_fact_by_id``,
-    falling back to declaration identity): the holding test blocks an UNLOCK
-    only when it names the same lock the LOCK point did, so the two keys must
-    be spelled identically or a ``pthread_mutex_lock``/``unlock`` pair would
-    read as un-released. A RAII lock (``std::lock_guard``) has no UNLOCK point
-    at all -- its release is implicit at scope exit -- so ``unlocks`` has no
-    entry for it and ``_holds_before`` treats it as held to the method's exit.
     """
     owners: dict[str, list[str]] = {}
     for point_id, info in points.items():
@@ -2825,10 +2908,7 @@ def _method_index(
         for point_id in point_ids:
             info = points[point_id]
             if info["event_type"] == "UNLOCK" and info.get("subject"):
-                unlocks.setdefault(
-                    _lock_identity_key(point_id, info, lock_fact_by_id, identity=identity),
-                    set(),
-                ).add(point_id)
+                unlocks.setdefault(_identity(info, identity=identity), set()).add(point_id)
         index[owner] = {
             "points": sorted(point_ids),
             "entries": entries,
@@ -2866,102 +2946,6 @@ def _blocked_by_lock(
     return not paths
 
 
-# Acquire kinds that never provably hold their mutex for the race query: a
-# ``try``/``timed`` acquire may fail and a ``wait`` is a condition-variable or
-# semaphore block, not a mutex hold. A protection decision can only rest on a
-# ``blocking`` (or RAII) acquire. These values come from the events layer's
-# ``acquire_kind`` fact (analysis_c_events), which the race query now consumes
-# instead of re-deriving.
-_NON_PROTECTIVE_ACQUIRES = frozenset({"try", "timed", "wait"})
-
-
-def _lock_fact_index(lock_facts: Iterable[Any]) -> dict[str, dict[str, Any]]:
-    """events:cpp lock facts keyed by event id, for ``_protection``.
-
-    The events layer and sparse_cfg share one event id per LOCK/UNLOCK operation
-    (``identity.event_id``), so a sparse_cfg lock point looks up its
-    ``acquire_kind`` / ``raii`` / ``lock_identity`` by the same id. This consumes
-    the fact as-is and never re-derives it.
-    """
-    return {
-        fact["event_id"]: dict(fact)
-        for fact in lock_facts
-        if isinstance(fact, Mapping) and fact.get("event_id")
-    }
-
-
-def _lock_identity_key(
-    point_id: str,
-    info: Mapping[str, Any],
-    lock_fact_by_id: Mapping[str, Mapping[str, Any]] | None,
-    *,
-    identity: bool = True,
-) -> str:
-    """The canonical lock identity for a LOCK/UNLOCK point (P1 identity wiring).
-
-    The events layer's ``lock_identity`` is the spelling ``build_access_lockset``
-    joins on for its held-lockset and SAME_LOCK/DIFFERENT_LOCK relations, so it
-    is the canonical identity the race verdict must compare on to agree with the
-    shared producer -- a wrong_lock pair must not read as the same lock, and a
-    same-lock pair must not read as two. When the point does not join to a lock
-    fact (a stale or partial upstream), the declaration identity is the fallback,
-    exactly as before.
-    """
-    fact = (lock_fact_by_id or {}).get(point_id)
-    if fact and fact.get("lock_identity"):
-        return fact["lock_identity"]
-    return _identity(info, identity=identity)
-
-
-def _held_by_access(
-    access_locksets: Iterable[Any] | None,
-) -> dict[str, frozenset[str]]:
-    """The shared producer's per-access held-lockset, keyed by access event id.
-
-    ``build_access_lockset`` already projected lock facts to per-access
-    ``held_locks`` (blocking, subject-exact, non-RAII acquisitions only). The
-    race query reuses that projection instead of re-deriving it: an access event
-    with no control-flow position asks this table which lock was held, and the
-    answer is the producer's ``lock_identity``.
-    """
-    index: dict[str, frozenset[str]] = {}
-    for record in access_locksets or ():
-        if not isinstance(record, Mapping):
-            continue
-        event_id = record.get("access_event_id")
-        if not event_id:
-            continue
-        index[event_id] = frozenset(record.get("held_locks") or ())
-    return index
-
-
-def _common_held_lock(
-    access_event_ids: Sequence[str],
-    held_by_access: Mapping[str, frozenset[str]] | None,
-) -> str:
-    """The single lock every access on one side provably holds, or "".
-
-    ``held_by_access`` is the producer's projection, so this is a consumption of
-    an already-computed fact, not a second dataflow. A side whose accesses hold
-    exactly one common lock is ``resolved`` with that lock; multiple distinct
-    locks (or an access that holds none) leave the honest answer ``ambiguous``,
-    which is the empty string here.
-    """
-    if not held_by_access or not access_event_ids:
-        return ""
-    held: frozenset[str] | None = None
-    for event_id in access_event_ids:
-        locks = held_by_access.get(event_id)
-        if not locks:
-            return ""
-        held = locks if held is None else (held & locks)
-        if not held:
-            return ""
-    if held is not None and len(held) == 1:
-        return next(iter(held))
-    return ""
-
-
 def _protection(
     method: Mapping[str, Any],
     points: Mapping[str, Mapping[str, Any]],
@@ -2970,9 +2954,6 @@ def _protection(
     max_hops: int,
     *,
     identity: bool = True,
-    lock_fact_by_id: Mapping[str, Mapping[str, Any]] | None = None,
-    access_event_ids: Sequence[str] = (),
-    held_by_access: Mapping[str, frozenset[str]] | None = None,
 ) -> dict[str, Any]:
     """Whether one lock dominates every access of a name inside one method.
 
@@ -2992,49 +2973,20 @@ def _protection(
 
     Two approximations are real and named in `missing_evidence`: a lock taken
     by a callee is invisible here, and so is a lock the caller already holds.
-
-    The lock identity is the events layer's `lock_identity` (via
-    `lock_fact_by_id`), which is what `build_access_lockset` joins on, so the
-    verdict and the shared producer agree on SAME_LOCK/DIFFERENT_LOCK. An
-    access event has no control-flow position, so when the side is read/write
-    only the verdict falls back to the producer's already-computed held-lockset
-    (`held_by_access`) rather than claiming nothing can be said.
     """
-    # `acquire_kind` drops the acquires that never provably hold (try/timed/
-    # wait). `raii` is the other half of the fact and is *read* here: a RAII
-    # acquisition (`std::lock_guard guard(m)`, `raii` truthy) releases
-    # implicitly at scope exit -- it has no UNLOCK point -- so it is always a
-    # blocking hold and is kept. Its absence from `method["unlocks"]` is what
-    # makes `_holds_before` below read it as held to the method's exit: that is
-    # the verdict layer's stated answer to "implicit release". (The read/write-
-    # only fallback below does not use this -- it consumes the producer's
-    # `held_locks`, which excludes `raii`; see `_held_by_access`.)
-    lock_points: list[str] = []
-    for lock_point in method["locks"]:
-        fact = (lock_fact_by_id or {}).get(lock_point, {})
-        raii = bool(fact.get("raii"))
-        if not raii and fact.get("acquire_kind") in _NON_PROTECTIVE_ACQUIRES:
-            continue
-        lock_points.append(lock_point)
+    lock_points = method["locks"]
     if not lock_points:
         return {"status": AMBIGUOUS, "lock": "", "display": "", "detail": "no lock in this method"}
     if not accesses:
         # Stage 5A: an access event has no position in the control-flow graph,
-        # so no lock can be tested against it by domination. This must not fall
-        # through to the `all(...)` below -- `all` over an empty sequence is
-        # True, and a subject whose only touches are plain writes (`counter++`)
-        # would read as gated by every lock in the method: a false `resolved`
-        # with the confidence bump to match, on exactly the population the
-        # access layer added.
-        #
-        # P1 closes the gap that "nothing can be said" used to leave open: the
-        # shared producer already projected each access event to its held
-        # lockset, so the verdict asks that projection instead of giving up.
-        # A side whose accesses all hold one common lock is `resolved` with
-        # that lock; otherwise the honest status stays `ambiguous`.
-        common = _common_held_lock(access_event_ids, held_by_access)
-        if common:
-            return {"status": RESOLVED, "lock": common, "detail": "", "display": common}
+        # so no lock can be tested against it. This must not fall through to
+        # the `all(...)` below -- `all` over an empty sequence is True, and a
+        # subject whose only touches are plain writes (`counter++`) would read
+        # as gated by every lock in the method: a false `resolved` with the
+        # confidence bump to match, on exactly the population the access layer
+        # added. "Nothing can be said" is the honest status, and it is
+        # `ambiguous`, not `unresolved` -- the lock subjects are fine; it is
+        # the access that has nothing for the test to reach.
         return {
             "status": AMBIGUOUS, "lock": "", "display": "",
             "detail": "the access has no control-flow point, so nothing can be "
@@ -3042,8 +2994,7 @@ def _protection(
         }
 
     for lock_point in lock_points:
-        lock_key = _lock_identity_key(
-            lock_point, points[lock_point], lock_fact_by_id, identity=identity)
+        lock_key = _identity(points[lock_point], identity=identity)
         if not lock_key:
             continue
         if all(
@@ -3076,10 +3027,7 @@ def _protection(
     ]
     return {
         "status": AMBIGUOUS,
-        "lock": (
-            _lock_identity_key(reachable[0], points[reachable[0]], lock_fact_by_id, identity=identity)
-            if reachable else ""
-        ),
+        "lock": _identity(points[reachable[0]], identity=identity) if reachable else "",
         "display": points[reachable[0]].get("subject", "") if reachable else "",
         # The detail has to match what was actually established: when no lock
         # reaches any access there is no reachability claim to retract.

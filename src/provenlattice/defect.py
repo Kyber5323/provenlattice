@@ -2387,6 +2387,7 @@ def race_condition(
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
     bindings: ParameterBindingTable | None = None,
+    race_facts: Mapping[str, Any] | None = None,
     points: Points | None = None,
     adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
@@ -2430,9 +2431,7 @@ def race_condition(
     important shared state this query can see.
     """
     points, adjacency = _published_graph(events, edges, points, adjacency)
-    reverse = _reverse_adjacency(adjacency)
-    methods_index = _method_index(points, reverse, identity=identity)
-
+    race_fact_index = _race_fact_index(race_facts)
     # The synchronization facilities, by identity. Subtracting them by spelling
     # is what stage 4 did, and it subtracted too much: the LOCK subject and the
     # race subject were both the root of a member path (`index`), so a lock on
@@ -2570,23 +2569,18 @@ def race_condition(
         # The access events ride in the same list for kind and evidence.
         sides: dict[str, tuple[str, bool, bool, dict]] = {}
 
-        def cf_points(point_ids: list[str]) -> list[str]:
-            return [
-                point_id for point_id in point_ids
-                if points[point_id]["event_type"] not in RACE_ACCESS_EVENTS
-            ]
-
         def side(owner: str) -> tuple[str, bool, bool, dict]:
             if owner not in sides:
                 point_ids = methods[owner]
                 kind, decided = _access_kind(points, point_ids)
+                access_event_ids = [
+                    point_id for point_id in point_ids
+                    if points[point_id]["event_type"] in RACE_ACCESS_EVENTS
+                ]
                 sides[owner] = (
                     kind, decided,
                     _touches_atomically(points, point_ids, key, identity=identity),
-                    _protection(
-                        methods_index[owner], points, adjacency, cf_points(point_ids), max_hops,
-                        identity=identity,
-                    ),
+                    _race_bundle_protection(access_event_ids, race_fact_index),
                 )
             return sides[owner]
 
@@ -2601,10 +2595,8 @@ def race_condition(
                 if atomic_a and atomic_b:
                     disqualified_atomic += 1
                     continue
-                if (
-                    protection_a["status"] == RESOLVED
-                    and protection_b["status"] == RESOLVED
-                    and protection_a["lock"] == protection_b["lock"]
+                if _race_bundle_same_lock(
+                    protection_a, protection_b, race_fact_index
                 ):
                     disqualified_same_lock += 1
                     continue
@@ -2753,6 +2745,117 @@ def _access_kind(
         if info["event_type"] in {"ALLOC", "RELEASE"} or info.get("subject_from") == "assignment":
             return "write", False
     return "read", False
+
+
+def _race_fact_index(race_facts: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Index shared race facts without recomputing lock state."""
+    if not race_facts:
+        return {}
+    accesses = {
+        str(record.get("access_event_id")): dict(record)
+        for record in race_facts.get("access_locksets") or ()
+        if isinstance(record, Mapping) and record.get("access_event_id")
+    }
+    protects: dict[str, set[str]] = {}
+    same: dict[frozenset[str], frozenset[str]] = {}
+    different: set[frozenset[str]] = set()
+    for relation in race_facts.get("relations") or ():
+        if not isinstance(relation, Mapping):
+            continue
+        kind = relation.get("relation")
+        if kind == "PROTECTS" and relation.get("access_event_id") and relation.get("lock"):
+            protects.setdefault(str(relation["access_event_id"]), set()).add(
+                str(relation["lock"])
+            )
+            continue
+        endpoints = relation.get("access_event_ids") or ()
+        if len(endpoints) != 2:
+            continue
+        pair = frozenset(str(endpoint) for endpoint in endpoints)
+        if len(pair) != 2:
+            continue
+        if kind == "SAME_LOCK":
+            same[pair] = frozenset(str(lock) for lock in relation.get("locks") or ())
+        elif kind == "DIFFERENT_LOCK":
+            different.add(pair)
+    return {
+        "accesses": accesses,
+        "protects": protects,
+        "same": same,
+        "different": different,
+    }
+
+
+def _race_bundle_protection(
+    access_event_ids: Sequence[str], race_fact_index: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return exact common protection for one side, otherwise ambiguous."""
+    accesses = race_fact_index.get("accesses") or {}
+    protects = race_fact_index.get("protects") or {}
+    if not access_event_ids or not accesses:
+        return {
+            "status": AMBIGUOUS, "lock": "", "locks": (), "display": "",
+            "access_event_ids": tuple(access_event_ids),
+            "detail": "no shared access-lockset fact is available",
+        }
+    held_sets: list[set[str]] = []
+    limitations: set[str] = set()
+    for event_id in access_event_ids:
+        record = accesses.get(event_id)
+        if record is None:
+            return {
+                "status": AMBIGUOUS, "lock": "", "locks": (), "display": "",
+                "access_event_ids": tuple(access_event_ids),
+                "detail": f"access-lockset fact is missing for {event_id}",
+            }
+        limitations.update(str(item) for item in record.get("limitation") or () if item)
+        # A held lock is decisive only when the producer also emitted PROTECTS
+        # for this exact access. This fails closed on a partial bundle.
+        held_sets.append(
+            set(str(lock) for lock in record.get("held_locks") or ())
+            & set(protects.get(event_id) or ())
+        )
+    if limitations:
+        return {
+            "status": AMBIGUOUS, "lock": "", "locks": (), "display": "",
+            "access_event_ids": tuple(access_event_ids),
+            "detail": "shared lock facts are limited: " + ", ".join(sorted(limitations)),
+        }
+    common = set.intersection(*held_sets) if held_sets else set()
+    if not common:
+        return {
+            "status": AMBIGUOUS, "lock": "", "locks": (), "display": "",
+            "access_event_ids": tuple(access_event_ids),
+            "detail": "shared producer reports no exact common held lock",
+        }
+    locks = tuple(sorted(common))
+    return {
+        "status": RESOLVED, "lock": locks[0], "locks": locks,
+        "display": ", ".join(locks), "access_event_ids": tuple(access_event_ids),
+        "detail": "held-lockset and PROTECTS agree for every access",
+    }
+
+
+def _race_bundle_same_lock(
+    left: Mapping[str, Any], right: Mapping[str, Any],
+    race_fact_index: Mapping[str, Any],
+) -> bool:
+    """Whether every cross-side access pair has one exact shared lock."""
+    if left.get("status") != RESOLVED or right.get("status") != RESOLVED:
+        return False
+    common = set(left.get("locks") or ()) & set(right.get("locks") or ())
+    if not common:
+        return False
+    same = race_fact_index.get("same") or {}
+    different = race_fact_index.get("different") or set()
+    for left_id in left.get("access_event_ids") or ():
+        for right_id in right.get("access_event_ids") or ():
+            if left_id == right_id:
+                continue
+            pair = frozenset((left_id, right_id))
+            if pair in different or not (set(same.get(pair) or ()) & common):
+                return False
+    return True
 
 
 def _touches_atomically(

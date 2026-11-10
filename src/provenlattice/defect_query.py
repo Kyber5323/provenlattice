@@ -18,10 +18,14 @@ calibrated defect probability.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Mapping, TypedDict
 
 from . import contracts, defect
 from .analysis import AnalysisStore, dependency_staleness
+from .analysis_concurrency_context import build_concurrency_context
 from .analysis_query import AnalysisRequestError
+from .concurrency_lock_scenarios import build_access_lockset
+from .concurrency_race_scenarios import build_race_scenarios
 from .evidence import DefectEvidenceBundle, assemble_evidence_v2
 from .semantics.vocabulary import load_defect_patterns
 from .storage import SQLiteStorage
@@ -29,6 +33,17 @@ from .storage import SQLiteStorage
 SUPPORTED_DEFECT_QUERIES = tuple(defect.QUERY_NAMES)
 UPSTREAM_FEATURES = ("events:cpp", "sparse_cfg:cpp", "sparse_dfg:cpp")
 CAPABILITY_GRADE = "local-only, diagnostic"
+
+
+class RaceFactBundle(TypedDict):
+    """One producer-owned fact set shared by race verdict and evidence."""
+
+    events: list[dict]
+    lock_facts: list[dict]
+    access_locksets: list[dict]
+    relations: list[dict]
+    competing_access: list[dict]
+    may_parallel: list[dict]
 
 # SUB-06 / R10: the non-race mechanism queries whose already-computed results
 # are exposed as the additive ``mechanism_facts`` block (cwe1123_v2_query_contract.md
@@ -122,6 +137,7 @@ def _run_query_specs(
     names: dict,
     contract_table: object,
     signatures: dict,
+    race_facts: Mapping[str, Any] | None = None,
 ) -> tuple[list, list, bool, dict, dict]:
     """Run ``(query, kwargs)`` specs and merge their results.
 
@@ -139,6 +155,7 @@ def _run_query_specs(
             max_candidates=max_candidates, names=names,
             callees=contract_table, signatures=signatures,
             contracts=contract_table,
+            race_facts=race_facts,
             **extra,
         )
         results.append(one)
@@ -266,6 +283,51 @@ def _gate_mechanism_facts(
     }
 
 
+def _race_related_accesses(
+    candidate: Mapping[str, Any],
+    event_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """The race candidate's access ids, in ``assemble_evidence_v2``'s shape.
+
+    The defect race candidate already names each side's WRITE/READ event in
+    ``metadata["access"][owner].writer_event`` / ``reader_event`` (SUB-02's
+    already-computed ``_access_summary``). This only re-packages those citations
+    into the ``related_accesses`` list the evidence-v2 adapter joins on -- every
+    sub-fact (``access_kind``, ``is_write``, ``owner``, span) is read off the
+    already-materialized sparse-cfg event, never re-derived.
+
+    The events layer and sparse_cfg share one event id per access
+    (``identity.event_id``), so the lockset projection (``build_access_lockset``)
+    joins on the same ids this list exposes.
+    """
+    access_meta = (candidate.get("metadata") or {}).get("access") or {}
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for side in access_meta.values():
+        if not isinstance(side, Mapping):
+            continue
+        for field in ("writer_event", "reader_event"):
+            event_id = side.get(field)
+            if not event_id or event_id in seen:
+                continue
+            event = event_by_id.get(event_id)
+            if event is None:
+                continue
+            seen.add(event_id)
+            annotations = event.get("annotations") or {}
+            items.append({
+                "event_id": event_id,
+                "event_type": event.get("event_type"),
+                "access_kind": annotations.get("access_kind", ""),
+                "is_write": annotations.get("is_write", ""),
+                "owner": event.get("owner_qualified_name")
+                or event.get("owner_symbol_id") or "",
+                "start_line": int(event.get("start_line") or 0),
+                "end_line": int(event.get("end_line") or 0),
+            })
+    return items
+
+
 def query_defect_candidates(
     repo: str | Path,
     *,
@@ -306,6 +368,7 @@ def query_defect_candidates(
             "invalid_request",
             "--type and --category are mutually exclusive; specify exactly one",
         )
+    category_specs = _expand_categories(category) if category else None
     root = Path(repo).resolve()
     database = Path(database).resolve() if database else root / ".provenlattice" / "codegraph.db"
     started_payload: dict = {}
@@ -398,8 +461,69 @@ def query_defect_candidates(
                 "metadata": payload,
             })
 
+        # The events:cpp lock facts the race query now consumes (P0/P1): the
+        # LOCK/UNLOCK vocabulary events carry lock_identity / subject_exact /
+        # acquire_kind / raii, which the sparse_cfg side does not. They join the
+        # shared producer by event id (identity.event_id) and are passed through,
+        # never re-derived.
+        lock_facts: list[dict] = []
+        for row in store.storage.rows(
+            "SELECT analysis_node_id, kind, payload FROM analysis_nodes "
+            "WHERE feature='events:cpp' AND kind IN ('LOCK','UNLOCK')"
+        ):
+            payload = json_loads(row["payload"])
+            lock_facts.append({
+                "event_id": row["analysis_node_id"],
+                "event_type": row["kind"],
+                **payload,
+            })
+
+        # The shared producer's edge shape differs from this service's
+        # control_edges (kind/src_id/dst_id/payload vs relation/src_event_id/
+        # dst_event_id/metadata): a thin field mapping, no algorithm. Only
+        # CONTROL_REACHES edges participate.
+        lockset_edges = [
+            {
+                "src_id": edge["src_event_id"],
+                "dst_id": edge["dst_event_id"],
+                "kind": edge["relation"],
+                "payload": edge["metadata"],
+            }
+            for edge in control_edges
+            if edge["relation"] == "CONTROL_REACHES"
+        ]
+        event_by_id = {event["event_id"]: event for event in events}
+        # Build one shared race-fact bundle lazily. The verdict and Evidence V2
+        # consume this same object; neither maintains a second lock analysis.
+        lockset: dict[str, Any] | None = None
+        race_scenarios: dict[str, Any] | None = None
+        race_facts: RaceFactBundle | None = None
+        race_requested = (
+            defect_type in ("all", "", defect.RACE_CONDITION)
+            and category_specs is None
+        ) or any(
+            query_name == defect.RACE_CONDITION
+            for query_name, _ in (category_specs or ())
+        )
+        if race_requested:
+            lockset = build_access_lockset(events, lockset_edges, lock_facts)
+            concurrency_context = build_concurrency_context(events)
+            race_scenarios = build_race_scenarios(
+                events, concurrency_context, edges=lockset_edges,
+                lock_facts=lock_facts, top_k=None,
+            )
+            race_facts = {
+                "events": events,
+                "lock_facts": lock_facts,
+                "access_locksets": lockset["access_locksets"],
+                "relations": lockset["relations"],
+                "competing_access": race_scenarios["competing_access"],
+                "may_parallel": concurrency_context["may_parallel"],
+            }
+
         started_payload = {
             "events": len(events), "edges": len(control_edges),
+            "lock_facts": len(lock_facts),
         }
 
         # R1-C: assemble the *full* contract table once and hand it to the
@@ -420,12 +544,13 @@ def query_defect_candidates(
 
         query = defect_type
         if category:
-            specs = _expand_categories(category)
+            specs = category_specs or []
             _, candidates, truncated, coverage, mechanism_facts = _run_query_specs(
                 specs, events, control_edges,
                 subject=subject, max_hops=max_hops, max_paths=max_paths,
                 max_candidates=max_candidates, names=names,
                 contract_table=contract_table, signatures=signatures,
+                race_facts=race_facts,
             )
             query = "category " + category + " (" + ", ".join(
                 dict.fromkeys(name for name, _ in specs)) + ")"
@@ -436,6 +561,7 @@ def query_defect_candidates(
                 subject=subject, max_hops=max_hops, max_paths=max_paths,
                 max_candidates=max_candidates, names=names,
                 contract_table=contract_table, signatures=signatures,
+                race_facts=race_facts,
             )
             query = "all (" + ", ".join(SUPPORTED_DEFECT_QUERIES) + ")"
         else:
@@ -445,7 +571,7 @@ def query_defect_candidates(
                     subject=subject, max_hops=max_hops, max_paths=max_paths,
                     max_candidates=max_candidates, names=names,
                     callees=contract_table, signatures=signatures,
-                    contracts=contract_table,
+                    contracts=contract_table, race_facts=race_facts,
                 )
             except ValueError as error:
                 raise AnalysisRequestError(
@@ -486,7 +612,21 @@ def query_defect_candidates(
         )
         candidate_dict = {**candidate.to_dict(),
                           "evidence_id": evidence.evidence_id}
-        candidate_dict["evidence_v2"] = assemble_evidence_v2(candidate_dict)
+        if candidate.query == defect.RACE_CONDITION and race_facts is not None:
+            # P1: the race candidate now exposes its access citations and the
+            # shared producer's held-lockset/relations, so evidence_v2's access
+            # and lock blocks join on the same access event ids the
+            # concurrency-profile path already uses.
+            candidate_dict["related_accesses"] = _race_related_accesses(
+                candidate_dict, event_by_id)
+            candidate_dict["evidence_v2"] = assemble_evidence_v2(
+                candidate_dict,
+                access_locksets=race_facts["access_locksets"],
+                lock_relations=race_facts["relations"],
+                competing_access=race_facts["competing_access"],
+            )
+        else:
+            candidate_dict["evidence_v2"] = assemble_evidence_v2(candidate_dict)
         evidence_pairs.append((candidate_dict, bundle.to_dict()))
 
     patterns = {p.key: p for p in load_defect_patterns()}

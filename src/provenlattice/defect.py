@@ -70,11 +70,15 @@ from .sparsecfg import (
 # two definitions of one identity drift, and the drift would show up as a
 # query that silently stops finding an intervening definition.
 from .sparsedfg import (
+    CLASS_INPUT_TO_SINK,
     DATA_FLOW_TO,
     DEF_EVENTS,
     USE_EVENTS,
     ParameterBindingTable,
+    ReturnBindingTable,
     _flow_key,
+    bind_parameters,
+    bind_returns,
 )
 
 RESOLVED = "resolved"
@@ -3598,6 +3602,224 @@ _ARG_ROOT_NOT_LISTED = {
 }
 
 
+def _receiver_dereferences(
+    points: Mapping[str, Mapping[str, Any]],
+    call_site: str,
+    receive_subject: str,
+    identity: bool,
+) -> list[str]:
+    """The caller's dereferences of a call result, positioned after the call.
+
+    `call_site` is the caller's CALL point (whose ``subject`` is the lvalue the
+    result was assigned to -- ``subject_from == "assignment"``); each callee
+    RETURN composed to it names ``receive_subject``, the spelling the caller
+    wrote. A dereference of that spelling, in the caller's own method, at or
+    after the call's line, is where the composed value is actually read
+    through -- the null_flow cross-function anchor. The join is on the
+    receiver's identity (not just the spelling) so a shadowed local does not
+    become someone else's dereference.
+    """
+    call_info = points.get(call_site)
+    if call_info is None:
+        return []
+    caller_owner = str(call_info.get("owner_symbol_id", ""))
+    call_line = int(str(call_info.get("start_line", 0) or 0))
+    receiver_identity = _identity(call_info, identity=identity)
+    result: list[str] = []
+    for point_id, info in points.items():
+        if str(info.get("owner_symbol_id", "")) != caller_owner:
+            continue
+        if info.get("event_type") != "DEREFERENCE":
+            continue
+        if int(str(info.get("start_line", 0) or 0)) < call_line:
+            continue
+        if info.get("subject") == receive_subject or (
+            receiver_identity and _identity(info, identity=identity) == receiver_identity
+        ):
+            result.append(point_id)
+    return result
+
+
+def _compose_cross_function_null(
+    points: Points,
+    flow_edges: Sequence[tuple[str, str, Mapping[str, Any]]],
+    param_bindings: ParameterBindingTable | None,
+    return_bindings: ReturnBindingTable | None,
+    *,
+    names: Mapping[str, str] | None,
+    identity: bool,
+    subject: str | None,
+) -> list[Candidate]:
+    """V2-R1 R1-A: cross-function null candidates from the composition tables.
+
+    Two shapes, both fail-closed by the tables they read. ``bind_parameters``
+    and ``bind_returns`` already drop unresolved / ambiguous / indirect calls
+    (a name-level join), so this function adds nothing the tables did not
+    prove -- it only connects each bound composition to the null/alloc source
+    the *existing* data-flow edges already recorded.
+
+    * caller arg -> callee param: an ``input_to_sink`` edge carries the
+      caller's source definition to the CALL point; the binding names the
+      callee's parameter dereference (the DEREFERENCE twin of its through-write
+      WRITE). The candidate anchors there.
+    * callee return -> caller receiver: the callee's own ``value_flow`` /
+      ``alloc_to_use`` edge names the null/alloc source behind the RETURN
+      point; the binding names the caller's receiver, whose DEREFERENCE after
+      the call is the candidate's anchor.
+
+    No edge is minted and no relation is added; the candidates are `ambiguous`
+    by construction because the callee join is short-name-level even when it
+    resolves to one symbol.
+    """
+    input_by_call: dict[tuple[str, str], list[str]] = {}
+    flow_by_dst: dict[str, list[tuple[str, Mapping[str, Any]]]] = {}
+    for source_id, dst_id, meta in flow_edges:
+        flow_by_dst.setdefault(dst_id, []).append((source_id, meta))
+        if str(meta.get("flow_class", "")) == CLASS_INPUT_TO_SINK:
+            input_by_call.setdefault(
+                (dst_id, str(meta.get("arg_root", ""))), []
+            ).append(source_id)
+
+    def source_kind(point_id: str) -> str | None:
+        info = points.get(point_id)
+        if info is None:
+            return None
+        if info.get("null_source") == "true":
+            return NULL_TO_DEREF
+        if info.get("event_type") == "ALLOC":
+            return "alloc_to_deref"
+        return None
+
+    candidates: list[Candidate] = []
+
+    def emit(
+        source_id: str,
+        boundary_ids: Sequence[str],
+        target_id: str,
+        kind: str,
+        cross: str,
+        record: Mapping[str, Any],
+    ) -> None:
+        target = points.get(target_id)
+        if target is None:
+            return
+        if subject is not None and _identity_display(target) != subject:
+            return
+        identity_key = _identity(target, identity=identity)
+        owner = str(target.get("owner_symbol_id", ""))
+        uncertain: list[dict[str, Any]] = [
+            _uncertain(
+                "INTERPROC_COMPOSITION", decisive=True,
+                detail=(
+                    "the null value crosses a function boundary joined by short "
+                    "name; even a unique symbol is a name-level proxy rather than "
+                    "a resolved call-graph edge"
+                ),
+            )
+        ]
+        cap = _identity_cap(target, identity=identity)
+        if cap is not None:
+            uncertain.append(_uncertain(
+                cap["fact"], decisive=True, detail=cap["detail"],
+                point=target_id, source=_span(target),
+            ))
+        steps = [source_id, *boundary_ids, target_id]
+        source_info = points.get(source_id, {})
+        candidates.append(Candidate(
+            defect_key=NULL_FLOW_KEY,
+            query=NULL_FLOW,
+            subject={
+                "kind": "dereference",
+                "name": _identity_display(target),
+                "identity": identity_key,
+                "storage": target.get("subject_storage", ""),
+                "type": target.get("subject_type", ""),
+                "member": target.get("subject_member", ""),
+                "method": _method_name(target, names),
+                "owner_symbol_id": owner,
+            },
+            anchor=target_id,
+            discriminator=(
+                f"{identity_key or 'anonymous'}|{owner}|{_step(source_info)}|"
+                f"{'|'.join(_step(points[p]) for p in boundary_ids)}|"
+                f"{_step(target)}|{cross}"
+            ),
+            resolution_status=AMBIGUOUS,
+            confidence=NULL_FLOW_CONFIDENCE[AMBIGUOUS],
+            facts=tuple(
+                _point_fact(pid, points[pid], names)
+                for pid in steps if _citable(pid, points)
+            ),
+            uncertain_facts=tuple(uncertain),
+            paths=(),
+            source_evidence=_source_evidence(steps, points),
+            missing_evidence=(
+                _MISSING_NULLABILITY, _MISSING_PARTIAL_GUARD, _MISSING_NORETURN,
+            ),
+            metadata={
+                "flow_class": kind,
+                "cross_function": cross,
+                "definition": {
+                    "point": source_id,
+                    "event": source_info.get("event_type", ""),
+                    "source": _span(source_info) if source_info else "",
+                },
+                "intermediate_points": list(boundary_ids),
+                "composition": dict(record),
+                "reach": "",
+                "path_recorded": False,
+                "paths_truncated": False,
+                "anchor_span": {
+                    "relative_path": target.get("relative_path", ""),
+                    "start_line": target.get("start_line", 0),
+                    "end_line": target.get("end_line", 0),
+                },
+                "methods": [item for item in (
+                    _method_name(source_info, names), _method_name(target, names),
+                ) if item],
+                "exit_point": "",
+            },
+        ))
+
+    if param_bindings is not None:
+        for point_id, records in sorted(param_bindings.bindings.items()):
+            deref = points.get(point_id)
+            if deref is None or deref.get("event_type") != "DEREFERENCE":
+                continue
+            for record in records:
+                for source_id in input_by_call.get(
+                        (record["call_site"], record["arg_root"]), ()):
+                    kind = source_kind(source_id)
+                    if kind is None:
+                        continue
+                    emit(source_id, [record["call_site"]], point_id, kind,
+                         "arg_to_param", {
+                             "callee": record["callee"],
+                             "parameter": record["parameter"],
+                             "ordinal": record["ordinal"],
+                             "arg_root": record["arg_root"],
+                             "join": record["join"],
+                         })
+
+    if return_bindings is not None:
+        for call_site, records in sorted(return_bindings.returns.items()):
+            for record in records:
+                return_point = record["return_point"]
+                for source_id, _meta in flow_by_dst.get(return_point, ()):
+                    kind = source_kind(source_id)
+                    if kind is None:
+                        continue
+                    for deref_id in _receiver_dereferences(
+                            points, call_site, record["receive_subject"], identity):
+                        emit(source_id, [return_point, call_site], deref_id, kind,
+                             "return_to_receiver", {
+                                 "callee": record["callee"],
+                                 "receive_subject": record["receive_subject"],
+                             })
+
+    return candidates
+
+
 def null_flow(
     events: Iterable[Any],
     edges: Iterable[Any],
@@ -3611,8 +3833,17 @@ def null_flow(
     defect_keys: Collection[str] | None = None,
     points: Points | None = None,
     adjacency: Adjacency | None = None,
+    callees: Any = None,
+    signatures: Mapping[str, str] | None = None,
 ) -> DefectQueryResult:
     """Matrix 3.1: a null value reaching a dereference.
+
+    When ``callees`` (an assembled contract table) is supplied, the query
+    composes the cross-function null facts V2-R1 R1-A wires in: it calls
+    ``bind_parameters`` / ``bind_returns`` with a non-``None`` table and reads
+    the resulting bindings to surface caller-arg-to-callee-param and
+    callee-return-to-caller-receiver null propagation. With ``callees=None``
+    every candidate below is the single-method, pre-R1-A result.
 
     Two sources, because C spells the pattern two ways. `null_to_deref` is the
     literal -- `p = NULL; *p`, or a chain of copies ending in one. The second is
@@ -3649,7 +3880,8 @@ def null_flow(
     records: list[dict[str, Any]] = []
     candidates: list[Candidate] = []
     wanted = _wanted(NULL_FLOW_KEY, defect_keys)
-    for source_id, target_id, metadata in _flow_edges(edges):
+    flow_edges = _flow_edges(edges)
+    for source_id, target_id, metadata in flow_edges:
         target = points.get(target_id)
         if target is None:
             continue
@@ -3804,6 +4036,19 @@ def null_flow(
             },
         ))
 
+    param_bindings: ParameterBindingTable | None = None
+    return_bindings: ReturnBindingTable | None = None
+    if callees is not None:
+        # V2-R1 R1-A: the live query's own wiring -- build the composition
+        # tables and hand them, non-None, into the cross-function pass below.
+        param_bindings = bind_parameters(
+            points, callees=callees, signatures=signatures, names=names)
+        return_bindings = bind_returns(points, callees=callees, names=names)
+        candidates.extend(_compose_cross_function_null(
+            points, flow_edges, param_bindings, return_bindings,
+            names=names, identity=identity, subject=subject,
+        ))
+
     candidates.sort(key=Candidate.sort_key)
     truncated = len(candidates) > max_candidates
     coverage = {
@@ -3818,6 +4063,12 @@ def null_flow(
         "points_by_type": _points_by_type(points),
         **_disqualification_coverage(by_reason, records),
     }
+    if param_bindings is not None:
+        coverage["interproc_param_binding_join"] = dict(sorted(
+            param_bindings.coverage.items()))
+    if return_bindings is not None:
+        coverage["interproc_return_binding_join"] = dict(sorted(
+            return_bindings.coverage.items()))
     return DefectQueryResult(
         query=NULL_FLOW, candidates=tuple(candidates[:max_candidates]),
         coverage=coverage, truncated=truncated,

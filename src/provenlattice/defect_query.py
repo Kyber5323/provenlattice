@@ -17,9 +17,10 @@ calibrated defect probability.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
-from . import defect
+from . import contracts, defect
 from .analysis import AnalysisStore, dependency_staleness
 from .analysis_query import AnalysisRequestError
 from .evidence import DefectEvidenceBundle, assemble_evidence_v2
@@ -217,6 +218,21 @@ def query_defect_candidates(
             for row in store.storage.rows(
                 "SELECT id, qualified_name FROM nodes WHERE kind IN ('Function','Method')")
         }
+        signatures = {
+            row["id"]: row["signature"]
+            for row in store.storage.rows(
+                "SELECT id, signature FROM nodes WHERE kind IN ('Function','Method')")
+        }
+        # The CALLS raw references: a call's callee name lives here, joined on
+        # (file_id, owner_symbol_id, start_line); the contract table's join keeps
+        # only keys that name one callee, so unresolved / ambiguous / indirect
+        # calls stay unknown ("") and never compose.
+        callee_names, _ambiguous_spans = contracts._callees(
+            store.storage.rows(
+                "SELECT file_id, owner_symbol_id, start_line, raw_name "
+                "FROM raw_references WHERE reference_type='CALLS'")
+        )
+        callees = dataclasses.replace(contracts.EMPTY, callees=callee_names)
         for row in store.storage.rows(
             "SELECT analysis_node_id, kind, payload FROM analysis_nodes "
             "WHERE feature='sparse_cfg:cpp'"
@@ -280,6 +296,7 @@ def query_defect_candidates(
                     query_name, events, control_edges,
                     subject=subject, max_hops=max_hops, max_paths=max_paths,
                     max_candidates=max_candidates, names=names,
+                    callees=callees, signatures=signatures,
                 )
                 results.append(one)
                 truncated = truncated or one.truncated
@@ -308,6 +325,7 @@ def query_defect_candidates(
                     query, events, control_edges,
                     subject=subject, max_hops=max_hops, max_paths=max_paths,
                     max_candidates=max_candidates, names=names,
+                    callees=callees, signatures=signatures,
                 )
             except ValueError as error:
                 raise AnalysisRequestError(

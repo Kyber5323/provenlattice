@@ -474,6 +474,107 @@ class NullFlowTests(DefectTestBase):
         self.assertEqual(self._dfg_edge_count(), before)
 
 
+class MayAliasConsumptionTests(DefectTestBase):
+    """R1-B: use_after_free / double_free read the materialized MAY_ALIAS
+    relation, not just the point copy annotation.
+
+    The ``may_alias_edges`` coverage key is the consumption proof: it counts the
+    MAY_ALIAS rows the query actually read, so a bare-copy fixture reads one and
+    a no-alias fixture reads zero.
+    """
+
+    def _may_alias_edges(self, query_type: str) -> int:
+        env = self.query(query_type)
+        self.assertEqual(env["status"], "available", env.get("reason"))
+        return int(env["coverage"].get("may_alias_edges"))
+
+    def _dfg_edge_count(self) -> int:
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM analysis_edges WHERE feature='sparse_dfg:cpp'"
+            ).fetchone()
+        return int(row[0])
+
+    def test_use_after_free_consumes_may_alias(self) -> None:
+        # q = p mints one MAY_ALIAS edge; the alias-precision call composition
+        # (free(p); sink(q)) joins the release to the call through it, and the
+        # coverage block records the edge was read.
+        self.build(
+            "#include <stdlib.h>\n"
+            "void sink(char *p);\n"
+            "int f(int n) {\n"
+            "    char *p = malloc(64);\n"
+            "    char *q = p;\n"
+            "    if (!p) return -1;\n"
+            "    free(p);\n"
+            "    sink(q);\n"
+            "    return n;\n"
+            "}\n")
+        env = self.query("use_after_free")
+        cands = [c for c in env["candidates"] if c["query"] == "use_after_free"]
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(cands[0]["metadata"]["use_from"], "call-composition")
+        self.assertEqual(env["coverage"]["may_alias_edges"], 1)
+
+    def test_double_free_consumes_may_alias(self) -> None:
+        # free(p); free(q) with q = p is a double free joined through the
+        # MAY_ALIAS relation: one alias edge read, one ALIAS_PAIR candidate.
+        self.build(
+            "#include <stdlib.h>\n"
+            "int f(int n) {\n"
+            "    int *p = malloc(sizeof(int));\n"
+            "    int *q = p;\n"
+            "    if (!p) return -1;\n"
+            "    free(p);\n"
+            "    free(q);\n"
+            "    return n;\n"
+            "}\n")
+        env = self.query("double_free")
+        cands = [c for c in env["candidates"] if c["query"] == "double_free"]
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(cands[0]["resolution_status"], "ambiguous")
+        self.assertEqual(cands[0]["subject"]["name"], "q")
+        self.assertEqual(env["coverage"]["may_alias_edges"], 1)
+
+    def test_no_alias_evidence_stays_conservative(self) -> None:
+        # two independent pointers share no MAY_ALIAS edge: neither query reads
+        # one, and neither manufactures a cross-name candidate.
+        self.build(
+            "#include <stdlib.h>\n"
+            "int f(int n) {\n"
+            "    int *p = malloc(sizeof(int));\n"
+            "    int *q = malloc(sizeof(int));\n"
+            "    if (!p || !q) return -1;\n"
+            "    free(p);\n"
+            "    free(q);\n"
+            "    return n;\n"
+            "}\n")
+        for query_type in ("use_after_free", "double_free"):
+            env = self.query(query_type)
+            cands = [c for c in env["candidates"] if c["query"] == query_type]
+            self.assertEqual(cands, [])
+            self.assertEqual(env["coverage"]["may_alias_edges"], 0)
+
+    def test_may_alias_consumption_mints_no_edges(self) -> None:
+        # consumption is query-time only: the queries read MAY_ALIAS rows and
+        # mint none (hallucinated edge = 0).
+        self.build(
+            "#include <stdlib.h>\n"
+            "void sink(char *p);\n"
+            "int f(int n) {\n"
+            "    char *p = malloc(64);\n"
+            "    char *q = p;\n"
+            "    if (!p) return -1;\n"
+            "    free(p);\n"
+            "    sink(q);\n"
+            "    return n;\n"
+            "}\n")
+        before = self._dfg_edge_count()
+        self.query("use_after_free")
+        self.query("double_free")
+        self.assertEqual(self._dfg_edge_count(), before)
+
+
 class ServiceContractTests(DefectTestBase):
     def test_default_index_never_runs_defect(self) -> None:
         write(self.root, "src/plain.c",

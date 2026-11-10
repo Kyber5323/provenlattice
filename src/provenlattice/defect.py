@@ -73,6 +73,7 @@ from .sparsedfg import (
     CLASS_INPUT_TO_SINK,
     DATA_FLOW_TO,
     DEF_EVENTS,
+    MAY_ALIAS,
     USE_EVENTS,
     ParameterBindingTable,
     ReturnBindingTable,
@@ -3354,6 +3355,82 @@ def _alias_closure(
     return frozenset(seen)
 
 
+def _may_alias_groups(
+    points: Mapping[str, Mapping[str, Any]],
+    edges: Iterable[Any],
+) -> tuple[dict[str, dict[str, frozenset[str]]], int]:
+    """`(owner -> {root: roots}, count)` the MAY_ALIAS relation joins.
+
+    R1-B: the candidate MAY_ALIAS edge a bare copy mints is the materialized
+    form of the copy annotation, and this is where the alias-precision queries
+    read it. Each edge carries `source_subject` / `target_subject` -- the two
+    spellings the copy joined -- and rides the copy's WRITE point, whose owner
+    keys the group, the same per-method discipline `_alias_groups` uses so two
+    methods' `p`/`q` never bleed into each other.
+
+    The count is the number of MAY_ALIAS rows read, returned so the caller can
+    report it in coverage: the consumption is then a measurable fact, not an
+    incidental branch.
+    """
+    groups: dict[str, dict[str, set[str]]] = {}
+    read = 0
+    for edge in edges:
+        if _edge_field(edge, "relation") != MAY_ALIAS:
+            continue
+        read += 1
+        metadata = _edge_field(edge, "metadata") or {}
+        source = str(metadata.get("source_subject", ""))
+        target = str(metadata.get("target_subject", ""))
+        if not source or not target or source == target:
+            continue
+        info = points.get(str(_edge_field(edge, "dst_event_id")))
+        if info is None:
+            continue
+        owner = str(info.get("owner_symbol_id", ""))
+        if not owner:
+            continue
+        group = groups.setdefault(owner, {})
+        group.setdefault(source, set()).add(target)
+        group.setdefault(target, set()).add(source)
+    return (
+        {
+            owner: {root: frozenset(roots) for root, roots in group.items()}
+            for owner, group in groups.items()
+        },
+        read,
+    )
+
+
+def _alias_groups_with_may_alias(
+    points: Mapping[str, Mapping[str, Any]],
+    edges: Iterable[Any],
+) -> tuple[dict[str, dict[str, frozenset[str]]], int]:
+    """Alias groups from the point annotation *and* the MAY_ALIAS relation.
+
+    The annotation (`_alias_groups`) covers copies whose source has no
+    method-local definition -- a parameter or global, where no MAY_ALIAS edge
+    is minted -- while the relation covers the copy whose source *is* defined
+    locally. Both are the same candidate-level name join, so the union is an
+    exact widening to the relation, never a second, looser channel.
+    """
+    groups: dict[str, dict[str, set[str]]] = {
+        owner: {root: set(roots) for root, roots in group.items()}
+        for owner, group in _alias_groups(points).items()
+    }
+    may, read = _may_alias_groups(points, edges)
+    for owner, group in may.items():
+        merged = groups.setdefault(owner, {})
+        for root, roots in group.items():
+            merged.setdefault(root, set()).update(roots)
+    return (
+        {
+            owner: {root: frozenset(roots) for root, roots in group.items()}
+            for owner, group in groups.items()
+        },
+        read,
+    )
+
+
 def _flow_edges(edges: Iterable[Any]) -> list[tuple[str, str, Mapping[str, Any]]]:
     """`(src, dst, metadata)` for every DATA_FLOW_TO row, in edge order.
 
@@ -4161,7 +4238,7 @@ def use_after_free(
     # for. Grouped per owner because the alias annotation and the point ids are
     # method-local, and built in one pass for the reason `_alias_groups` gives.
     by_owner = _by_owner(points)
-    alias_groups = _alias_groups(points)
+    alias_groups, may_alias_edges = _alias_groups_with_may_alias(points, edges)
     releases_by_statement: dict[tuple[str, str, int], list[str]] = {}
     for point_id in sorted(points):
         info = points[point_id]
@@ -4265,6 +4342,7 @@ def use_after_free(
             1 for candidate in candidates
             if candidate.metadata.get("use_from") == "call-composition"
         ),
+        "may_alias_edges": may_alias_edges,
         "max_hops": max_hops,
         "semantic_points": len(points),
         "semantic_edges": sum(len(item) for item in adjacency.values()),
@@ -4457,7 +4535,7 @@ def double_free(
     points, adjacency = _published_graph(events, edges, points, adjacency)
     reach = _Reachability(adjacency, points)
     by_owner = _by_owner(points)
-    alias_groups = _alias_groups(points)
+    alias_groups, may_alias_edges = _alias_groups_with_may_alias(points, edges)
     population: Counter = Counter()
     states: Counter = Counter()
     by_reason: Counter = Counter()
@@ -4536,6 +4614,7 @@ def double_free(
         "states": dict(sorted(states.items())),
         "candidates": len(candidates),
         "candidates_by_key": _count_by_key(candidates),
+        "may_alias_edges": may_alias_edges,
         "max_hops": max_hops,
         "semantic_points": len(points),
         "semantic_edges": sum(len(item) for item in adjacency.values()),

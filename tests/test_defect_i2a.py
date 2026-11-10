@@ -359,6 +359,120 @@ class NullFlowTests(DefectTestBase):
                 if "reach" in json.dumps(fact):
                     self.assertIn("reachable", json.dumps(fact))
 
+    # -- V2-R1 R1-A: cross-function null composition (bind_parameters /
+    #    bind_returns wired into the live null_flow query) ------------------
+
+    def _cross_candidates(self) -> list[dict]:
+        env = self.query("null_flow")
+        self.assertEqual(env["status"], "available", env.get("reason"))
+        return [c for c in env["candidates"]
+                if c["metadata"].get("cross_function")]
+
+    def _dfg_edge_count(self) -> int:
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM analysis_edges WHERE feature='sparse_dfg:cpp'"
+            ).fetchone()
+        return int(row[0])
+
+    def test_cross_function_caller_null_reaches_callee_param(self) -> None:
+        # direct call: the caller's NULL passes as an argument and the callee
+        # dereferences its parameter -- the cross-function candidate carries
+        # caller WRITE -> caller CALL -> callee DEREFERENCE as its evidence.
+        self.build(
+            "#include <stdlib.h>\n"
+            "void callee(int *p) {\n"
+            "    *p = 7;\n"
+            "}\n"
+            "int caller(int n) {\n"
+            "    int *q = NULL;\n"
+            "    callee(q);\n"
+            "    return n;\n"
+            "}\n")
+        cands = self._cross_candidates()
+        self.assertEqual(len(cands), 1)
+        cand = cands[0]
+        self.assertEqual(cand["resolution_status"], "ambiguous")
+        self.assertEqual(cand["metadata"]["cross_function"], "arg_to_param")
+        self.assertEqual(cand["metadata"]["flow_class"], "null_to_deref")
+        events = [fact["event"] for fact in cand["facts"]]
+        methods = [fact["method"] for fact in cand["facts"]]
+        self.assertIn("WRITE", events)
+        self.assertIn("CALL", events)
+        self.assertIn("DEREFERENCE", events)
+        self.assertIn("caller", methods)
+        self.assertIn("callee", methods)
+        self.assertEqual(cand["subject"]["name"], "p")
+
+    def test_cross_function_callee_return_null_reaches_caller_receiver(self) -> None:
+        # direct call: the callee returns a null value and the caller
+        # dereferences the receiver -- evidence spans callee WRITE/RETURN and
+        # the caller CALL/dereference.
+        self.build(
+            "#include <stdlib.h>\n"
+            "int *make(void) {\n"
+            "    int *p = NULL;\n"
+            "    return p;\n"
+            "}\n"
+            "int caller(int n) {\n"
+            "    int *q = make();\n"
+            "    *q = 7;\n"
+            "    return n;\n"
+            "}\n")
+        cands = self._cross_candidates()
+        self.assertEqual(len(cands), 1)
+        cand = cands[0]
+        self.assertEqual(cand["resolution_status"], "ambiguous")
+        self.assertEqual(cand["metadata"]["cross_function"], "return_to_receiver")
+        self.assertEqual(cand["metadata"]["flow_class"], "null_to_deref")
+        events = [fact["event"] for fact in cand["facts"]]
+        self.assertIn("RETURN", events)
+        self.assertIn("DEREFERENCE", events)
+        self.assertEqual(cand["subject"]["name"], "q")
+
+    def test_cross_function_unresolved_call_stays_silent(self) -> None:
+        # an indirect call through a function pointer resolves to no callee:
+        # fail-closed, nothing composes, no cross-function candidate.
+        self.build(
+            "#include <stdlib.h>\n"
+            "int caller(int n, void (*fn)(int *)) {\n"
+            "    int *q = NULL;\n"
+            "    fn(q);\n"
+            "    return n;\n"
+            "}\n")
+        self.assertEqual(self._cross_candidates(), [])
+
+    def test_cross_function_ambiguous_callee_stays_silent(self) -> None:
+        # two functions spell the same short name with differing parameter
+        # lists: the name-level join disagrees and never picks a winner.
+        self.build(
+            "#include <stdlib.h>\n"
+            "void helper(int *p) { *p = 1; }\n"
+            "void helper(int *a, int *b) { *a = *b; }\n"
+            "int caller(int n) {\n"
+            "    int *q = NULL;\n"
+            "    helper(q);\n"
+            "    return n;\n"
+            "}\n")
+        self.assertEqual(self._cross_candidates(), [])
+
+    def test_cross_function_composition_mints_no_edges(self) -> None:
+        # the composition is pure query-time wiring: it reads the existing
+        # data-flow edges and adds none (hallucinated edge = 0).
+        self.build(
+            "#include <stdlib.h>\n"
+            "void callee(int *p) {\n"
+            "    *p = 7;\n"
+            "}\n"
+            "int caller(int n) {\n"
+            "    int *q = NULL;\n"
+            "    callee(q);\n"
+            "    return n;\n"
+            "}\n")
+        before = self._dfg_edge_count()
+        self.assertEqual(len(self._cross_candidates()), 1)
+        self.assertEqual(self._dfg_edge_count(), before)
+
 
 class ServiceContractTests(DefectTestBase):
     def test_default_index_never_runs_defect(self) -> None:

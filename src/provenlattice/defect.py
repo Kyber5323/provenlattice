@@ -2387,6 +2387,7 @@ def race_condition(
     identity: bool = True,
     defect_keys: Collection[str] | None = None,
     bindings: ParameterBindingTable | None = None,
+    lock_facts: Iterable[Any] | None = None,
     points: Points | None = None,
     adjacency: Adjacency | None = None,
 ) -> DefectQueryResult:
@@ -2430,6 +2431,7 @@ def race_condition(
     important shared state this query can see.
     """
     points, adjacency = _published_graph(events, edges, points, adjacency)
+    lock_fact_by_id = _lock_fact_index(lock_facts) if lock_facts is not None else {}
     reverse = _reverse_adjacency(adjacency)
     methods_index = _method_index(points, reverse, identity=identity)
 
@@ -2585,7 +2587,7 @@ def race_condition(
                     _touches_atomically(points, point_ids, key, identity=identity),
                     _protection(
                         methods_index[owner], points, adjacency, cf_points(point_ids), max_hops,
-                        identity=identity,
+                        identity=identity, lock_fact_by_id=lock_fact_by_id,
                     ),
                 )
             return sides[owner]
@@ -2843,6 +2845,30 @@ def _blocked_by_lock(
     return not paths
 
 
+# Acquire kinds that never provably hold their mutex for the race query: a
+# ``try``/``timed`` acquire may fail and a ``wait`` is a condition-variable or
+# semaphore block, not a mutex hold. A protection decision can only rest on a
+# ``blocking`` (or RAII) acquire. These values come from the events layer's
+# ``acquire_kind`` fact (analysis_c_events), which the race query now consumes
+# instead of re-deriving.
+_NON_PROTECTIVE_ACQUIRES = frozenset({"try", "timed", "wait"})
+
+
+def _lock_fact_index(lock_facts: Iterable[Any]) -> dict[str, dict[str, Any]]:
+    """events:cpp lock facts keyed by event id, for ``_protection``.
+
+    The events layer and sparse_cfg share one event id per LOCK/UNLOCK operation
+    (``identity.event_id``), so a sparse_cfg lock point looks up its
+    ``acquire_kind`` / ``raii`` / ``lock_identity`` by the same id. This consumes
+    the fact as-is and never re-derives it.
+    """
+    return {
+        fact["event_id"]: dict(fact)
+        for fact in lock_facts
+        if isinstance(fact, Mapping) and fact.get("event_id")
+    }
+
+
 def _protection(
     method: Mapping[str, Any],
     points: Mapping[str, Mapping[str, Any]],
@@ -2851,6 +2877,7 @@ def _protection(
     max_hops: int,
     *,
     identity: bool = True,
+    lock_fact_by_id: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Whether one lock dominates every access of a name inside one method.
 
@@ -2871,7 +2898,11 @@ def _protection(
     Two approximations are real and named in `missing_evidence`: a lock taken
     by a callee is invisible here, and so is a lock the caller already holds.
     """
-    lock_points = method["locks"]
+    lock_points = [
+        lock_point for lock_point in method["locks"]
+        if (lock_fact_by_id or {}).get(lock_point, {}).get("acquire_kind")
+        not in _NON_PROTECTIVE_ACQUIRES
+    ]
     if not lock_points:
         return {"status": AMBIGUOUS, "lock": "", "display": "", "detail": "no lock in this method"}
     if not accesses:

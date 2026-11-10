@@ -6,8 +6,10 @@ frozen G0 lock contract (``cwe1123_v2_query_contract.md`` §3):
 
 * ``held_locks`` is attributed by provable object identity, never display name;
 * only a provably-identified **blocking** acquisition is held -- a try/timed
-  acquire may fail, a RAII acquisition is released at scope exit, and an
-  inexact/empty identity is never promoted to a held lock;
+  acquire may fail, and an inexact/empty identity is never promoted to a held
+  lock; a RAII acquisition is held within its lexical scope
+  (``raii_scope_end``, issue #69) and released at that scope's exit, so an
+  access after an inner block's closing brace is not inherited;
 * every record and relation is ``candidate_state: "ambiguous"`` -- the analysis
   never asserts a decisive "definitely held";
 * every relation (PROTECTS/SAME_LOCK/DIFFERENT_LOCK/UNLOCK_OMITTED_ON_PATH) is
@@ -258,7 +260,16 @@ class TwoLockLoopTests(AccessLocksetBase):
         self.assertEqual(held_by_line[11], ["b"])
 
 
-class RaiiNotHeldNotLeakTests(AccessLocksetBase):
+class RaiiScopeHeldTests(AccessLocksetBase):
+    """Issue #69: a RAII guard is held within its lexical scope, not ignored.
+
+    Replaces the pre-#69 contract (``RaiiNotHeldNotLeakTests``), which locked in
+    "a RAII acquisition is never in the held set". With ``raii_scope_end`` the
+    producer now knows the guard's scope, so an access inside that scope is
+    protected; the guard is still never flagged as a leaked acquire, because it
+    releases implicitly at scope exit rather than via a missing explicit unlock.
+    """
+
     FIXTURE = (
         "#include <mutex>\n"
         "std::mutex m;\n"
@@ -269,11 +280,62 @@ class RaiiNotHeldNotLeakTests(AccessLocksetBase):
         "}\n"
     )
 
-    def test_raii_is_released_at_scope_exit_not_held(self) -> None:
+    def test_raii_is_held_within_its_scope(self) -> None:
         for record in self.accesses("g_count"):
-            self.assertEqual(record["held_locks"], [])
-        # Not held means there can be no unpaired release to flag as a leak.
+            self.assertEqual(record["held_locks"], ["m"])
+        protects = self.relations("PROTECTS")
+        self.assertTrue(protects)
+        self.assertEqual({rel["lock"] for rel in protects}, {"m"})
+
+    def test_raii_implicit_release_is_not_a_leak(self) -> None:
+        # The guard releases at scope exit without an explicit UNLOCK, so there
+        # is no unpaired release to flag as a leak.
         self.assertEqual(self.relations("UNLOCK_OMITTED_ON_PATH"), [])
+
+
+class RaiiInnerScopeEndTests(AccessLocksetBase):
+    """Issue #69 counterexample: a guard must not reach past an inner block.
+
+    ``{ std::lock_guard<std::mutex> guard(m); g_count++; } g_count++;`` -- the
+    first increment is inside the guard's scope and protected; the second is
+    after the inner block's closing brace and must not be judged protected.
+    """
+
+    FIXTURE = (
+        "#include <mutex>\n"
+        "std::mutex m;\n"
+        "int g_count;\n"
+        "void f(void) {\n"
+        "    { std::lock_guard<std::mutex> guard(m); g_count++; }\n"
+        "    g_count++;\n"
+        "}\n"
+    )
+
+    def held_by_line(self) -> dict[int, list[str]]:
+        result = {}
+        for record in self.accesses("g_count"):
+            result[record["start_line"]] = record["held_locks"]
+        return result
+
+    def test_access_inside_scope_is_held(self) -> None:
+        self.assertEqual(self.held_by_line()[5], ["m"])
+
+    def test_access_after_scope_end_is_not_held(self) -> None:
+        # The trailing `g_count++` (line 6) sits after the inner block's `}`
+        # and must not inherit the guard: it is unprotected...
+        self.assertEqual(self.held_by_line()[6], [])
+        # ...and no PROTECTS relation is emitted for it, only for the inner one.
+        protected_ids = {rel["access_event_id"] for rel in self.relations("PROTECTS")}
+        inner_ids = {
+            record["access_event_id"] for record in self.accesses("g_count")
+            if record["start_line"] == 5
+        }
+        trailing_ids = {
+            record["access_event_id"] for record in self.accesses("g_count")
+            if record["start_line"] == 6
+        }
+        self.assertEqual(protected_ids, inner_ids)
+        self.assertTrue(protected_ids.isdisjoint(trailing_ids))
 
 
 class InexactIdentityTests(AccessLocksetBase):

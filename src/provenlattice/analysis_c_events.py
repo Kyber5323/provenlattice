@@ -196,6 +196,27 @@ def _lock_subject(source: bytes, node, event_type: str) -> tuple[str, bool]:
     return "", False
 
 
+def _raii_scope_end(node) -> int | None:
+    """The byte offset where a RAII declaration's guard is released.
+
+    A RAII guard lives until its innermost lexical block scope closes: the
+    nearest enclosing ``compound_statement`` (a bare block or a function body).
+    Returns that statement's end byte -- the first offset the guard is no
+    longer held -- or ``None`` when there is no enclosing block (a namespace/
+    class-scope declaration, which is not a local acquisition).
+
+    ``node`` is the ``declaration`` node the LOCK event was matched on; the walk
+    is lexical only, so it never guesses about control flow or exception
+    unwinding -- the destructor runs on every exit path, which is exactly what
+    makes the scope a deterministic fact.
+    """
+    while node is not None:
+        node = node.parent
+        if node is not None and node.type == "compound_statement":
+            return node.end_byte
+    return None
+
+
 def _lock_metadata(source: bytes, node, event_type: str, matched_name: str) -> dict:
     """The lock facts a LOCK/UNLOCK event carries; empty for other events.
 
@@ -213,12 +234,19 @@ def _lock_metadata(source: bytes, node, event_type: str, matched_name: str) -> d
             "raii": raii,
         }
     identity, exact = _lock_subject(source, node, event_type)
-    return {
+    payload = {
         "lock_identity": identity,
         "subject_exact": exact,
         "acquire_kind": _acquire_kind(matched_name),
         "raii": raii,
     }
+    if raii:
+        # Issue #69: the guard's lexical scope end, so a consumer can hold the
+        # lock only from the declaration to this byte and not beyond it. Absent
+        # (null) when no enclosing block exists -- a degenerate, non-local
+        # declaration that is not a real acquisition.
+        payload["raii_scope_end"] = _raii_scope_end(node)
+    return payload
 
 
 def analyze_c_events_scope(

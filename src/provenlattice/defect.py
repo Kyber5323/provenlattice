@@ -238,10 +238,10 @@ _NON_LOCK_RECEIVER_TYPES = frozenset({"weak_ptr"})
 # from this set rather than added to it.
 RACE_SUBJECT_EVENTS = frozenset({"ALLOC", "RELEASE", "CALL", "DEREFERENCE", "CHECK", "RETURN"})
 # The access events (stage 5A). They join the subject index -- an access with a
-# subject is a touch of shared data like any other -- but never the protection
-# test: `_blocked_by_lock` asks the control-flow graph whether a lock dominates
-# an access, and an access event has no position in that graph (see
-# `_EDGELESS_EVENT_TYPES` in `sparsecfg.py`). Two indexes per subject, two roles.
+# subject is a touch of shared data like any other. Their held-lock status comes
+# from the shared producer's per-access held-lockset (RaceFactBundle), not a CFG
+# domination test (an access event has no position in that graph -- see
+# `_EDGELESS_EVENT_TYPES` in `sparsecfg.py`).
 RACE_ACCESS_EVENTS = frozenset({"READ", "WRITE"})
 SYNCHRONIZATION_EVENTS = frozenset({"LOCK", "UNLOCK", "ATOMIC"})
 # C's thread-local objects (C11 §7.5): `errno` is a thread-local lvalue, so two
@@ -948,38 +948,6 @@ def _by_owner(points: Mapping[str, Mapping[str, Any]]) -> dict[str, list[str]]:
     for point_id, info in points.items():
         owners.setdefault(str(info.get("owner_symbol_id", "")), []).append(point_id)
     return {owner: sorted(ids) for owner, ids in owners.items()}
-
-
-def _reverse_adjacency(
-    adjacency: Mapping[str, list[tuple[str, str, frozenset[str]]]]
-) -> dict[str, list[str]]:
-    reverse: dict[str, list[str]] = {}
-    for src, neighbours in adjacency.items():
-        for _edge_id, dst, _flags in neighbours:
-            reverse.setdefault(dst, []).append(src)
-    return {node: sorted(set(sources)) for node, sources in reverse.items()}
-
-
-def _closure(
-    start: str, adjacency: Mapping[str, list[tuple[str, str, frozenset[str]]]], max_hops: int
-) -> set[str]:
-    """Every point reachable from `start`, breadth-first, capped at `max_hops`."""
-    reached: set[str] = set()
-    queue: deque[tuple[str, int]] = deque([(start, 0)])
-    seen = {start}
-    while queue:
-        current, hops = queue.popleft()
-        if hops >= max_hops:
-            continue
-        for _edge_id, dst, _flags in adjacency.get(current, ()):
-            if dst in seen:
-                continue
-            seen.add(dst)
-            reached.add(dst)
-            queue.append((dst, hops + 1))
-    return reached
-
-
 
 
 def _holds_before(
@@ -2557,16 +2525,15 @@ def race_condition(
             continue
         # Everything the pair loop asks about one side depends on that side
         # alone: the access kind (and whether it was decided or is a proxy),
-        # whether the name is touched atomically, and which lock gates it.
-        # Computing them inside the pair loop made the cost of a name quadratic
-        # in the number of methods touching it, and on a real repository that
-        # is the whole query's runtime.
+        # whether the name is touched atomically, and which held lock protects
+        # it. Computing them inside the pair loop made the cost of a name
+        # quadratic in the number of methods touching it, and on a real
+        # repository that is the whole query's runtime.
         #
-        # `_protection` takes only the method's control-flow points. An access
-        # event has no position in the graph, so domination is untestable for
-        # it and feeding it in would read as "not gated" -- which would strip
-        # `resolved` from subjects the graph has genuinely proven protected.
-        # The access events ride in the same list for kind and evidence.
+        # The protection status is read from the shared producer
+        # (`_race_bundle_protection`), which consumes each access event's
+        # held-lockset from the RaceFactBundle instead of re-deriving CFG
+        # domination.
         sides: dict[str, tuple[str, bool, bool, dict]] = {}
 
         def side(owner: str) -> tuple[str, bool, bool, dict]:
@@ -2870,172 +2837,6 @@ def _touches_atomically(
         and _identity(points[point_id], identity=identity) == identity_key
         for point_id in point_ids
     )
-
-
-def _method_index(
-    points: Mapping[str, Mapping[str, Any]],
-    reverse: Mapping[str, list[str]],
-    *,
-    identity: bool = True,
-) -> dict[str, dict[str, Any]]:
-    """Per-method facts the protection test needs, computed once.
-
-    The race query asks "does one lock gate this access" for every (subject,
-    method) pair, and each ask walks the method. Indexing the method's points,
-    its entry points and its unlock points once turns a per-pair cost into a
-    per-method one -- which is what keeps the pair loop affordable on a
-    repository with thousands of methods.
-
-    Entry points are the method's points with no predecessor inside the
-    method: edges are intra-owner, so "no incoming edge" is exactly "control
-    flow can start here".
-    """
-    owners: dict[str, list[str]] = {}
-    for point_id, info in points.items():
-        owners.setdefault(str(info.get("owner_symbol_id", "")), []).append(point_id)
-
-    index: dict[str, dict[str, Any]] = {}
-    for owner, point_ids in owners.items():
-        owned = set(point_ids)
-        entries = sorted(
-            point_id for point_id in point_ids
-            if not (set(reverse.get(point_id, ())) & owned)
-        )
-        locks = sorted(
-            point_id for point_id in point_ids if points[point_id]["event_type"] == "LOCK"
-        )
-        unlocks: dict[str, set[str]] = {}
-        for point_id in point_ids:
-            info = points[point_id]
-            if info["event_type"] == "UNLOCK" and info.get("subject"):
-                unlocks.setdefault(_identity(info, identity=identity), set()).add(point_id)
-        index[owner] = {
-            "points": sorted(point_ids),
-            "entries": entries,
-            "locks": locks,
-            "unlocks": {name: frozenset(ids) for name, ids in unlocks.items()},
-        }
-    return index
-
-
-def _blocked_by_lock(
-    adjacency: Mapping[str, list[tuple[str, str, frozenset[str]]]],
-    points: Mapping[str, Mapping[str, Any]],
-    entries: Sequence[str],
-    target: str,
-    lock_point: str,
-    max_hops: int,
-) -> bool:
-    """Does every path from the method's entries to `target` go through
-    `lock_point`?
-
-    This is domination, and the definition is the test: block the lock and ask
-    whether the target is still reachable. The ancestor-set formulation is the
-    one that looks right and is not -- a point before the lock is always an
-    ancestor of an access after it, so "all ancestors are inside the lock's
-    closure" is never true for a lock taken mid-method.
-    """
-    paths, _truncated = find_paths(
-        adjacency, points,
-        starts=entries,
-        is_target=lambda info: info is points[target],
-        blocked_points=(lock_point,),
-        max_hops=max_hops,
-        max_paths=1,
-    )
-    return not paths
-
-
-def _protection(
-    method: Mapping[str, Any],
-    points: Mapping[str, Mapping[str, Any]],
-    adjacency: Mapping[str, list[tuple[str, str, frozenset[str]]]],
-    accesses: Sequence[str],
-    max_hops: int,
-    *,
-    identity: bool = True,
-) -> dict[str, Any]:
-    """Whether one lock dominates every access of a name inside one method.
-
-    `resolved` means a single LOCK point gates every access -- blocking it
-    disconnects the access from the method's entry -- and is still held when
-    the access happens. That is the only form of "protected" the graph can
-    prove: a lock merely taken somewhere in the method says nothing.
-
-    `ambiguous` means locks exist but none gates the access. `unresolved` means
-    the method holds a lock whose subject could not be recovered, so what it
-    guards is unknown -- which is a different claim from knowing it guards
-    nothing.
-
-    The method's own LOCK points are what get tested, not the subject's: a
-    lock's subject is the mutex, never the data it guards, so a method that
-    locks `g_lock` around `g_total` has no LOCK point carrying `g_total`.
-
-    Two approximations are real and named in `missing_evidence`: a lock taken
-    by a callee is invisible here, and so is a lock the caller already holds.
-    """
-    lock_points = method["locks"]
-    if not lock_points:
-        return {"status": AMBIGUOUS, "lock": "", "display": "", "detail": "no lock in this method"}
-    if not accesses:
-        # Stage 5A: an access event has no position in the control-flow graph,
-        # so no lock can be tested against it. This must not fall through to
-        # the `all(...)` below -- `all` over an empty sequence is True, and a
-        # subject whose only touches are plain writes (`counter++`) would read
-        # as gated by every lock in the method: a false `resolved` with the
-        # confidence bump to match, on exactly the population the access layer
-        # added. "Nothing can be said" is the honest status, and it is
-        # `ambiguous`, not `unresolved` -- the lock subjects are fine; it is
-        # the access that has nothing for the test to reach.
-        return {
-            "status": AMBIGUOUS, "lock": "", "display": "",
-            "detail": "the access has no control-flow point, so nothing can be "
-                      "said about what gates it",
-        }
-
-    for lock_point in lock_points:
-        lock_key = _identity(points[lock_point], identity=identity)
-        if not lock_key:
-            continue
-        if all(
-            _blocked_by_lock(
-                adjacency, points, method["entries"], access, lock_point, max_hops
-            )
-            and _holds_before(
-                adjacency, points, lock_point, access, lock_key,
-                method["unlocks"], max_hops,
-            )
-            for access in accesses
-        ):
-            # `lock` is the identity, because the caller compares two sides'
-            # protections to decide whether both hold *the same* lock. `display`
-            # is what the fact prints: a reader is owed the spelling.
-            return {
-                "status": RESOLVED, "lock": lock_key, "detail": "",
-                "display": points[lock_point].get("subject", ""),
-            }
-
-    if any(not points[point_id].get("subject") for point_id in lock_points):
-        return {
-            "status": UNRESOLVED, "lock": "", "display": "",
-            "detail": "a lock with no recoverable subject",
-        }
-    reachable = [
-        lock_point
-        for lock_point in lock_points
-        if any(access in _closure(lock_point, adjacency, max_hops) for access in accesses)
-    ]
-    return {
-        "status": AMBIGUOUS,
-        "lock": _identity(points[reachable[0]], identity=identity) if reachable else "",
-        "display": points[reachable[0]].get("subject", "") if reachable else "",
-        # The detail has to match what was actually established: when no lock
-        # reaches any access there is no reachability claim to retract.
-        "detail": (
-            "a lock reaches the access but does not gate it" if reachable
-            else "no lock in this method reaches the access"
-        ),
-    }
 
 
 def _access_summary(

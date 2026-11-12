@@ -211,6 +211,19 @@ NON_BLOCKING_ACQUIRES = frozenset({
     "try_lock", "try_lock_shared",
 })
 
+# The acquire spellings whose hold is a *shared* (read) or *exclusive write*
+# mode on a pthread_rwlock_t rather than a plain mutex. A read lock and a write
+# lock do not exclude each other the way a mutex does, and a read lock does not
+# cover a write -- the two facts PAIR-02's mode-aware SAME_LOCK test is built on.
+# The tryrdlock/trywrlock spellings classify the same way but are non-blocking
+# (they are in NON_BLOCKING_ACQUIRES), so the mode index below skips them.
+_READ_LOCK_ACQUIRES = frozenset({
+    "pthread_rwlock_rdlock", "pthread_rwlock_tryrdlock",
+})
+_WRITE_LOCK_ACQUIRES = frozenset({
+    "pthread_rwlock_wrlock", "pthread_rwlock_trywrlock",
+})
+
 # The declared types that are a mutex, as the last identifier of the spelling
 # (`type_token` has already dropped the namespace and the template arguments, so
 # `std::mutex` arrives as `mutex` and `std::shared_mutex` as `shared_mutex`).
@@ -2461,11 +2474,14 @@ def race_condition(
     }
 
     spawn_index = _spawn_index(points)
+    lock_modes = _lock_mode_index(points)
 
     candidates: list[Candidate] = []
     read_read_pairs = 0
     disqualified_atomic = 0
     disqualified_same_lock = 0
+    disqualified_pre_spawn = 0
+    disqualified_post_lifecycle = 0
     access_decided_pairs = 0
     access_proxy_pairs = 0
     multi_method = 0
@@ -2562,8 +2578,22 @@ def race_condition(
                 if atomic_a and atomic_b:
                     disqualified_atomic += 1
                     continue
+                lifecycle = _lifecycle_declines(
+                    owner_a, owner_b, methods[owner_a], methods[owner_b],
+                    points, spawn_index, names,
+                )
+                if lifecycle:
+                    # One end runs before the other's spawn (PAIR-01) or after
+                    # its join (PAIR-03); distinguish for the coverage block.
+                    if lifecycle == "pre_spawn":
+                        disqualified_pre_spawn += 1
+                    else:
+                        disqualified_post_lifecycle += 1
+                    continue
                 if _race_bundle_same_lock(
-                    protection_a, protection_b, race_fact_index
+                    protection_a, protection_b, race_fact_index,
+                    owner_a=owner_a, owner_b=owner_b,
+                    kind_a=kind_a, kind_b=kind_b, lock_modes=lock_modes,
                 ):
                     disqualified_same_lock += 1
                     continue
@@ -2650,6 +2680,8 @@ def race_condition(
         )),
         "disqualified_atomic_both_sides": disqualified_atomic,
         "disqualified_same_lock": disqualified_same_lock,
+        "disqualified_pre_spawn": disqualified_pre_spawn,
+        "disqualified_post_lifecycle": disqualified_post_lifecycle,
         "spawn_points": len(spawns),
         "join_points": len(joins),
         "resolved_thread_functions": len(thread_functions),
@@ -2726,6 +2758,10 @@ def _race_fact_index(race_facts: Mapping[str, Any] | None) -> dict[str, Any]:
     protects: dict[str, set[str]] = {}
     same: dict[frozenset[str], frozenset[str]] = {}
     different: set[frozenset[str]] = set()
+    # (access_event_id, lock) pairs the producer could not prove fully covered:
+    # an UNLOCK_OMITTED_ON_PATH means the lock may not be held on every path, so
+    # it cannot expected to serialize the access (PAIR-02's coverage condition).
+    omitted: set[tuple[str, str]] = set()
     for relation in race_facts.get("relations") or ():
         if not isinstance(relation, Mapping):
             continue
@@ -2734,6 +2770,9 @@ def _race_fact_index(race_facts: Mapping[str, Any] | None) -> dict[str, Any]:
             protects.setdefault(str(relation["access_event_id"]), set()).add(
                 str(relation["lock"])
             )
+            continue
+        if kind == "UNLOCK_OMITTED_ON_PATH" and relation.get("access_event_id") and relation.get("lock"):
+            omitted.add((str(relation["access_event_id"]), str(relation["lock"])))
             continue
         endpoints = relation.get("access_event_ids") or ()
         if len(endpoints) != 2:
@@ -2750,6 +2789,7 @@ def _race_fact_index(race_facts: Mapping[str, Any] | None) -> dict[str, Any]:
         "protects": protects,
         "same": same,
         "different": different,
+        "omitted": omitted,
     }
 
 
@@ -2803,11 +2843,100 @@ def _race_bundle_protection(
     }
 
 
+def _lock_mode(matched_name: str) -> str:
+    """read / write / exclusive for a lock acquire spelling.
+
+    A read lock and a write lock on one pthread_rwlock_t do not exclude each
+    other the way a mutex does, and a read lock does not cover a write. Every
+    acquire that is not an rwlock read/write is an exclusive mutex hold.
+    """
+    if matched_name in _READ_LOCK_ACQUIRES:
+        return "read"
+    if matched_name in _WRITE_LOCK_ACQUIRES:
+        return "write"
+    return "exclusive"
+
+
+def _lock_mode_index(
+    points: Mapping[str, Mapping[str, Any]],
+) -> dict[tuple[str, str], frozenset[str]]:
+    """The acquire modes each (owner, lock subject) holds, read once per query.
+
+    The race facts carry a held lock's *identity* only, so pthread_rwlock_rdlock
+    and pthread_rwlock_wrlock collapse into one object. The mode is read back
+    from the detector's own LOCK points' matched_name (GATE-0: a race-fact
+    held-lock identity resolves to a LOCK point whose subject matches and whose
+    matched_name is populated). Only a blocking acquire establishes a held mode
+    -- a try/timed acquire can fail -- and an inexact subject names a root
+    rather than one distinguishable lock.
+    """
+    index: dict[tuple[str, str], set[str]] = {}
+    for info in points.values():
+        if info["event_type"] != "LOCK":
+            continue
+        subject = str(info.get("subject") or "")
+        if not subject or info.get("subject_exact") != "true":
+            continue
+        matched_name = str(info.get("matched_name") or "")
+        if not matched_name or matched_name in NON_BLOCKING_ACQUIRES:
+            continue
+        owner = str(info.get("owner_symbol_id", ""))
+        index.setdefault((owner, subject), set()).add(_lock_mode(matched_name))
+    return {key: frozenset(modes) for key, modes in index.items()}
+
+
+def _lock_hold_excludes(
+    lock: str,
+    owner_a: str,
+    owner_b: str,
+    kind_a: str,
+    kind_b: str,
+    lock_modes: Mapping[tuple[str, str], frozenset[str]],
+) -> bool:
+    """Whether both holdings of `lock` actually serialize the two operations.
+
+    The pair may be dropped only when the modes exclude the operations: a
+    mutex/mutex or write-lock pairing excludes, a read/read pairing does not,
+    and a read hold on one side never covers a write on that side.
+    """
+    modes_a = lock_modes.get((owner_a, lock), frozenset())
+    modes_b = lock_modes.get((owner_b, lock), frozenset())
+    if not modes_a or not modes_b:
+        # One side's mode did not resolve (inexact identity, a non-blocking
+        # acquire, or no blocked LOCK point): fail closed, never claim
+        # exclusion on evidence we do not have.
+        return False
+    # Two read locks do not exclude each other -- both can be held at once.
+    if modes_a <= {"read"} and modes_b <= {"read"}:
+        return False
+    # A read lock does not cover a write on the same side.
+    if kind_a == "write" and "read" in modes_a:
+        return False
+    if kind_b == "write" and "read" in modes_b:
+        return False
+    return True
+
+
 def _race_bundle_same_lock(
     left: Mapping[str, Any], right: Mapping[str, Any],
     race_fact_index: Mapping[str, Any],
+    *,
+    owner_a: str,
+    owner_b: str,
+    kind_a: str,
+    kind_b: str,
+    lock_modes: Mapping[tuple[str, str], frozenset[str]],
 ) -> bool:
-    """Whether every cross-side access pair has one exact shared lock."""
+    """Whether a same-lock pair is genuinely serialized, so it may be dropped.
+
+    The old test was identity-only: any common held lock discharged the pair,
+    which is wrong for a pthread_rwlock_t -- a read lock and a write lock do
+    not exclude each other, and a read lock does not cover a write. The pair is
+    dropped only when every cross-side access pair has some common lock that
+    (a) the producer attributed to it (SAME_LOCK, never DIFFERENT_LOCK),
+    (b) is held in modes that exclude the two operations, and (c) fully covers
+    both accesses (no UNLOCK_OMITTED_ON_PATH on either side).
+    """
     if left.get("status") != RESOLVED or right.get("status") != RESOLVED:
         return False
     common = set(left.get("locks") or ()) & set(right.get("locks") or ())
@@ -2815,12 +2944,25 @@ def _race_bundle_same_lock(
         return False
     same = race_fact_index.get("same") or {}
     different = race_fact_index.get("different") or set()
+    omitted = race_fact_index.get("omitted") or set()
     for left_id in left.get("access_event_ids") or ():
         for right_id in right.get("access_event_ids") or ():
             if left_id == right_id:
                 continue
             pair = frozenset((left_id, right_id))
-            if pair in different or not (set(same.get(pair) or ()) & common):
+            if pair in different:
+                return False
+            shared = set(same.get(pair) or ()) & common
+            if not shared:
+                return False
+            if not any(
+                _lock_hold_excludes(
+                    lock, owner_a, owner_b, kind_a, kind_b, lock_modes,
+                )
+                and (left_id, lock) not in omitted
+                and (right_id, lock) not in omitted
+                for lock in shared
+            ):
                 return False
     return True
 
@@ -2983,19 +3125,100 @@ def _spawn_index(points: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     """Which methods start which thread entry points, read once per query.
 
     Rebuilding this per candidate made the query's cost the product of its
-    candidate count and the repository's point count.
+    candidate count and the repository's point count. `spawns_of` and `joins_of`
+    carry the positions (start_byte) of each method's THREAD_SPAWN and
+    THREAD_JOIN points so the pair loop can decide, per end, whether an access
+    runs before the other end's spawn (PAIR-01) or after its join (PAIR-03).
     """
     entry_of: dict[str, set[str]] = {}
     entries: set[str] = set()
+    spawns_of: dict[str, list[tuple[int, str]]] = {}
+    joins_of: dict[str, list[int]] = {}
     for info in points.values():
-        if info["event_type"] != "THREAD_SPAWN":
+        owner = str(info.get("owner_symbol_id", ""))
+        if info["event_type"] == "THREAD_SPAWN":
+            function = info.get("thread_function", "")
+            if function:
+                entry_of.setdefault(owner, set()).add(function)
+                entries.add(function)
+                spawns_of.setdefault(owner, []).append(
+                    (int(info.get("start_byte") or 0), function)
+                )
+        elif info["event_type"] == "THREAD_JOIN":
+            joins_of.setdefault(owner, []).append(int(info.get("start_byte") or 0))
+    return {
+        "entry_of": entry_of,
+        "entries": entries,
+        "spawns_of": {owner: tuple(sorted(items)) for owner, items in spawns_of.items()},
+        "joins_of": {owner: tuple(sorted(positions)) for owner, positions in joins_of.items()},
+    }
+
+
+def _access_positions(
+    points: Mapping[str, Mapping[str, Any]], point_ids: Sequence[str],
+) -> list[int]:
+    """The start_byte of one side's READ/WRITE access events."""
+    return [
+        int(points[point_id]["start_byte"] or 0)
+        for point_id in point_ids
+        if points[point_id]["event_type"] in RACE_ACCESS_EVENTS
+    ]
+
+
+def _lifecycle_declines(
+    owner_a: str,
+    owner_b: str,
+    points_a: Sequence[str],
+    points_b: Sequence[str],
+    points: Mapping[str, Mapping[str, Any]],
+    spawn_index: Mapping[str, Any],
+    names: Mapping[str, str] | None,
+) -> str | None:
+    """The lifecycle reason to decline a pair, or None.
+
+    PAIR-01 (pre-spawn): an end whose method spawns the other end's entry, and
+    whose *every* access lies before that spawn, cannot race the not-yet-started
+    worker. PAIR-03 (post-join): an end whose method joins, and whose *every*
+    access lies after every join in that method, cannot race a worker that has
+    already finished.
+
+    The judgment is per-*access-set* and conservative: a pair is decline only
+    when the whole side is provably not concurrent. A side that touches the
+    subject both before and after a spawn/join is NOT provably non-concurrent
+    (UNCERTAIN => KEEP), so ``min``/``max`` are the *all* quantifiers, not the
+    existence quantifiers -- PAIR-01 asks ``last < min(spawn)`` (every access
+    precedes the earliest spawn) and PAIR-03 asks ``first > max(join)`` (every
+    access follows the latest join). Returns ``"pre_spawn"`` or
+    ``"post_lifecycle"`` for the first such end.
+    """
+    spawns_of = spawn_index.get("spawns_of") or {}
+    joins_of = spawn_index.get("joins_of") or {}
+    short_a = _short_name((names or {}).get(owner_a, ""))
+    short_b = _short_name((names or {}).get(owner_b, ""))
+    for owner, side_points, other_short in (
+        (owner_a, points_a, short_b),
+        (owner_b, points_b, short_a),
+    ):
+        positions = _access_positions(points, side_points)
+        if not positions:
             continue
-        function = info.get("thread_function", "")
-        if not function:
-            continue
-        entry_of.setdefault(str(info.get("owner_symbol_id", "")), set()).add(function)
-        entries.add(function)
-    return {"entry_of": entry_of, "entries": entries}
+        first_access = min(positions)
+        last_access = max(positions)
+        if other_short:
+            spawn_bytes = [
+                byte for byte, entry in spawns_of.get(owner, ())
+                if entry == other_short
+            ]
+            # All accesses precede the earliest spawn -> nothing runs after the
+            # worker starts, so the whole side is provably pre-spawn.
+            if spawn_bytes and last_access < min(spawn_bytes):
+                return "pre_spawn"
+        join_bytes = joins_of.get(owner, ())
+        # All accesses follow the latest join -> nothing runs while the worker
+        # is alive, so the whole side is provably post-join.
+        if join_bytes and first_access > max(join_bytes):
+            return "post_lifecycle"
+    return None
 
 
 def _may_parallel_detail(

@@ -397,7 +397,7 @@ class SparseCacheTests(SparseCfgTestBase):
     def test_events_dependency_change_invalidates(self) -> None:
         # a sparse cfg built under an older events contract must read stale
         metadata = self._cfg_metadata("sparse_cfg:cpp")
-        self.assertEqual(metadata["dependencies"]["events:cpp"], "cpp-events-v1")
+        self.assertEqual(metadata["dependencies"]["events:cpp"], "cpp-events-v2")
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute(
                 "UPDATE analysis_state SET metadata=json_set(metadata, "

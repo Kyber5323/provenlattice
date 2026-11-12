@@ -39,9 +39,11 @@ from __future__ import annotations
 
 import bisect
 import inspect
+import re
 import tomllib
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
@@ -107,9 +109,23 @@ USE_AFTER_FREE = "use_after_free"
 DOUBLE_FREE = "double_free"
 TAINT_PATH = "taint_path"
 ERROR_HANDLING = "error_handling"
+INTEGER_OVERFLOW = "integer_overflow"
+# No matrix key: `defect-evidence-matrix-v1.md` has no state-machine row, and
+# inventing a number would make the table unverifiable. Addressed by its query
+# name, exactly as `taint_path` is.
+#
+# Deliberately NOT in QUERY_NAMES, so it is absent from `all`. The rule reads
+# compared-but-never-assigned states, and the walker does not record a
+# declaration initializer (`static st_t g = A;`) as an assignment at all -- so a
+# state initialised where it is declared, and compared against that value, is
+# reported. That shape is common enough that including it in `all` would trade
+# precision for a candidate the reader cannot trust yet. Opt-in until either the
+# initializer point exists or the rule is shown calibrated on a benchmark.
+STATE_MACHINE = "state_machine"
 QUERY_NAMES = (
     RESOURCE_LIFETIME, LOCK_ORDER, RACE_CONDITION,
     NULL_FLOW, USE_AFTER_FREE, DOUBLE_FREE, TAINT_PATH, ERROR_HANDLING,
+    INTEGER_OVERFLOW,
 )
 
 # The matrix keys the stage 6 queries answer. `taint_path` has no matrix family:
@@ -120,6 +136,10 @@ QUERY_NAMES = (
 # no key at all, so the query is addressed by its query name and nothing else.
 NULL_FLOW_KEY = "3.1"
 DOUBLE_FREE_KEY = "4.2"
+# Matrix 2.1 (integer overflow / wraparound, CWE-190/191). The row exists in
+# the matrix with grade B; the query below is the one that produces candidates
+# for it, so the key is a real matrix number and not a name standing in for one.
+INTEGER_OVERFLOW_KEY = "2.1"
 USE_AFTER_FREE_KEY = "4.3"
 TAINT_KEY = "taint"
 ERROR_HANDLING_KEY = "9.1"
@@ -149,6 +169,22 @@ TAINT_CONFIDENCE = {RESOLVED: 0.3, AMBIGUOUS: 0.2}
 # predicate is an approximation -- the graph cannot read `fd == -1`, so "was the
 # result examined" is answered by "did control branch afterwards".
 ERROR_HANDLING_CONFIDENCE = {RESOLVED: 0.4, AMBIGUOUS: 0.2}
+# Integer overflow sits in the taint band and cannot reach `resolved` at all:
+# the arithmetic shape is a fact, but the three facts that decide the defect
+# (width, range check, source trust) are outside the graph. A candidate here is
+# a prompt to look, which is what 2.1's grade-B row asks for.
+#
+# The ambiguous band is 0.3 -- the lowest value that survives the default
+# confidence gate. A lower band would make the whole family invisible to every
+# caller who did not know to lower the gate, which is not the same thing as
+# being careful: the shape itself (a runtime product feeding an allocation
+# size) is as well-evidenced as anything else at this level, and it is the
+# *confirmation* that is missing, not the candidate.
+INTEGER_OVERFLOW_CONFIDENCE = {AMBIGUOUS: 0.3, UNRESOLVED: 0.1}
+# A compared-but-never-assigned state is one graph fact with several innocent
+# explanations (memcpy, initializer in another TU, a macro), so it sits at the
+# lowest band that survives the default gate: worth showing, never asserted.
+STATE_MACHINE_CONFIDENCE = {AMBIGUOUS: 0.3, UNRESOLVED: 0.1}
 
 # SUB-11 / R11 precision guardrail. Confidence above is a *band*, not a
 # measurement, so the gate is a band cut, not a probability threshold: a
@@ -360,6 +396,21 @@ _MISSING_SOURCE_TRUST = (
     "not written by this program, not who wrote them -- a deployment question "
     "the query cannot answer"
 )
+_MISSING_ARITH_WIDTH = (
+    "the width the size arithmetic happens in: an `int` product wraps at 2^31 "
+    "and a `size_t` one at 2^64, and which one this expression uses depends on "
+    "declarations the events layer does not carry"
+)
+_MISSING_RANGE_CHECK = (
+    "whether a bound on the count dominates the allocation: the graph holds no "
+    "dominance edge from a range check to a size operand"
+)
+_MISSING_STATE_ASSIGNMENT = (
+    "whether the compared state value is assigned somewhere the graph cannot "
+    "see: a `memcpy` into the struct, an initializer in another translation "
+    "unit, or a macro that expands to an assignment are all invisible here, so "
+    "a missing assignment is a shape and not a verdict"
+)
 # Matrix 9.1's own "AI-required Semantics" column says this one out loud: which
 # APIs must have their return value checked is API semantics, not a graph fact.
 # It is also what keeps the candidate population honest -- a call whose result
@@ -378,6 +429,26 @@ _MISSING_DISCARDED_RESULT = (
     "outside this query entirely -- and so is a result passed straight on as an "
     "argument, which no branch examines and no variable holds"
 )
+
+# Matrix grades, used only for *selection* (see Candidate.rank_key). The grade
+# column was carried in defect_patterns.toml from the start but nothing read it,
+# so a grade-A pattern and a grade-C one competed on equal terms. A is the
+# matrix's own "AI can confirm, graph can propose" tier; C is the speculative
+# tier. Unknown keys (taint has no matrix row by design) rank below every graded
+# family rather than crashing the lookup.
+GRADE_RANK = {"A": 3, "B": 2, "C": 1}
+_GRADE_RANK_UNKNOWN = 0
+
+_RESOLUTION_RANK = {RESOLVED: 2, AMBIGUOUS: 1, UNRESOLVED: 0}
+
+
+@lru_cache(maxsize=None)
+def _family_grade_rank(defect_key: str) -> int:
+    """The grade tier of a matrix key, cached: one TOML read per distinct key."""
+    for pattern in load_defect_patterns():
+        if pattern.key == defect_key:
+            return GRADE_RANK.get(pattern.grade, _GRADE_RANK_UNKNOWN)
+    return _GRADE_RANK_UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,6 +487,37 @@ class Candidate:
 
     def sort_key(self) -> tuple:
         return (self.defect_key, self.anchor, self.discriminator)
+
+    def rank_key(self) -> tuple:
+        """The *quality* order: what a reader should see first.
+
+        ``sort_key`` is identity, and identity is not quality -- it starts with
+        the matrix key's lexical order, which puts every ``1.1`` candidate ahead
+        of every ``3.1`` one no matter how well each is evidenced, and then
+        orders within a family by hashed anchor id. Truncating on it selects the
+        alphabetically first family and a hash sample of its members. That is
+        how a top-20 window ends up 100% ``1.1`` while the population holds
+        better-evidenced candidates 600 ranks deeper.
+
+        This key exists for selection and display and is *not* used for
+        identity: nothing that has to survive reformatting may depend on it.
+
+        Order, highest first:
+          1. family grade   A > B > C, from the matrix row (unused before),
+          2. confidence band,
+          3. resolution      resolved > ambiguous > unresolved,
+          4. directness      a fact attached to the anchor outranks one reached
+                             through a walk,
+          5. anchor + discriminator, so the order stays total and deterministic.
+        """
+        return (
+            -_family_grade_rank(self.defect_key),
+            -self.confidence,
+            -_RESOLUTION_RANK.get(self.resolution_status, 0),
+            -int(bool(self.metadata.get("direct", True))),
+            self.anchor,
+            self.discriminator,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -506,6 +608,8 @@ def run(
         DOUBLE_FREE: double_free,
         TAINT_PATH: taint_path,
         ERROR_HANDLING: error_handling,
+        INTEGER_OVERFLOW: integer_overflow,
+        STATE_MACHINE: state_machine,
     }
     try:
         function = functions[query]
@@ -1102,7 +1206,7 @@ def resource_lifetime(
             candidates.append(candidate)
             contract_covered += 1 if covered else 0
 
-    candidates.sort(key=Candidate.sort_key)
+    candidates.sort(key=Candidate.rank_key)
     truncated = truncated or len(candidates) > max_candidates
     coverage = {
         "acquire_points": sum(
@@ -1900,7 +2004,7 @@ def lock_order(
             continue
         candidates.append(candidate)
 
-    candidates.sort(key=Candidate.sort_key)
+    candidates.sort(key=Candidate.rank_key)
     truncated = len(candidates) > max_candidates
     coverage = {
         "methods_with_locks": len(locks_by_method),
@@ -2602,7 +2706,7 @@ def race_condition(
                     )
                 )
 
-    candidates.sort(key=Candidate.sort_key)
+    candidates.sort(key=Candidate.rank_key)
     if bindings is not None:
         # Tag the candidates the composition created, with the records that
         # made them: an auditor reads the join strength (`declared` against
@@ -2996,6 +3100,18 @@ def _race_candidate(
             "identity": identity_key,
             "method": _method_name(points[anchor], names),
             "owner_symbol_id": str(points[anchor].get("owner_symbol_id", "")),
+            # The identity fields the other seven families already publish.
+            # Without them a race candidate names its object only by spelling,
+            # so a variable-level reader (or a reviewer) cannot tell a file
+            # static from a local that happens to share the name, and the
+            # `storage`/`member` blocks the rest of the defect layer carries
+            # are absent from exactly the family that produces the most
+            # candidates. Read off the same point the anchor names, so the two
+            # halves of the pair describe one object.
+            "storage": points[anchor].get("subject_storage", ""),
+            "type": points[anchor].get("subject_type", ""),
+            "member": points[anchor].get("subject_member", ""),
+            "decl": points[anchor].get("subject_decl", ""),
         },
         anchor=anchor,
         # Both methods, canonically ordered, because the anchor does not say
@@ -4126,7 +4242,7 @@ def null_flow(
             names=names, identity=identity, subject=subject,
         ))
 
-    candidates.sort(key=Candidate.sort_key)
+    candidates.sort(key=Candidate.rank_key)
     truncated = len(candidates) > max_candidates
     coverage = {
         "population": dict(sorted(population.items())),
@@ -4331,7 +4447,7 @@ def use_after_free(
                 ))
                 states[AMBIGUOUS] += 1
 
-    candidates.sort(key=Candidate.sort_key)
+    candidates.sort(key=Candidate.rank_key)
     truncated = len(candidates) > max_candidates
     coverage = {
         "population": dict(sorted(population.items())),
@@ -4607,7 +4723,7 @@ def double_free(
                     max_paths=max_paths, reach_state=state,
                 ))
 
-    candidates.sort(key=Candidate.sort_key)
+    candidates.sort(key=Candidate.rank_key)
     truncated = len(candidates) > max_candidates
     coverage = {
         "population": dict(sorted(population.items())),
@@ -4625,6 +4741,398 @@ def double_free(
         query=DOUBLE_FREE, candidates=tuple(candidates[:max_candidates]),
         coverage=coverage, truncated=truncated,
     )
+
+
+def integer_overflow(
+    events: Iterable[Any],
+    edges: Iterable[Any],
+    *,
+    subject: str | None = None,
+    identity: bool = True,
+    max_hops: int = 64,
+    max_paths: int = 8,
+    max_candidates: int = 20,
+    names: Mapping[str, str] | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
+    defect_keys: Collection[str] | None = None,
+) -> DefectQueryResult:
+    """Matrix 2.1/2.2: an allocation size computed by a runtime multiplication.
+
+    Candidate-grade only, and deliberately so. Confirming an integer overflow
+    needs three facts this graph does not hold: the width the arithmetic happens
+    in (an `int` product wraps at 2^31, a `size_t` one at 2^64), whether a range
+    check dominates the allocation, and whether the count is attacker
+    controlled. Every candidate therefore carries `ambiguous` and says which of
+    those it is missing, rather than pretending the arithmetic itself settles
+    the question.
+
+    What *is* a graph fact, and the whole population here, is the shape: an
+    `ARITH` point the sparse CFG walker emitted for a `*` or `<<` inside an
+    allocation's size argument. A product of two literals is published with
+    `constant=true` and declined -- a folded product cannot wrap -- and the
+    decline is counted, not hidden.
+    """
+    points, adjacency = _published_graph(events, edges, points, adjacency)
+    wanted = _wanted(INTEGER_OVERFLOW_KEY, defect_keys)
+    candidates: list[Candidate] = []
+    population = {"arith_points": 0, "size_products": 0, "constant_products": 0,
+                  "with_subject": 0, "unidentified": 0}
+    for point_id in sorted(points):
+        info = points[point_id]
+        if info.get("event_type") != "ARITH":
+            continue
+        population["arith_points"] += 1
+        if not wanted:
+            continue
+        population["size_products"] += 1
+        if str(info.get("constant", "")) == "true" or not info.get("subject"):
+            population["constant_products"] += 1
+            continue
+        name = _identity_display(info)
+        if subject is not None and name != subject:
+            continue
+        identity_key = _identity(info, identity=identity)
+        if not identity_key:
+            population["unidentified"] += 1
+            continue
+        population["with_subject"] += 1
+        annotations = info.get("annotations") if isinstance(info.get("annotations"), dict) else {}
+        operands = str(info.get("operands") or annotations.get("operands") or "")
+        candidates.append(Candidate(
+            defect_key=INTEGER_OVERFLOW_KEY,
+            query=INTEGER_OVERFLOW,
+            subject={
+                "kind": "size_expression",
+                "name": name,
+                "identity": identity_key,
+                "storage": info.get("subject_storage", ""),
+                "type": info.get("subject_type", ""),
+                "member": info.get("subject_member", ""),
+                "decl": info.get("subject_decl", ""),
+                "method": _method_name(info, names),
+                "owner_symbol_id": str(info.get("owner_symbol_id", "")),
+            },
+            anchor=point_id,
+            discriminator=(
+                f"{identity_key or 'anonymous'}|"
+                f"{info.get('owner_symbol_id', '')}|"
+                f"{info.get('operator', '')}|{operands}|"
+                f"{info.get('expression', '')}"
+            ),
+            resolution_status=AMBIGUOUS,
+            confidence=INTEGER_OVERFLOW_CONFIDENCE[AMBIGUOUS],
+            facts=(_point_fact(point_id, info, names),),
+            uncertain_facts=(
+                _uncertain(
+                    "ARITH_WIDTH", decisive=True,
+                    detail=(
+                        "the width this arithmetic happens in is not in the graph: "
+                        "an int product wraps at 2^31 and a size_t one at 2^64, "
+                        "and the same expression is one or the other depending "
+                        "on declarations the events layer does not carry"
+                    ),
+                    point=point_id, source=_span(info),
+                ),
+                _uncertain(
+                    "RANGE_CHECK", decisive=True,
+                    detail=(
+                        "whether a bound on the count dominates this allocation "
+                        "is a dominance question over the size operand, and the "
+                        "graph holds no such edge for it"
+                    ),
+                    point=point_id, source=_span(info),
+                ),
+                _uncertain(
+                    "SOURCE_TRUST", decisive=True,
+                    detail=(
+                        "whether the count is attacker controlled is a deployment "
+                        "fact, not a graph fact -- the same product is a bug in a "
+                        "parser and a constant in a test"
+                    ),
+                    point=point_id, source=_span(info),
+                ),
+            ),
+            paths=(),
+            source_evidence=_source_evidence((point_id,), points),
+            missing_evidence=(
+                _MISSING_ARITH_WIDTH, _MISSING_RANGE_CHECK, _MISSING_SOURCE_TRUST,
+            ),
+            metadata={
+                "operator": info.get("operator", ""),
+                "operands": operands,
+                "size_expression": info.get("expression", ""),
+                "flow_class": "size_computation",
+                "reach": "",
+                "path_recorded": False,
+                "paths_truncated": False,
+                "anchor_span": {
+                    "relative_path": info.get("relative_path", ""),
+                    "start_line": info.get("start_line", 0),
+                    "end_line": info.get("end_line", 0),
+                },
+                "methods": [item for item in (_method_name(info, names),) if item],
+                "exit_point": "",
+            },
+        ))
+
+    candidates.sort(key=Candidate.rank_key)
+    truncated = len(candidates) > max_candidates
+    coverage = {
+        "population": dict(sorted(population.items())),
+        "candidates": len(candidates),
+        "candidates_by_key": _count_by_key(candidates),
+        "max_hops": max_hops,
+        "max_paths": max_paths,
+        "semantic_points": len(points),
+        "semantic_edges": sum(len(item) for item in adjacency.values()),
+        "points_by_type": _points_by_type(points),
+    }
+    return DefectQueryResult(
+        query=INTEGER_OVERFLOW, candidates=tuple(candidates[:max_candidates]),
+        coverage=coverage, truncated=truncated,
+    )
+
+
+def state_machine(
+    events: Iterable[Any],
+    edges: Iterable[Any],
+    *,
+    subject: str | None = None,
+    identity: bool = True,
+    max_hops: int = 64,
+    max_paths: int = 8,
+    max_candidates: int = 20,
+    names: Mapping[str, str] | None = None,
+    points: Points | None = None,
+    adjacency: Adjacency | None = None,
+    defect_keys: Collection[str] | None = None,
+) -> DefectQueryResult:
+    """A state compared against a value that nothing ever assigns to it.
+
+    **This query has no matrix family.** `defect-evidence-matrix-v1.md` has no
+    state-machine row at all, and inventing a number for one would make every
+    key in that table unverifiable against its source. The `taint_path` query
+    already carries this asymmetry -- addressed by its query name, not by a
+    matrix key -- and this follows it rather than widening the matrix on its own
+    authority.
+
+    What is claimed is deliberately narrow, because "a state machine is wrong"
+    has no single graph predicate. The shape below is one that *is* checkable
+    from facts the walker already records:
+
+      * a `CHECK` compares a subject against a named token
+        (`if (state == ST_RUNNING)`),
+      * no `WRITE` anywhere in the repository ever assigns that token to that
+        subject (`state = ST_RUNNING` never happens).
+
+    A token that is compared but never assigned is a state the program can
+    never enter: either the transition is missing (a real defect) or the
+    constant is a typo for one that is assigned (a real defect that is easier
+    to fix and just as real). Both readings are worth a reader's attention, and
+    neither is a finding -- the candidate is `ambiguous`, because the value
+    could also arrive through a means the graph does not model.
+
+    **Known blind spot, and the reason this query is opt-in.** A declaration
+    initializer (`static state_t g = ST_IDLE;`) produces no point at all -- the
+    walker records assignments, not initialisers -- so a state initialised where
+    it is declared, and compared against that value, is reported as
+    never-assigned. That is a false positive, it is common, and it is why this
+    query is not part of `all` (see `QUERY_NAMES`). Fixing it means emitting the
+    initialiser as a WRITE point, which changes every family that reads writes
+    and is therefore a separate, measured change.
+
+    Literals and the null family are excluded: `if (n == 0)` is a falsy test,
+    not a state transition, and treating it as one would bury the shape this
+    query exists for.
+    """
+    points, adjacency = _published_graph(events, edges, points, adjacency)
+    compared: dict[str, dict[str, str]] = {}
+    assigned: dict[str, set[str]] = defaultdict(set)
+    identity_by_name: dict[str, str] = {}
+    display: dict[str, str] = {}
+    population = {"conditions": 0, "writes": 0, "states": 0,
+                  "compared_tokens": 0, "unassigned_tokens": 0,
+                  "unattributed_conditions": 0}
+
+    # Only a WRITE can name a state variable. The walker also puts the *value*
+    # of an assignment on a READ point (`g_state = ST_IDLE` reads ST_IDLE), so a
+    # map built from every point with a subject would file the enum constants as
+    # states -- and then "ST_IDLE is compared but never assigned" becomes a
+    # candidate about the constant. What makes a name a state is that something
+    # assigns to it.
+    for point_id in sorted(points):
+        info = points[point_id]
+        if info.get("event_type") != "WRITE":
+            continue
+        name = _identity_display(info)
+        key = _identity(info, identity=identity)
+        if name and key:
+            identity_by_name[name] = key
+
+    for point_id in sorted(points):
+        info = points[point_id]
+        event_type = info.get("event_type")
+        if event_type == "WRITE":
+            population["writes"] += 1
+            key = _identity(info, identity=identity)
+            source = str(info.get("write_source") or "")
+            if key and _is_state_token(source):
+                assigned[key].add(source)
+            continue
+        if event_type not in {"CHECK", "BRANCH"}:
+            continue
+        expression = str(info.get("expression") or "")
+        if not expression:
+            continue
+        population["conditions"] += 1
+        attributed = False
+        for name, token in _compared_pairs(expression, identity_by_name):
+            key = identity_by_name.get(name)
+            if key is None:
+                continue
+            attributed = True
+            population["compared_tokens"] += 1
+            display.setdefault(key, name)
+            compared.setdefault(key, {}).setdefault(token, point_id)
+        if not attributed:
+            population["unattributed_conditions"] += 1
+
+    candidates: list[Candidate] = []
+    population["states"] = len(compared)
+    for key in sorted(compared):
+        name = display.get(key, "")
+        if subject is not None and name != subject:
+            continue
+        ever_assigned = assigned.get(key, set())
+        for token in sorted(compared[key]):
+            if token in ever_assigned:
+                continue
+            population["unassigned_tokens"] += 1
+            anchor = compared[key][token]
+            info = points[anchor]
+            candidates.append(Candidate(
+                defect_key="",
+                query=STATE_MACHINE,
+                subject={
+                    "kind": "state_value",
+                    "name": name,
+                    "identity": key,
+                    "value": token,
+                    "storage": info.get("subject_storage", ""),
+                    "type": info.get("subject_type", ""),
+                    "member": info.get("subject_member", ""),
+                    "decl": info.get("subject_decl", ""),
+                    "method": _method_name(info, names),
+                    "owner_symbol_id": str(info.get("owner_symbol_id", "")),
+                },
+                anchor=anchor,
+                discriminator=(
+                    f"{key}|{token}|"
+                    f"{info.get('relative_path', '')}|{info.get('start_line', '')}"
+                ),
+                resolution_status=AMBIGUOUS,
+                confidence=STATE_MACHINE_CONFIDENCE[AMBIGUOUS],
+                facts=(_point_fact(anchor, info, names),),
+                uncertain_facts=(
+                    _uncertain(
+                        "STATE_ASSIGNMENT", decisive=True,
+                        detail=(
+                            f"`{name}` is compared against `{token}` but no WRITE "
+                            "in this repository assigns that value to it; a value "
+                            "can still arrive through a path the graph does not "
+                            "model (memcpy, initializer, macro), so this is a "
+                            "shape and not a verdict"
+                        ),
+                        point=anchor, source=_span(info),
+                    ),
+                ),
+                paths=(),
+                source_evidence=_source_evidence((anchor,), points),
+                missing_evidence=(_MISSING_STATE_ASSIGNMENT,),
+                metadata={
+                    "compared_value": token,
+                    "never_assigned": True,
+                    "flow_class": "state_transition",
+                    "reach": "",
+                    "path_recorded": False,
+                    "paths_truncated": False,
+                    "anchor_span": {
+                        "relative_path": info.get("relative_path", ""),
+                        "start_line": info.get("start_line", 0),
+                        "end_line": info.get("end_line", 0),
+                    },
+                    "methods": [item for item in (_method_name(info, names),) if item],
+                    "exit_point": "",
+                },
+            ))
+
+    candidates.sort(key=Candidate.rank_key)
+    truncated = len(candidates) > max_candidates
+    coverage = {
+        "population": dict(sorted(population.items())),
+        "candidates": len(candidates),
+        "candidates_by_key": _count_by_key(candidates),
+        "max_hops": max_hops,
+        "max_paths": max_paths,
+        "semantic_points": len(points),
+        "semantic_edges": sum(len(item) for item in adjacency.values()),
+        "points_by_type": _points_by_type(points),
+    }
+    return DefectQueryResult(
+        query=STATE_MACHINE, candidates=tuple(candidates[:max_candidates]),
+        coverage=coverage, truncated=truncated,
+    )
+
+
+def _is_state_token(text: str) -> bool:
+    """Whether a write's right-hand side names a state value.
+
+    An identifier only: a number (`st = 0`) is a flag, and following numbers
+    would turn every `if (n == 1)` into a state-machine candidate. NULL-family
+    spellings are excluded for the same reason -- `if (p == NULL)` tests a
+    pointer, not a state.
+    """
+    if not text or not text.replace("_", "").isalnum():
+        return False
+    if text[0].isdigit():
+        return False
+    return text not in _STATE_TOKEN_EXCLUDED
+
+
+# Compared values that are not state names. Kept as a set rather than a regex
+# so a reader can see exactly what is being declined.
+_STATE_TOKEN_EXCLUDED = frozenset({
+    "NULL", "null", "nullptr", "NULLPTR", "nil", "true", "false",
+    "TRUE", "FALSE", "True", "False",
+})
+
+
+def _compared_pairs(expression: str, known: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """The (state-name, compared-token) pairs an `==` / `!=` condition spells.
+
+    Direction matters: `g_state == ST_RUNNING` says something about `g_state`,
+    while `ST_RUNNING == g_state` says the same thing -- but treating *both*
+    sides as a potential subject turns the constant into one, and then "ST_RUNNING
+    is compared but never assigned" becomes a candidate about the constant
+    itself. Only a side that resolves to a known state name is a subject.
+
+    Only the two equality operators: an ordering comparison (`st > ST_RUNNING`)
+    is arithmetic on an enum, not a comparison against a state.
+    """
+    pairs: list[tuple[str, str]] = []
+    for match in _COMPARISON_PATTERN.finditer(expression):
+        left, right = match.group(1), match.group(2)
+        if not (_is_state_token(left) and _is_state_token(right)):
+            continue
+        if left in known:
+            pairs.append((left, right))
+        if right in known:
+            pairs.append((right, left))
+    return tuple(pairs)
+
+
+_COMPARISON_PATTERN = re.compile(r"([A-Za-z_]\w*)\s*(?:==|!=)\s*([A-Za-z_]\w*)")
 
 
 def _release_pair_status(
@@ -5163,7 +5671,7 @@ def taint_path(
             },
         ))
 
-    candidates.sort(key=Candidate.sort_key)
+    candidates.sort(key=Candidate.rank_key)
     truncated = len(candidates) > max_candidates
     coverage = {
         "population": dict(sorted(population.items())),
@@ -5744,7 +6252,7 @@ def error_handling(
                 route=(route_points, route_edges),
             ))
 
-    candidates.sort(key=Candidate.sort_key)
+    candidates.sort(key=Candidate.rank_key)
     truncated = len(candidates) > max_candidates
     coverage = {
         "population": dict(sorted(population.items())),

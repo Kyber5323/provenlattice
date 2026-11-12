@@ -106,6 +106,9 @@ def analyze_c_dfg_scope(
             raise RuntimeError("repository is not indexed; run `provenlattice index` first")
         repo_id = repository["repo_id"]
         store = AnalysisStore(storage)
+        # One transaction for the whole file loop instead of one commit per
+        # file; see AnalysisStore.defer_commit for the measurement.
+        store.defer_commit()
         for source in scoped:
             if Path(source.relative_path).suffix.lower() not in EVENTS_SUFFIXES:
                 skipped_unsupported.append(source.relative_path)

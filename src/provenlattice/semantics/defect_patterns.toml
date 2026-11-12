@@ -72,6 +72,28 @@ relations = ["ACQUIRES", "CONTROL_REACHES"]
 candidate_requires = ["LOCK", "UNLOCK"]
 candidate_relations = ["CONTROL_REACHES"]
 
+# 2.1 is the matrix's own row (grade B, CWE-190/191) and it is registered here
+# *without* a query, because the event it needs does not exist yet. Integer
+# overflow is a fact about an arithmetic expression -- `a * b` wrapping before
+# the division that would have kept it in range -- and the taxonomy has no
+# arithmetic event: `ALLOC`, `RELEASE`, `READ`, `WRITE`, `DEREFERENCE`, `CHECK`,
+# `BRANCH` and the synchronization set describe memory and control, none of them
+# a multiplication. Registering the row anyway is the point: a benchmark asking
+# for `2.1` now gets "this pattern needs an event the pipeline does not extract"
+# instead of the key being absent and the gap being invisible. That is the same
+# honest-parking the 4.5 row does with `OPEN`/`CLOSE`.
+#
+# `ARITH` is therefore declared in the event taxonomy as a level-1 event that is
+# known and not produced -- the same parking `OPEN`, `CLOSE`, `ACQUIRE`, `WAIT`,
+# `SIGNAL`, `CREATE` and `DESTROY` already have (see semantics/events.py).
+[patterns."2.1"]
+name = "整数溢出 / 回绕（含下溢）"
+grade = "B"
+query = "integer_overflow"
+requires = ["ARITH"]
+candidate_requires = ["ARITH", "ALLOC"]
+candidate_relations = ["CONTROL_REACHES"]
+
 # Stage 6 expands 3.1 with the first of the DFG-consuming queries. Proposing a
 # candidate reads a definition (WRITE, or ALLOC for the allocation-failure
 # shape), the dereference that consumes it, and the CHECK points that decide

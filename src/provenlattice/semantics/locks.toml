@@ -1,0 +1,79 @@
+# Lock primitives a repository uses that no C library declares.
+#
+# Why this file exists: `cpp.toml`'s `[events.LOCK]` / `[events.UNLOCK]` lists
+# the standard spellings (POSIX, C11, Win32, GLib). A repository that wraps its
+# own lock -- `wds_lock` / `wds_unlock`, `spin_lock` / `spin_unlock` -- is
+# invisible to that list, so the events layer mints no LOCK or UNLOCK point at
+# all, `lock_order` reports `lock_points = 0`, and a genuine inversion between
+# two such locks is published as nothing. The failure is silent: the query
+# answers "no lock-order findings" over a repository full of them.
+#
+# This is the declared-data fix for that, in the same shape as `contracts.toml`
+# and `taint.toml`: the knowledge that cannot be read out of the graph is
+# written down where a reader can check it, rather than buried in a
+# `if name.startswith(...)` branch.
+#
+# Discipline, and the reason there are no wildcard families here:
+#
+#   * Every entry is an **exact** callee name, matched the way the vocabulary
+#     already matches `calls` -- on the final identifier of the spelling, so
+#     `obj->wds_lock()` is read as `wds_lock`.
+#   * Suffix families (`*_lock`) were considered and rejected. The match would
+#     have to be a substring test, and `_release()`, `_exit()` and `_enter()`
+#     are ordinary method names on ordinary objects; the false LOCK points that
+#     would mint are indistinguishable from real ones and would poison every
+#     lock query that reads them. A name listed here is a claim a reader can
+#     falsify against the source.
+#   * Adding a name only ever *adds* a candidate population. It cannot make an
+#     existing finding disappear, so a wrong entry costs precision, never recall.
+#
+# To extend this for a repository, add its spellings below and re-run
+# `analyze --features events:cpp,sparse_cfg:cpp,sparse_dfg:cpp`.
+
+note = """
+Scope statements, stated because the alternative is pretending.
+
+1. A repository whose lock spelling is listed neither in `cpp.toml` nor here
+   still reads as "no locks". That is a coverage gap, and `lock_points = 0` is
+   the honest signal for it -- not a finding.
+
+2. These entries are claims about *acquisition*, not about blocking. Whether a
+   listed acquisition blocks, fails immediately, or waits is still decided by
+   the events layer's acquire-kind data, which treats an unrecognised name as
+   a blocking acquisition.
+
+3. The names are matched exactly. `spin_lock` and `spin_trylock` are two
+   entries, not one pattern; a repository that has both must list both.
+
+4. Empty is the normal shipped state. This file carries no repository-specific
+   guesses, because guessing a spelling is exactly the folklore that
+   `contracts.toml` refuses to ship.
+"""
+
+# ---------------------------------------------------------------------------
+# Common C wrappers seen across repositories, each an exact final identifier.
+# These are additive on top of `cpp.toml`; a name already listed there is a
+# duplicate, not a conflict (the loader merges by set union).
+
+[acquire]
+calls = [
+    # Lock wrappers that most commonly escape the POSIX/GLib lists.
+    "spin_lock", "spin_trylock",
+    "raw_spin_lock", "raw_spin_lock_irqsave",
+    # Linux-kernel style primitives: the same shapes under their own names.
+    "mutex_lock", "mutex_trylock", "mutex_lock_interruptible",
+    "down_read", "down_write", "down_read_trylock", "down_write_trylock",
+    "read_lock", "write_lock", "read_lock_irqsave", "write_lock_irqsave",
+    # rwlock / seqcount style wrappers.
+    "rwlock_acquire_read", "rwlock_acquire_write",
+]
+
+[release]
+calls = [
+    "spin_unlock",
+    "raw_spin_unlock", "raw_spin_unlock_irqrestore",
+    "mutex_unlock",
+    "up_read", "up_write",
+    "read_unlock", "write_unlock", "read_unlock_irqrestore", "write_unlock_irqrestore",
+    "rwlock_release",
+]

@@ -102,6 +102,11 @@ class SQLiteStorage:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
+        # Set when a component (the analysis store) writes inside a transaction
+        # it expects this object to close. Committing on close turns a scope of
+        # per-file publishes into one durable transaction -- see
+        # AnalysisStore.__init__ for the measurement behind it.
+        self._commit_on_close = False
         self.connection.executescript(SCHEMA)
         # V0.3 introduced the reverse boundary index. Backfill snapshots created
         # by V0.2 once, before they are frozen as an Overlay base.
@@ -118,12 +123,26 @@ class SQLiteStorage:
         self.connection.commit()
 
     def close(self) -> None:
+        if self._commit_on_close:
+            self._commit_on_close = False
+            self.connection.commit()
         self.connection.close()
 
     def __enter__(self) -> "SQLiteStorage":
         return self
 
-    def __exit__(self, *args: object) -> None:
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if exc_type is not None:
+            # A failure anywhere in the scope discards the whole scope rather
+            # than publishing the files it had already reached: the analysis
+            # freshness contract is per file, but a partially applied scope is
+            # still a state nobody asked for.
+            self._commit_on_close = False
+            try:
+                self.connection.rollback()
+            finally:
+                self.connection.close()
+            return
         self.close()
 
     @contextmanager

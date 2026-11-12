@@ -795,6 +795,12 @@ class SparseCfgBuilder:
             self._point_from_hit(hit, node)
             for hit in self._hits_by_span.get((node.start_byte, node.end_byte), ())
         ]
+        # Matrix 2.1/2.2 (ARITH): the multiplication inside an allocation's size
+        # argument. Emitted beside the ALLOC point it feeds, and only for an
+        # ALLOC hit -- see `size_arithmetic` for why the population is bounded
+        # this way.
+        if any(point.event_type == "ALLOC" for point in threaded):
+            threaded.extend(self._size_arithmetic_points(node))
         structural = self._structural_point(node)
         if structural is not None:
             threaded.append(structural)
@@ -1781,6 +1787,35 @@ class SparseCfgBuilder:
     def _is_null(self, node: Any) -> bool:
         return node is not None and node.type in self.profile.null_node_types
 
+    def _size_arithmetic_points(self, node: Any) -> list["_Point"]:
+        """ARITH points for the multiplications inside this allocation's size.
+
+        The subject is the first operand that is not a literal: the value that
+        carries the runtime count. A product of two literals has no subject, is
+        published with `constant=true`, and the query declines it -- a folded
+        product cannot wrap at run time, and saying so out loud is more useful
+        than omitting the point.
+        """
+        points: list[_Point] = []
+        for record in size_arithmetic(node, self.source):
+            subject = next(
+                (item["text"] for item in record["operands"] if not item["literal"]), "")
+            annotations = {
+                "expression": record["expression"],
+                "operator": record["operator"],
+                "operands": ",".join(item["text"] for item in record["operands"]),
+                "constant": "false" if subject else "true",
+            }
+            subject_node = next(
+                (item["node"] for item in record["operands"] if not item["literal"]), None)
+            if subject and subject_node is not None:
+                annotations["subject"] = subject
+                annotations.update(self._subject_facts(subject_node, subject))
+            points.append(self._new_point(
+                "ARITH", record["node"], annotations=annotations,
+                matched_name=record["operator"]))
+        return points
+
     def _new_point(
         self,
         event_type: str,
@@ -2633,6 +2668,13 @@ def materialize_points(events: Iterable[Any], edges: Iterable[Any]) -> dict[str,
             "unconditional": metadata.get("unconditional", ""),
             "alias": metadata.get("alias", ""),
             "null_source": metadata.get("null_source", ""),
+            # ARITH (matrix 2.1/2.2): the operator, the operands it combines,
+            # and whether the product is a compile-time constant. The integer
+            # overflow query reads these directly, so they must survive
+            # materialisation like every other annotation fact above.
+            "operator": metadata.get("operator", ""),
+            "operands": metadata.get("operands", ""),
+            "constant": metadata.get("constant", ""),
             "matched_name": _field_of(event, "matched_name"),
             "matched_via": _field_of(event, "matched_via"),
             # Ordinal is a per-(owner, event type) source-order counter, so it
@@ -2769,6 +2811,89 @@ def find_paths(
 def _subject_matches(info: dict[str, Any], subject: str) -> bool:
     return bool(subject) and info.get("subject", "") == subject
 
+
+# Matrix 2.1/2.2's shape: an allocation size computed by multiplying (or
+# shifting) a runtime value. Only the operators that *grow* a value are read --
+# `size + 1` cannot make a small size wrap on its own, while `count * elem`
+# can, and emitting every arithmetic node in a translation unit would bury that
+# distinction in noise.
+SIZE_OPERATORS = frozenset({"*", "<<"})
+_NUMERIC_LITERAL_KINDS = frozenset({
+    "number_literal", "integer_literal", "float_literal", "char_literal",
+})
+_ARITH_WRAPPER_KINDS = frozenset({"parenthesized_expression", "cast_expression"})
+_ARITH_TYPE_KINDS = frozenset({
+    "type_descriptor", "type_identifier", "sized_type_specifier", "primitive_type",
+})
+
+
+def _unwrap_arithmetic(node: Any) -> Any:
+    """Strip parentheses and casts down to the expression that computes a value.
+
+    A cast changes the width the arithmetic happens in, which matters for the
+    defect, but it does not change *which* expression multiplies. The width is
+    not recorded here, so the cast is peeled and the fact stays about the
+    multiplication.
+    """
+    while node is not None and node.type in _ARITH_WRAPPER_KINDS:
+        inner = None
+        for child in node.named_children:
+            if child.type in _ARITH_TYPE_KINDS:
+                continue
+            inner = child
+            break
+        node = inner
+    return node
+
+
+def size_arithmetic(node: Any, source: bytes) -> list[dict[str, Any]]:
+    """The multiplications inside an allocation call's argument list.
+
+    One record per multiplication/shift, with the operands it combines and
+    whether each is a compile-time literal. A product of two literals is
+    emitted too -- a folded constant is a fact worth having, and the query is
+    what decides it cannot wrap at run time.
+    """
+    def text(item: Any) -> str:
+        return source[item.start_byte:item.end_byte].decode("utf-8", "replace").strip()
+
+    arguments = None
+    for child in node.named_children:
+        if child.type == "argument_list":
+            arguments = child
+            break
+    if arguments is None:
+        return []
+
+    records: list[dict[str, Any]] = []
+    for argument in arguments.named_children:
+        candidate = _unwrap_arithmetic(argument)
+        if candidate is None or candidate.type != "binary_expression":
+            continue
+        operator_node = candidate.child_by_field_name("operator")
+        operator = text(operator_node) if operator_node is not None else ""
+        if operator not in SIZE_OPERATORS:
+            continue
+        left = candidate.child_by_field_name("left")
+        right = candidate.child_by_field_name("right")
+        if left is None or right is None:
+            continue
+        operands = []
+        for side in (left, right):
+            bare = _unwrap_arithmetic(side) or side
+            operands.append({
+                "text": text(bare),
+                "literal": bare.type in _NUMERIC_LITERAL_KINDS,
+                "node": bare,
+            })
+        records.append({
+            "operator": operator,
+            "operands": operands,
+            "expression": text(candidate),
+            "node": candidate,
+        })
+    return records
+
 def unreleased_resources(
     edges: Iterable[Any],
     points: dict[str, dict[str, Any]],
@@ -2809,6 +2934,37 @@ def unreleased_resources(
     if adjacency is None:
         adjacency = build_adjacency(edges)
     excluded_set = frozenset(excluded)
+
+    # Index the two lookups this walk makes per acquisition, instead of scanning
+    # `points` for each one. The walk visits every acquire point, and each visit
+    # used to filter the whole point map twice -- once for the releases of that
+    # subject, once for the null checks on it. On a repo with A allocations and
+    # P points that is O(A x P) with a dict.get per element, which is what
+    # dominated a measured `resource_lifetime` run (61M lookups, 4.6M subject
+    # comparisons, 3.0s of a 3.4s query) while the graph build beside it cost
+    # 0.05s.
+    #
+    # The two indexes are keyed by the same `subject` string the per-visit scan
+    # compared with `_subject_matches`, so every blocked point and blocked edge
+    # is the same set as before -- this changes how the set is found, not what
+    # it is. `_subject_matches` treats an empty subject as "matches nothing",
+    # which the per-visit code keeps by only consulting the index when the
+    # acquire has a subject.
+    releases_by_subject: dict[str, set[str]] = {}
+    null_checks_by_subject: dict[str, list[str]] = {}
+    for pid, info in points.items():
+        event_type = info.get("event_type")
+        if event_type == release:
+            subject = info.get("subject", "")
+            if subject:
+                releases_by_subject.setdefault(subject, set()).add(pid)
+        elif (
+            event_type == "CHECK"
+            and info.get("polarity") == "true_when_null"
+            and info.get("subject", "")
+        ):
+            null_checks_by_subject.setdefault(info["subject"], []).append(pid)
+
     found: list[ControlPath] = []
     truncated = False
     for start in sorted(
@@ -2817,22 +2973,15 @@ def unreleased_resources(
         if info.get("event_type") == acquire and pid not in excluded_set
     ):
         subject = points[start].get("subject", "")
-        blocked = {
-            pid
-            for pid, info in points.items()
-            if info.get("event_type") == release and _subject_matches(info, subject)
-        } | excluded_set
+        blocked = set(excluded_set)
         blocked_edges: set[str] = set()
+        if subject:
+            blocked |= releases_by_subject.get(subject, set())
         if subject and exclude_null_guard:
-            for pid, info in points.items():
-                if (
-                    info.get("event_type") == "CHECK"
-                    and _subject_matches(info, subject)
-                    and info.get("polarity") == "true_when_null"
-                ):
-                    for edge_id, _dst, flags in adjacency.get(pid, ()):
-                        if BRANCH_TRUE in flags:
-                            blocked_edges.add(edge_id)
+            for pid in null_checks_by_subject.get(subject, ()):
+                for edge_id, _dst, flags in adjacency.get(pid, ()):
+                    if BRANCH_TRUE in flags:
+                        blocked_edges.add(edge_id)
         paths, more = find_paths(
             adjacency,
             points,

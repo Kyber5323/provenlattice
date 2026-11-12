@@ -8,7 +8,7 @@ Defect Queries phase (I2). Everything here is the level-0 event matcher data.
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
@@ -24,6 +24,11 @@ from .events import (
 )
 
 VOCABULARY_DIR = Path(__file__).with_name("vocabularies")
+# The declared lock primitives that no C library names: a repository's own
+# wrappers (`spin_lock`, `wds_lock`, ...). Merged into `cpp.toml`'s LOCK /
+# UNLOCK after it is parsed, so a repository's lock vocabulary is data a reader
+# can check rather than a branch in the extractor.
+LOCK_FILE = Path(__file__).with_name("locks.toml")
 DEFECT_PATTERN_FILE = Path(__file__).with_name("defect_patterns.toml")
 
 MATCHER_AXES = ("syntax", "calls", "qualified")
@@ -265,6 +270,73 @@ def _node_types(payload: dict, key: str, source: Path) -> frozenset[str]:
     return frozenset(value)
 
 
+@lru_cache(maxsize=None)
+def load_lock_registry() -> tuple[frozenset[str], frozenset[str]]:
+    """The declared lock primitives: (acquire names, release names).
+
+    A missing file is an empty registry, not an error -- the built-in vocabulary
+    carries the standard spellings on its own, and a repository with no declared
+    entries is a legitimate state (the same rule `contracts.toml` follows).
+
+    Every entry is an *exact* final identifier. There is no wildcard family and
+    no substring test: `_release()` on an ordinary object is not a lock, and a
+    match that cannot tell the two apart would mint LOCK points no reader could
+    refute, poisoning every query downstream.
+    """
+    if not LOCK_FILE.is_file():
+        return frozenset(), frozenset()
+    payload = tomllib.loads(LOCK_FILE.read_text(encoding="utf-8"))
+    acquire = _registry_names(payload.get("acquire"), "acquire")
+    release = _registry_names(payload.get("release"), "release")
+    both = acquire & release
+    if both:
+        raise VocabularyError(
+            f"{LOCK_FILE.name}: {', '.join(sorted(both))} listed as both acquire and "
+            "release; a callee that does both cannot be assigned one event"
+        )
+    return acquire, release
+
+
+def _registry_names(section: object, label: str) -> frozenset[str]:
+    if section is None:
+        return frozenset()
+    if not isinstance(section, dict):
+        raise VocabularyError(f"{LOCK_FILE.name}: [{label}] must be a table")
+    unknown = sorted(set(section) - {"calls"})
+    if unknown:
+        raise VocabularyError(
+            f"{LOCK_FILE.name}: [{label}] has unknown keys {', '.join(unknown)}; "
+            "expected calls"
+        )
+    value = section.get("calls", [])
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise VocabularyError(f"{LOCK_FILE.name}: [{label}].calls must be a list of strings")
+    if any(not item.strip() for item in value):
+        raise VocabularyError(f"{LOCK_FILE.name}: [{label}].calls contains a blank entry")
+    return frozenset(value)
+
+
+def _merge_lock_registry(events: dict[str, EventSpec], language: str) -> None:
+    """Union the declared lock primitives into this language's LOCK / UNLOCK.
+
+    Only the C/C++ family reads the registry: it is written in C spelling, and
+    an entry landing in a language whose grammar names locks differently would
+    be a guess wearing the same clothes as a fact.
+
+    A spec that is *absent* is left alone rather than given matchers -- the
+    vocabulary's own rule is that absent means "this language does not have the
+    event", and an override may not quietly overturn it.
+    """
+    if language != "cpp":
+        return
+    acquire, release = load_lock_registry()
+    for event_type, extra in (("LOCK", acquire), ("UNLOCK", release)):
+        spec = events.get(event_type)
+        if spec is None or spec.is_absent() or not extra:
+            continue
+        events[event_type] = replace(spec, calls=spec.calls | extra)
+
+
 def _parse(path: Path) -> Vocabulary:
     try:
         payload = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -296,7 +368,6 @@ def _parse(path: Path) -> Vocabulary:
         raise VocabularyError(f"{path.name}: at least one [events.*] table is required")
 
     events: dict[str, EventSpec] = {}
-    claimants: dict[str, list[str]] = {}
     for event_type, body in sorted(raw_events.items()):
         if event_type not in KNOWN_EVENTS:
             raise VocabularyError(
@@ -355,6 +426,14 @@ def _parse(path: Path) -> Vocabulary:
                 f"remove the table, or state why with {ABSENCE_KEY} = \"...\""
             )
         events[event_type] = spec
+
+    # Declared lock primitives join the vocabulary before the ambiguity table is
+    # computed, so a name this file adds is subject to the same clash check as
+    # every built-in one (a repository spelling that also names a thread join
+    # must be recorded as ambiguous, not silently given to LOCK).
+    _merge_lock_registry(events, language)
+    claimants: dict[str, list[str]] = {}
+    for event_type, spec in sorted(events.items()):
         for word in spec.keywords():
             claimants.setdefault(word, []).append(event_type)
 

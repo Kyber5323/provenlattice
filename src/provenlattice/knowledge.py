@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+import tomllib
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -169,12 +170,61 @@ def _relation(source_kind: str, target: dict) -> str:
     return "DOCUMENTS"
 
 
+# Where documents are looked for. The default is the layout the design assumed:
+# a top-level `spec/`, `docs/` or `doc/`. It is a guess about a repository, and a
+# guess that misses produces a knowledge layer with zero documents -- which is
+# what a real checkout with `src/…/docs/` or `doc-src/` produced. The list is
+# therefore configurable, and the configured list *replaces* the default one
+# rather than extending it: a repository that says where its documents are has
+# told us, and mixing the two would resurrect the directory that missed.
+DEFAULT_DOC_DIRS = ("spec", "docs", "doc")
+KNOWLEDGE_CONFIG = Path(".provenlattice") / "knowledge.toml"
+
+
+def _document_roots(root: Path) -> tuple[Path, ...]:
+    """The directories to scan for `*.md`, from config when the repo has one.
+
+    Every configured path must be repository-relative: an absolute path or one
+    that escapes the root with `..` is a mistake in the config, and silently
+    reading outside the repository would put documents in the graph that no
+    reader could locate from the repository they asked about.
+    """
+    config = root / KNOWLEDGE_CONFIG
+    names = DEFAULT_DOC_DIRS
+    if config.is_file():
+        payload = tomllib.loads(config.read_text(encoding="utf-8"))
+        section = payload.get("documents", {})
+        if not isinstance(section, dict):
+            raise ValueError(f"{KNOWLEDGE_CONFIG}: [documents] must be a table")
+        unknown = sorted(set(section) - {"paths"})
+        if unknown:
+            raise ValueError(
+                f"{KNOWLEDGE_CONFIG}: [documents] has unknown keys {', '.join(unknown)}; "
+                "expected paths")
+        paths = section.get("paths", [])
+        if not isinstance(paths, list) or any(not isinstance(item, str) for item in paths):
+            raise ValueError(f"{KNOWLEDGE_CONFIG}: [documents].paths must be a list of strings")
+        if any(not item.strip() for item in paths):
+            raise ValueError(f"{KNOWLEDGE_CONFIG}: [documents].paths contains a blank entry")
+        names = tuple(paths) if paths else DEFAULT_DOC_DIRS
+
+    roots: list[Path] = []
+    for name in names:
+        candidate = (root / name).resolve()
+        if candidate != root and root not in candidate.parents:
+            raise ValueError(
+                f"{KNOWLEDGE_CONFIG}: document path {name!r} is outside the repository")
+        if candidate.is_dir():
+            roots.append(candidate)
+    return tuple(roots)
+
+
 def index_knowledge(repo: str | Path, database: str | Path, *, incremental: bool = True) -> dict:
     started = time.perf_counter()
     root = Path(repo).resolve()
     repo_id = repository_id(root)
-    documents = sorted({path for folder in (root / "spec", root / "docs", root / "doc")
-                        if folder.exists() for path in folder.rglob("*.md")})
+    document_roots = _document_roots(root)
+    documents = sorted({path for folder in document_roots for path in folder.rglob("*.md")})
     with SQLiteStorage(database) as storage:
         repository = storage.repository()
         if not repository:
@@ -418,6 +468,12 @@ def index_knowledge(repo: str | Path, database: str | Path, *, incremental: bool
                         "cross_layer_edges": storage.connection.execute(
                             "SELECT COUNT(*) FROM edges WHERE json_extract(metadata,'$.layer')='knowledge' AND type!='CONTAINS'"
                         ).fetchone()[0],
-                        "knowledge_index_time_ms": (time.perf_counter()-started)*1000})
+                        "knowledge_index_time_ms": (time.perf_counter()-started)*1000,
+                        # What was scanned, so "zero documents" is diagnosable:
+                        # an empty list means the repository's documents live
+                        # somewhere the default (or the config) does not name.
+                        "document_roots": [path.relative_to(root).as_posix() or "."
+                                           for path in document_roots],
+                        "documents_found": len(documents)})
         storage.connection.commit()
         return metrics

@@ -55,7 +55,9 @@ class ExpandCategoriesTests(unittest.TestCase):
         self.assertEqual(self._query_names("reliability"), ["error_handling"])
 
     def test_all(self) -> None:
-        self.assertEqual(len(_expand_categories("all")), 9)
+        # Ten since matrix 2.1's `integer_overflow` joined the family list; the
+        # count is the length of QUERY_NAMES, so it moves with every new query.
+        self.assertEqual(len(_expand_categories("all")), 10)
 
     def test_multi_select_splits_resource_lifetime(self) -> None:
         specs = _expand_categories("memory,concurrency")

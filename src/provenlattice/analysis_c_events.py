@@ -113,6 +113,13 @@ def _node_by_span(root) -> dict:
     return index
 
 
+# Matrix 2.1/2.2's shape -- the multiplication inside an allocation's size
+# argument -- is extracted by the sparse CFG walker, which is the feature the
+# defect queries read. It lives there (`sparsecfg.size_arithmetic`) rather than
+# here because an ARITH point is a graph fact about a statement, and the events
+# layer publishes vocabulary hits, not statement points.
+
+
 def _single_declarator(node) -> object | None:
     """The declaration's one declarator, or None when identity is unclear.
 
@@ -278,6 +285,10 @@ def analyze_c_events_scope(
             raise RuntimeError("repository is not indexed; run `provenlattice index` first")
         repo_id = repository["repo_id"]
         store = AnalysisStore(storage)
+        # One transaction for the whole file loop instead of one commit per
+        # file: the storage scope commits on exit, and a failure rolls the scope
+        # back. See AnalysisStore.defer_commit for the measurement.
+        store.defer_commit()
         for source in scoped:
             if Path(source.relative_path).suffix.lower() not in EVENTS_SUFFIXES:
                 skipped_unsupported.append(source.relative_path)

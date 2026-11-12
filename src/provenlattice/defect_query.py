@@ -138,12 +138,19 @@ def _run_query_specs(
     contract_table: object,
     signatures: dict,
     race_facts: Mapping[str, Any] | None = None,
+    points: object | None = None,
+    adjacency: object | None = None,
 ) -> tuple[list, list, bool, dict, dict]:
     """Run ``(query, kwargs)`` specs and merge their results.
 
     Shared by the ``all`` and ``category`` paths; the single-query path keeps
     its own shape because it exposes one query's coverage block verbatim rather
     than the additive merge.
+
+    ``points`` / ``adjacency`` are the caller's published graph, when it has
+    one: every spec reads the same ``(events, edges)``, so building the pair
+    once here saves one `materialize_points` and one `build_adjacency` per
+    family.
     """
     results = []
     truncated = False
@@ -156,6 +163,7 @@ def _run_query_specs(
             callees=contract_table, signatures=signatures,
             contracts=contract_table,
             race_facts=race_facts,
+            points=points, adjacency=adjacency,
             **extra,
         )
         results.append(one)
@@ -261,6 +269,76 @@ def _apply_confidence_gate(
     for candidate in candidates:
         (kept if candidate.confidence >= gate else suppressed).append(candidate)
     return kept, suppressed
+
+
+def _select_window(
+    candidates: list,
+    *,
+    limit: int,
+    gate: float | None,
+    suppress_below: bool,
+) -> tuple[list, list, dict]:
+    """Rank, gate, allocate a per-family floor, then cut — once, in that order.
+
+    The window the caller sees is decided here and nowhere else. Three
+    properties the earlier pipeline did not have, each of which the benchmark
+    surfaced as a distinct symptom:
+
+    * the cut ranks on ``Candidate.rank_key()`` (grade, confidence, resolution),
+      not on ``sort_key`` (matrix key, hashed anchor). Before this, a top-20
+      window was 100% ``1.1`` because ``'1.1'`` sorts first, and within a family
+      the survivors were a hash sample — the well-evidenced candidates sat
+      hundreds of ranks deeper in the population;
+    * the confidence gate runs *before* the cut, so a suppressed candidate never
+      occupies a slot a surviving one should have had;
+    * every family that has candidates receives a floor of ``limit // families``
+      slots before rank order fills the remainder, so one large family cannot
+      crowd the whole window.
+
+    ``limit <= 0`` yields an empty window rather than an exception: the caller
+    asked for nothing, and the population is still reported.
+    """
+    ordered = sorted(candidates, key=lambda candidate: candidate.rank_key())
+    kept, suppressed = _apply_confidence_gate(
+        ordered, gate=gate, suppress_below=suppress_below)
+
+    families = sorted({candidate.defect_key for candidate in kept})
+    floor = max(1, limit // len(families)) if families and limit > 0 else 0
+
+    if limit <= 0:
+        selected: list = []
+    else:
+        picked: list[int] = []
+        counts: dict[str, int] = {}
+        for index, candidate in enumerate(kept):
+            if counts.get(candidate.defect_key, 0) >= floor:
+                continue
+            picked.append(index)
+            counts[candidate.defect_key] = counts.get(candidate.defect_key, 0) + 1
+            if len(picked) >= limit:
+                break
+        if len(picked) < limit:
+            already = set(picked)
+            for index in range(len(kept)):
+                if index in already:
+                    continue
+                picked.append(index)
+                if len(picked) >= limit:
+                    break
+        # Rank order is preserved inside the window: the floor decides *who*
+        # gets in, never *where* they appear.
+        selected = [kept[index] for index in sorted(picked)]
+
+    return selected, suppressed, {
+        "strategy": "rank_key(grade>confidence>resolution>direct) then per-family floor",
+        "limit": limit,
+        "population": len(ordered),
+        "after_gate": len(kept),
+        "suppressed": len(suppressed),
+        "family_floor": floor,
+        "family_count": len(families),
+        "window_truncated": len(kept) > limit if limit > 0 else False,
+    }
 
 
 def _gate_mechanism_facts(
@@ -542,26 +620,39 @@ def query_defect_candidates(
             declared=contracts.load_declared(),
         )
 
+        # Build the published graph once and hand it to every family. `defect.run`
+        # already accepts a caller-supplied pair (that is what lets a one-query
+        # caller skip the work), but this service was passing neither, so each
+        # family rebuilt `materialize_points` and `build_adjacency` over the same
+        # `(events, edges)` -- eight redundant passes per `all` query, and `all`
+        # is the query every evaluation runs first.
+        from .sparsecfg import build_adjacency, materialize_points  # noqa: PLC0415
+
+        shared_points = materialize_points(events, control_edges)
+        shared_adjacency = build_adjacency(control_edges)
+
         query = defect_type
         if category:
             specs = category_specs or []
-            _, candidates, truncated, coverage, mechanism_facts = _run_query_specs(
+            _, merged, truncated, coverage, mechanism_facts = _run_query_specs(
                 specs, events, control_edges,
                 subject=subject, max_hops=max_hops, max_paths=max_paths,
                 max_candidates=max_candidates, names=names,
                 contract_table=contract_table, signatures=signatures,
                 race_facts=race_facts,
+                points=shared_points, adjacency=shared_adjacency,
             )
             query = "category " + category + " (" + ", ".join(
                 dict.fromkeys(name for name, _ in specs)) + ")"
         elif defect_type in ("all", ""):
             specs = [(query_name, {}) for query_name in SUPPORTED_DEFECT_QUERIES]
-            _, candidates, truncated, coverage, mechanism_facts = _run_query_specs(
+            _, merged, truncated, coverage, mechanism_facts = _run_query_specs(
                 specs, events, control_edges,
                 subject=subject, max_hops=max_hops, max_paths=max_paths,
                 max_candidates=max_candidates, names=names,
                 contract_table=contract_table, signatures=signatures,
                 race_facts=race_facts,
+                points=shared_points, adjacency=shared_adjacency,
             )
             query = "all (" + ", ".join(SUPPORTED_DEFECT_QUERIES) + ")"
         else:
@@ -576,7 +667,7 @@ def query_defect_candidates(
             except ValueError as error:
                 raise AnalysisRequestError(
                     "unknown_defect_query", str(error)) from error
-            candidates = list(result.candidates)
+            merged = list(result.candidates)
             truncated = result.truncated
             coverage = dict(result.coverage)
             # Same additive block as the "all" path, but only the one query that
@@ -587,12 +678,17 @@ def query_defect_candidates(
                 else {}
             )
 
-        # SUB-11 / R11: post-filter at the band cut. Determinism and order are
-        # preserved -- ``_apply_confidence_gate`` only partitions. Applied once,
-        # to the flattened candidates and to the mechanism block, so the two
-        # outputs never disagree about what survived.
-        candidates, suppressed = _apply_confidence_gate(
-            candidates, gate=confidence_gate, suppress_below=suppress_below)
+        # P0: rank, gate, allocate a per-family floor, cut -- once, in that
+        # order (see ``_select_window``). The gate runs before the cut so a
+        # suppressed candidate never holds a slot; the quota stops one large
+        # family from owning the window; the limit is *global*, so
+        # ``max_candidates`` finally means what its name says instead of
+        # "per family, ×8 families".
+        population_by_family = defect._count_by_key(merged)
+        candidates, suppressed, window = _select_window(
+            merged, limit=max_candidates, gate=confidence_gate,
+            suppress_below=suppress_below)
+        truncated = truncated or window["window_truncated"]
         mechanism_facts = _gate_mechanism_facts(
             mechanism_facts, gate=confidence_gate, suppress_below=suppress_below)
 
@@ -641,6 +737,12 @@ def query_defect_candidates(
         "confidence_gate": confidence_gate,
         "suppressed": [candidate.to_dict() for candidate in suppressed],
         "suppressed_count": len(suppressed),
+        # P0 audit surface: which families are *in* the window, which were in
+        # the population, and how the cut was made. A window that silently
+        # collapses to one family cannot be debugged from `coverage` alone.
+        "family_distribution": defect._count_by_key(candidates),
+        "family_population": population_by_family,
+        "ranking": window,
         "coverage": coverage,
         "truncated": truncated,
         "grade": CAPABILITY_GRADE,

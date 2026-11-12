@@ -468,7 +468,7 @@ class ScenarioWalkerByteSpanTests(unittest.TestCase):
         # FE-5 (THREAD_JOIN handle annotations), and 3->4 for SUB-09 F1
         # (indirect field-callee READ). Each advance invalidates the
         # sparse_cfg cache so the new facts are rematerialized.
-        self.assertEqual(ANALYZER_VERSIONS["sparse_cfg:cpp"], 4)
+        self.assertEqual(ANALYZER_VERSIONS["sparse_cfg:cpp"], 5)
 
     def test_sparse_cfg_version_bump_restalifies_cache(self) -> None:
         # Owner Decision V1 (sparse_cfg:cpp 1->2): the version genuinely

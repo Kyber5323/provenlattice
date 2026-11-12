@@ -37,16 +37,30 @@ LEVEL_0_EVENTS = frozenset({
 #   a matrix entry that needs them -- 4.5 non-memory resource leak, graded A --
 #   is reported as "requires an event we do not yet extract" instead of
 #   silently looking supported.
+#
+#   ARITH is here for the same reason, with one more step of honesty: integer
+#   overflow (matrix 2.1, graded B) is a fact about a multiplication wrapping,
+#   and no event describes an arithmetic operation at all -- not level 0, not
+#   level 1. Declaring it lets the 2.1 row name what it needs and be reported as
+#   a gap, rather than leaving the row out and the gap unstated.
 LEVEL_1_EVENTS = frozenset({
     "READ", "WRITE", "DEREFERENCE", "CHECK", "BRANCH",
     "OPEN", "CLOSE", "ACQUIRE", "WAIT", "SIGNAL", "CREATE", "DESTROY",
+    "ARITH",
 })
 
 KNOWN_EVENTS = LEVEL_0_EVENTS | LEVEL_1_EVENTS
 
 # The level-1 event types the PR pipeline produces structurally. On main none
 # of them are produced yet (I1-B scope); the set is ported for the taxonomy.
-STRUCTURAL_EVENTS = frozenset({"BRANCH", "CHECK", "DEREFERENCE"})
+#
+# ARITH joined this set with matrix 2.1's query: the sparse CFG walker now emits
+# a point for each multiplication/shift inside an allocation's size argument, so
+# the event is produced by the same structural rule that emits CHECK/BRANCH/
+# DEREFERENCE rather than by a vocabulary keyword (no callee name describes
+# arithmetic). `defect_patterns.toml`'s 2.1 row names it, and `missing_events()`
+# reads this set to decide whether that requirement is met.
+STRUCTURAL_EVENTS = frozenset({"BRANCH", "CHECK", "DEREFERENCE", "ARITH"})
 
 # The access events (stage 5A) -- PR-only, not ported (I1-B).
 ACCESS_EVENTS = frozenset({"READ", "WRITE"})

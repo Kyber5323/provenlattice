@@ -60,7 +60,12 @@ class DocumentRootsTests(unittest.TestCase):
         self.assertEqual([path.name for path in roots], ["userdocs"])
 
     def test_absolute_path_is_rejected(self) -> None:
-        write(self.root, str(KNOWLEDGE_CONFIG), '[documents]\npaths = ["C:/elsewhere"]\n')
+        # A drive letter is not an absolute path on POSIX, so the assertion must
+        # use the platform's own spelling rather than hard-coding one.
+        outside = str(Path(self.root).parent.resolve())
+        self.assertTrue(Path(outside).is_absolute())
+        write(self.root, str(KNOWLEDGE_CONFIG),
+              f'[documents]\npaths = ["{outside}"]\n')
         with self.assertRaises(ValueError):
             _document_roots(self.root)
 

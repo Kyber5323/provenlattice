@@ -190,6 +190,12 @@ def _document_roots(root: Path) -> tuple[Path, ...]:
     reader could locate from the repository they asked about.
     """
     config = root / KNOWLEDGE_CONFIG
+    # Resolve the root here rather than trusting the caller. The containment
+    # check below compares against a `.resolve()`d candidate, and on Windows a
+    # path that went through a temporary directory arrives in its 8.3 short form
+    # (`RUNNER~1`); the long and short spellings of the same directory are not
+    # equal, so every configured path would look like it escaped the repository.
+    root = Path(root).resolve()
     names = DEFAULT_DOC_DIRS
     if config.is_file():
         payload = tomllib.loads(config.read_text(encoding="utf-8"))

@@ -3177,10 +3177,19 @@ def _lifecycle_declines(
     """The lifecycle reason to decline a pair, or None.
 
     PAIR-01 (pre-spawn): an end whose method spawns the other end's entry, and
-    whose access lies before that spawn, cannot race the not-yet-started worker.
-    PAIR-03 (post-join): an end whose method joins, and whose access lies after
-    every join in that method, cannot race a worker that has already finished.
-    Returns ``"pre_spawn"`` or ``"post_lifecycle"`` for the first such end.
+    whose *every* access lies before that spawn, cannot race the not-yet-started
+    worker. PAIR-03 (post-join): an end whose method joins, and whose *every*
+    access lies after every join in that method, cannot race a worker that has
+    already finished.
+
+    The judgment is per-*access-set* and conservative: a pair is decline only
+    when the whole side is provably not concurrent. A side that touches the
+    subject both before and after a spawn/join is NOT provably non-concurrent
+    (UNCERTAIN => KEEP), so ``min``/``max`` are the *all* quantifiers, not the
+    existence quantifiers -- PAIR-01 asks ``last < min(spawn)`` (every access
+    precedes the earliest spawn) and PAIR-03 asks ``first > max(join)`` (every
+    access follows the latest join). Returns ``"pre_spawn"`` or
+    ``"post_lifecycle"`` for the first such end.
     """
     spawns_of = spawn_index.get("spawns_of") or {}
     joins_of = spawn_index.get("joins_of") or {}
@@ -3200,10 +3209,14 @@ def _lifecycle_declines(
                 byte for byte, entry in spawns_of.get(owner, ())
                 if entry == other_short
             ]
-            if spawn_bytes and first_access < min(spawn_bytes):
+            # All accesses precede the earliest spawn -> nothing runs after the
+            # worker starts, so the whole side is provably pre-spawn.
+            if spawn_bytes and last_access < min(spawn_bytes):
                 return "pre_spawn"
         join_bytes = joins_of.get(owner, ())
-        if join_bytes and last_access > max(join_bytes):
+        # All accesses follow the latest join -> nothing runs while the worker
+        # is alive, so the whole side is provably post-join.
+        if join_bytes and first_access > max(join_bytes):
             return "post_lifecycle"
     return None
 

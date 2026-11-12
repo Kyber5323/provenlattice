@@ -163,6 +163,46 @@ void *incr(void *arg) { shared++; return NULL; }
 void *read(void *arg) { return (void *)(long)shared; }
 """
 
+# 8. PAIR-01 counter-example: a side that touches the subject both before AND
+# after the spawn is not provably pre-spawn, so the pair must stay (the post-
+# spawn write genuinely races the worker). Tests the `last < min(spawn)` all-
+# quantifier -- the old `first < min(spawn)` dropped this pair, a false negative.
+MIXED_PRE_SPAWN = r"""
+#include <pthread.h>
+int shared = 0;
+void *worker(void *arg) {
+    shared = 1;
+    return NULL;
+}
+void starter(void) {
+    pthread_t t;
+    shared = 2;
+    pthread_create(&t, NULL, worker, NULL);
+    shared = 3;
+    pthread_join(t, NULL);
+}
+"""
+
+# 9. PAIR-03 counter-example: a side that touches the subject both before AND
+# after the join is not provably post-join, so the pair must stay (the pre-join
+# write genuinely races the worker). Tests the `first > max(join)` all-
+# quantifier -- the old `last > max(join)` dropped this pair, a false negative.
+MIXED_POST_JOIN = r"""
+#include <pthread.h>
+int shared = 0;
+void *worker(void *arg) {
+    shared = 1;
+    return NULL;
+}
+void starter(void) {
+    pthread_t t;
+    pthread_create(&t, NULL, worker, NULL);
+    shared = 2;
+    pthread_join(t, NULL);
+    shared = 3;
+}
+"""
+
 
 class PL171P0DetectorTests(unittest.TestCase):
     """GATE-1 unit matrix for the three P0 detector rules."""
@@ -190,6 +230,14 @@ class PL171P0DetectorTests(unittest.TestCase):
 
     def test_07_no_lock_race_kept(self):
         races = _races(NO_LOCK)
+        self.assertEqual(len(races), 1)
+
+    def test_08_mixed_pre_spawn_access_kept(self):
+        races = _races(MIXED_PRE_SPAWN)
+        self.assertEqual(len(races), 1)
+
+    def test_09_mixed_post_join_access_kept(self):
+        races = _races(MIXED_POST_JOIN)
         self.assertEqual(len(races), 1)
 
 
